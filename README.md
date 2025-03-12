@@ -63,11 +63,165 @@ ensemble_classifier = EnsembleMeta(classifier)
 MotherNet uses the same preprocessing as the TabPFN work it builds upon, but we found that using one-hot-encoding during inference improves accuracy.
 Scaling of features is handled internally.
 
-### Model Training
-Full model training code is provided. Training ``MotherNet`` is possible with ``python fit_model.py mothernet``. A GPU ID can be specified with ``-g GPU_ID``. See the ``python fit_model.py mothernet -h`` and ``python fit_model.py -h`` for more options.
-The results in the paper correspond to ``python fit_model.py mothernet -L 2``, though default values might change and no longer reflect the values in the paper.
-Data-parallel Multi-GPU training is in principal supported using ``torchrun``.
-By default, experiments are tracked using MLFlow if the ``MLFLOW_HOSTNAME`` environment variable is set. 
+## Model Training
+
+This repository provides extensive functionality for training various tabular in-context learning models. The training process is managed through the `fit_model.py` script, which offers a wide range of configuration options.
+
+### Training Framework
+
+Training models in this repository follows a consistent pattern:
+
+```bash
+python -m ticl.fit_model <model_type> [options]
+```
+
+Where `<model_type>` is the model architecture you want to train. The framework supports multiple model types:
+
+- `mothernet` - MotherNet hypernetwork foundational model
+- `tabflex` - TabFlex model with linear attention mechanism
+- `additive` - Additive MotherNet model
+- `baam` - Bi-attention additive MotherNet model
+- `perceiver` - Perceiver variant of MotherNet
+- `tabpfn` - Original TabPFN model
+- `batabpfn` - Bi-attention TabPFN model
+- `la_mothernet` - Linear attention MotherNet variant
+
+### Common Training Options
+
+All models share common configuration options:
+
+#### General Options
+- `-g, --gpu-id` - Specify GPU ID to use for training
+- `-C, --use-cpu` - Use CPU instead of GPU for training
+
+#### Optimizer Options
+- `-E, --epochs` - Number of training epochs
+- `-l, --learning-rate` - Maximum learning rate
+- `-k, --aggregate_k_gradients` - Number of steps to aggregate gradient over
+- `-A, --adaptive-batch-size` - Whether to progressively increase effective batch size
+- `-w, --weight-decay` - Weight decay for AdamW optimizer
+- `-Q, --learning-rate-schedule` - Learning rate schedule (cosine, constant, exponential)
+- `-U, --warmup-epochs` - Number of epochs to warm up learning rate
+- `-t, --train-mixed-precision` - Whether to train with mixed precision
+
+#### Dataloader Options
+- `-b, --batch-size` - Physical batch size
+- `-n, --num-steps` - Number of steps per epoch
+- `--min-eval-pos` - Minimum evaluation position
+- `--random-n-samples` - Whether to sample n_samples randomly
+- `--n-test-samples` - Number of test samples
+
+#### Transformer/Attention Options
+- `-e, --emsize` - Embedding size
+- `-N, --nlayers` - Number of transformer/attention layers
+- `--init-method` - Weight initialization method
+- `--y-encoder` - Encoder for labels (linear, onehot, or None)
+- `--classification-task` - Whether to use classification or regression
+
+#### Prior and Data Generation
+- `--num-features` - Maximum number of features in prior
+- `--n-samples` - Maximum number of samples in prior
+- `--prior-type` - Prior type to use (prior_bag, boolean_only, bag_boolean, step_function)
+
+#### Orchestration and Logging
+- `--use-mlflow` - Enable MLFlow tracking (requires MLFLOW_HOSTNAME environment variable)
+- `--use-wandb` - Enable Weights & Biases tracking
+- `--save-every` - Save model every N epochs
+- `-f, --warm-start-from` - Warm start from a checkpoint file
+- `-c, --continue-run` - Continue from a previous run
+
+### Model-Specific Options
+
+Different model types have additional specific configuration options:
+
+#### MotherNet Options (`mothernet`, `la_mothernet`)
+- `-d, --decoder-embed-dim` - Decoder embedding size
+- `-H, --decoder-hidden-size` - Decoder hidden size
+- `--decoder-activation` - Decoder activation function
+- `-D, --decoder-type` - Decoder type (output_attention, special_token, class_average, average)
+- `-T, --decoder-hidden-layers` - Number of hidden layers in decoder MLP
+- `-P, --predicted-hidden-layer-size` - Size of hidden layers in predicted network
+- `-L, --predicted-hidden-layers` - Number of predicted hidden layers
+- `--predicted-activation` - Activation in predicted network
+- `-r, --low-rank-weights` - Whether to use low-rank weights in mothernet
+- `-W, --weight-embedding-rank` - Rank of weights in predicted network
+
+#### Additive Model Options (`additive`, `baam`)
+- `--input-bin-embedding` - Bin embedding type (linear, non-linear, none)
+- `--bin-embedding-rank` - Rank of bin embedding
+- `--fourier-features` - Number of Fourier features to add per feature
+- `--n-bins` - Number of bins
+- `--nan-bin` - Whether to use the last bin to denote a nan value
+- `--categorical-embedding` - Whether to embed categorical features using a separate embedding
+- `--marginal-residual` - Whether to learn the residual of the marginals
+
+#### TabFlex Options
+- `--model` - Which linear attention model to use (linear_attention, fla)
+- `--feature-map` - Feature map to use with FLA (identity_for_real, elu, hedgehog, hedgehog_shared)
+- `--norm-output` - Whether to normalize the output of the model
+- `--causal-mask` - Whether to use causal attention
+
+### Training Examples
+
+Here are examples for training different model types:
+
+#### Training MotherNet
+
+Basic training with default parameters:
+```bash
+python -m ticl.fit_model mothernet
+```
+
+Training with custom parameters:
+```bash
+python -m ticl.fit_model mothernet -g 0 -E 2000 -l 0.0001 -b 16 -L 2 -P 256
+```
+
+The settings used in the MotherNet paper:
+```bash
+python -m ticl.fit_model mothernet -L 2
+```
+
+#### Training TabFlex
+
+Basic training:
+```bash
+python -m ticl.fit_model tabflex
+```
+
+With custom parameters:
+```bash
+python -m ticl.fit_model tabflex -g 0 -E 3000 -l 0.00005 -b 16 --model linear_attention
+```
+
+#### Training Additive Model
+
+```bash
+python -m ticl.fit_model additive -g 0 -E 2000 -n-bins 64 --categorical-embedding True
+```
+
+### Multi-GPU Training
+
+Data-parallel multi-GPU training is supported using `torchrun`:
+
+```bash
+torchrun --nproc_per_node=<num_gpus> -m ticl.fit_model <model_type> [options]
+```
+
+### Experiment Tracking
+
+By default, experiments are tracked using MLFlow if the `MLFLOW_HOSTNAME` environment variable is set:
+
+```bash
+export MLFLOW_HOSTNAME=localhost
+python -m ticl.fit_model mothernet --use-mlflow
+```
+
+Alternatively, you can use Weights & Biases for tracking:
+
+```bash
+python -m ticl.fit_model mothernet --use-wandb
+```
 
 ## Papers
 This work is described in [MotherNet: A Foundational Hypernetwork for Tabular Classification](https://arxiv.org/pdf/2312.08598).
