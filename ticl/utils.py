@@ -9,14 +9,19 @@ import mlflow
 import wandb
 import numpy as np
 import torch, time
+from contextlib import nullcontext
+import pkg_resources
 
 from pathlib import Path
 from torch import nn
+from torch.amp import autocast
 from torch.optim.lr_scheduler import LRScheduler
 from torch.optim.optimizer import Optimizer
 from ticl.model_configs import get_model_default_config
 from ticl.config_utils import flatten_dict
 import itertools
+
+IGNORE_INDEX = -100
 
 class DownloadProgressBar(tqdm):
     def update_to(self, b=1, bsize=1, tsize=None):
@@ -52,9 +57,19 @@ class SeqBN(nn.Module):
         flat_x = self.bn(flat_x)
         return flat_x.view(*x.shape)
 
+def get_default_device():
+    device = 'cpu'
+    if torch.cuda.is_available():
+        device = 'cuda'
+    elif hasattr(torch, 'xpu') and torch.xpu.is_available():
+        device = 'xpu'  # ROCm
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        device = 'mps'  # Apple Silicon
+    else:
+        device = 'cpu'
+    return device
 
-default_device = 'cuda:0' if torch.cuda.is_available() else 'cpu:0'
-
+default_device = get_default_device()
 
 def get_nan_value(set_value_to_nan=0.0):
     if random.random() < set_value_to_nan:
@@ -343,7 +358,20 @@ class ReduceLROnSpike:
 
 
 def init_device(gpu_id, use_cpu):
-    # Single GPU training, get GPU ID from command line
+    """
+    Initialize the appropriate device for training based on availability and user preferences.
+    Supports CUDA, MPS (Apple Silicon), ROCm, and CPU backends.
+    
+    Args:
+        gpu_id: Specific GPU ID to use, or None for auto-selection
+        use_cpu: Force CPU usage regardless of GPU availability
+        
+    Returns:
+        device: Device string for PyTorch
+        rank: Process rank (0 for single process)
+        num_gpus: Number of available GPUs
+    """
+    # Check for distributed training setup
     if 'LOCAL_RANK' in os.environ:
         # launched with torch.distributed.launch
         rank = int(os.environ["LOCAL_RANK"])
@@ -354,13 +382,54 @@ def init_device(gpu_id, use_cpu):
         rank = 0
         num_gpus = 1
 
-    device = "cuda"
-    if gpu_id is not None:
-        if use_cpu:
-            raise ValueError("Can't use cpu and gpu at the same time")
-        device = f'cuda:{gpu_id}'
-    elif use_cpu:
-        device = 'cpu'
+    # Force CPU if requested
+    if use_cpu:
+        print("Using CPU for training (forced via use_cpu flag)")
+        return 'cpu', rank, 0
+    
+    # Detect available backends
+    cuda_available = torch.cuda.is_available()
+    mps_available = hasattr(torch, 'mps') and torch.backends.mps.is_available()
+    rocm_available = cuda_available and torch.version.hip is not None
+    
+    # Determine which backend to use
+    if cuda_available:
+        if rocm_available:
+            # ROCm uses the CUDA API but is actually AMD GPUs
+            backend = "rocm"
+            device_prefix = "cuda"  # ROCm still uses cuda prefix in PyTorch
+            num_gpus = torch.cuda.device_count()
+            print(f"Using ROCm backend with {num_gpus} AMD GPU(s)")
+        else:
+            # Regular NVIDIA CUDA
+            backend = "cuda"
+            device_prefix = "cuda"
+            num_gpus = torch.cuda.device_count()
+            print(f"Using CUDA backend with {num_gpus} NVIDIA GPU(s)")
+            
+        # Select specific GPU if requested
+        if gpu_id is not None:
+            if gpu_id >= num_gpus:
+                raise ValueError(f"Requested GPU ID {gpu_id} but only {num_gpus} GPUs are available")
+            device = f'{device_prefix}:{gpu_id}'
+            print(f"Using GPU {gpu_id}: {torch.cuda.get_device_name(gpu_id)}")
+        else:
+            device = device_prefix
+            
+    elif mps_available:
+        # Apple Silicon (M1/M2/M3) GPU
+        backend = "mps"
+        device = "mps"
+        num_gpus = 1
+        print("Using MPS backend for Apple Silicon GPU")
+        
+    else:
+        # Fall back to CPU
+        backend = "cpu"
+        device = "cpu"
+        num_gpus = 0
+        print("No GPU available, falling back to CPU")
+    
     return device, rank, num_gpus
 
 
@@ -572,6 +641,18 @@ def get_init_method(init_method):
 
 
 def validate_model(model, config):
+    """
+    Validate model performance on benchmark datasets.
+    Supports all backends (CUDA, MPS, ROCm, CPU).
+    
+    Args:
+        model: Model to validate
+        config: Configuration dictionary
+        
+    Returns:
+        mean_score: Mean metric score across all datasets
+        per_dataset_scores: Dictionary of scores by dataset
+    """
     from ticl.datasets import load_openml_list, open_cc_valid_dids, open_cc_valid_dids_regression, open_cc_large_dids, new_valid_dids
 
     from ticl.models.gamformer import GAMformer
@@ -586,7 +667,10 @@ def validate_model(model, config):
     from ticl.evaluation.tabular_evaluation import eval_on_datasets
     from ticl.evaluation import tabular_metrics
     from uuid import uuid4
-
+    
+    print(f"Starting validation on device: {config['device']}")
+    
+    # Determine attention type from config
     if 'transformer' in config:
         attention_type = 'transformer'
     elif 'linear_attention' in config:
@@ -594,13 +678,20 @@ def validate_model(model, config):
     else:
         raise ValueError(f"Unknown attention type")
     
+    # Classification validation
     if config[attention_type]['classification_task'] or config['openmlloader']['valid_data'] in ['large', 'new']:
+        # Select appropriate validation datasets
         if config['openmlloader']['valid_data'] == 'new':
             open_cc_dids = new_valid_dids
+            print(f"Using new validation datasets with {len(new_valid_dids)} datasets")
         elif config['openmlloader']['valid_data'] == 'large':
             open_cc_dids = open_cc_large_dids
+            print(f"Using large validation datasets with {len(open_cc_large_dids)} datasets")
         else:
             open_cc_dids = open_cc_valid_dids
+            print(f"Using standard validation datasets with {len(open_cc_valid_dids)} datasets")
+            
+        # Load validation datasets
         cc_valid_datasets_multiclass, _ = load_openml_list(
             open_cc_dids, 
             multiclass=True, 
@@ -613,18 +704,21 @@ def validate_model(model, config):
             classification=True,
         )
 
+        # Create appropriate classifier based on model type
         if isinstance(model, (GAMformer, MotherNetAdditive)):
             clf = GAMformerClassifier(
                 device=config['device'], 
                 model=model, 
                 config=config
             )
+            print(f"Using GAMformerClassifier for validation")
         elif isinstance(model, (MotherNet, SSMMotherNet)):
             clf = MotherNetClassifier(
                 device=config['device'], 
                 model=model, 
                 config=config
             )
+            print(f"Using MotherNetClassifier for validation")
         elif isinstance(model, (TabPFN, BiAttentionTabPFN, TabFlex)):
             clf = TabPFNClassifier(
                 device=config['device'], 
@@ -632,13 +726,20 @@ def validate_model(model, config):
                 config=config, 
                 N_ensemble_configurations=1
             )
+            print(f"Using TabPFNClassifier for validation with 1 ensemble configuration")
         else:
-            raise ValueError(f"Model {model} not supported for validation")
+            raise ValueError(f"Model {model.__class__.__name__} not supported for validation")
+            
+        # Set validation parameters
         base_path = 'models_diff/validation'
+        run_id = f"valid_run_{uuid4()}"
+        
+        # Run validation
+        print(f"Starting classification validation on {len(cc_valid_datasets_multiclass)} datasets")
         results = eval_on_datasets(
             'multiclass', 
             clf, 
-            f"valid_run_{uuid4()}", 
+            run_id, 
             cc_valid_datasets_multiclass,
             metric_used=tabular_metrics.auc_metric, 
             split_numbers=[1, 2, 3, 4, 5], 
@@ -651,27 +752,52 @@ def validate_model(model, config):
             device=config['device'],
             save=False,
             max_features=config['prior']['num_features'],
-            pca = config['openmlloader']['pca'],
+            pca=config['openmlloader']['pca'],
         )
+        
+        # Calculate validation scores
         mean_auc = np.array([r['mean_metric'] for r in results]).mean()
-        # maybe pandas would be easier lol?
-        per_dataset_scores = {key: np.mean([g['mean_metric'] for g in group]) for key, group in itertools.groupby(results, lambda x: x['dataset'])}
+        per_dataset_scores = {key: np.mean([g['mean_metric'] for g in group]) 
+                              for key, group in itertools.groupby(results, lambda x: x['dataset'])}
+        
+        print(f"Validation complete. Mean AUC: {mean_auc:.4f} across {len(per_dataset_scores)} datasets")
         return mean_auc, per_dataset_scores
+    
+    # Regression validation
     else:
-        # regression
+        # Load regression validation datasets
         cc_valid_datasets_regression, _ = load_openml_list(
-            open_cc_valid_dids_regression, multiclass=False, shuffled=True, filter_for_nan=False, max_samples=10000,
-            num_feats=100, return_capped=False, classification=False)
+            open_cc_valid_dids_regression, 
+            multiclass=False, 
+            shuffled=True, 
+            filter_for_nan=False, 
+            max_samples=10000,
+            num_feats=100, 
+            return_capped=False, 
+            classification=False
+        )
 
+        # Create appropriate regressor based on model type
         if isinstance(model, (GAMformer, MotherNetAdditive)):
-            clf = GAMformerRegressor(device=config['device'], model=model, config=config)
+            clf = GAMformerRegressor(
+                device=config['device'], 
+                model=model, 
+                config=config
+            )
+            print(f"Using GAMformerRegressor for validation")
         else:
-            raise ValueError(f"Model {model} not supported for validation")
+            raise ValueError(f"Model {model.__class__.__name__} not supported for regression validation")
+            
+        # Set validation parameters
         base_path = 'models_diff/validation'
+        run_id = f"valid_run_{uuid4()}"
+        
+        # Run validation
+        print(f"Starting regression validation on {len(cc_valid_datasets_regression)} datasets")
         results = eval_on_datasets(
             'regression', 
             clf, 
-            f"valid_run_{uuid4()}", 
+            run_id, 
             cc_valid_datasets_regression,
             metric_used=tabular_metrics.root_mean_squared_error_metric, 
             split_numbers=[1, 2, 3, 4, 5],
@@ -684,9 +810,101 @@ def validate_model(model, config):
             device=config['device'], 
             save=False, 
             max_features=config['prior']['num_features'],
-            pca = config['openmlloader']['pca'],
+            pca=config['openmlloader']['pca'],
         )
-        mean_auc = np.array([r['mean_metric'] for r in results]).mean()
-        # maybe pandas would be easier lol?
-        per_dataset_scores = {key: np.mean([g['mean_metric'] for g in group]) for key, group in itertools.groupby(results, lambda x: x['dataset'])}
-        return mean_auc, per_dataset_scores
+        
+        # Calculate validation scores
+        mean_rmse = np.array([r['mean_metric'] for r in results]).mean()
+        per_dataset_scores = {key: np.mean([g['mean_metric'] for g in group]) 
+                              for key, group in itertools.groupby(results, lambda x: x['dataset'])}
+        
+        print(f"Validation complete. Mean RMSE: {mean_rmse:.4f} across {len(per_dataset_scores)} datasets")
+        return mean_rmse, per_dataset_scores
+    
+def broadcast_for_normal(mean, std):
+    """
+    Utility function to handle broadcasting between mean and std tensors
+    for torch.normal operation.
+    
+    Args:
+        mean: The mean tensor (e.g., torch.zeros_like(x))
+        std: The standard deviation tensor (e.g., self.std)
+        
+    Returns:
+        Tuple of (mean, std) tensors that have compatible shapes for torch.normal
+    """
+    if mean.shape != std.shape:
+        try:
+            # Try broadcasting std to mean shape
+            broadcasted_std = std.expand_as(mean)
+            return mean, broadcasted_std
+        except RuntimeError:
+            try:
+                # Try broadcasting mean to std shape
+                broadcasted_mean = mean.expand_as(std)
+                return broadcasted_mean, std
+            except RuntimeError:
+                # If neither direct expansion works, use broadcast_tensors
+                broadcasted_mean, broadcasted_std = torch.broadcast_tensors(mean, std)
+                return broadcasted_mean, broadcasted_std
+    else:
+        # Shapes already match
+        return mean, std
+    
+def get_autocast_context(device=None, dtype=None, scaler=None):
+    """
+    Creates the appropriate autocast context based on device and PyTorch version.
+    
+    Args:
+        device: The device to use. If None, will be auto-detected.
+        dtype: The dtype to use for mixed precision. If None, will use sensible defaults.
+        scaler: If None, returns nullcontext.
+        
+    Returns:
+        An autocast context manager compatible with the current PyTorch version.
+    """
+    #torch.amp.autocast_mode.is_autocast_available
+    if scaler is None or device == 'mps':
+        return nullcontext()
+    
+    # Auto-detect device if not specified
+    if device is None:
+        if torch.cuda.is_available():
+            device = 'cuda'
+        elif hasattr(torch, 'xpu') and torch.xpu.is_available():
+            device = 'xpu'  # ROCm
+        else:
+            device = 'cpu'
+    
+    # Set default dtype based on device if not specified
+    if dtype is None:
+        if device == 'cuda' and torch.cuda.is_bf16_supported():
+            dtype = torch.bfloat16
+        elif device == 'cpu' and hasattr(torch, 'bfloat16'):
+            dtype = torch.bfloat16
+        else:
+            dtype = torch.float16
+    
+    # Check PyTorch version to determine autocast API
+    torch_version = pkg_resources.get_distribution("torch").version
+    legacy_autocast = pkg_resources.parse_version(torch_version) < pkg_resources.parse_version("1.10.0")
+    
+    # Handle various device types and PyTorch versions
+    if legacy_autocast:
+        # Old PyTorch versions only support CUDA autocast without device_type
+        if device == 'cuda':
+            return autocast(dtype=dtype)
+        else:
+            # Fall back to nullcontext for unsupported devices in old versions
+            return nullcontext()
+    else:
+        # New PyTorch versions support device_type parameter
+        if device in ['cuda', 'xpu', 'cpu']:
+            # Skip dtype for CPU in versions that don't support it
+            if device == 'cpu' and pkg_resources.parse_version(torch_version) < pkg_resources.parse_version("1.12.0"):
+                return autocast(device_type=device)
+            else:
+                return autocast(device_type=device, dtype=dtype)
+        else:
+            # Unsupported device
+            return nullcontext()

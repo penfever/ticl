@@ -283,6 +283,162 @@ If you want to create a new run in MLFlow even when continuing:
 python -m ticl.fit_model mothernet -f /path/to/checkpoint.pt -c -R --use-mlflow
 ```
 
+## Understanding Priors
+
+Training models in this repository relies on synthetic data generation using various "priors" - different ways of generating synthetic tabular datasets with known properties. These priors help the model learn generalizable patterns for in-context learning. The repository includes several prior types with different characteristics:
+
+### Prior Types
+
+#### StepFunctionPrior
+A simple prior that generates data using randomly placed step functions. Features are randomly generated, and a small number of features are selected to create decision boundaries. The target variable is determined by whether input values are greater than or less than the corresponding step boundary.
+
+**Parameters:**
+- `max_steps`: Maximum number of steps in the step function (default: 1)
+- `sampling`: Data sampling strategy - 'uniform' or 'normal'
+
+**Example Usage:**
+```python
+from ticl.priors import StepFunctionPrior
+config = {'max_steps': 2, 'sampling': 'uniform'}
+prior = StepFunctionPrior(config)
+```
+
+#### MLPPrior
+Generates synthetic data using a randomly initialized multi-layer perceptron (MLP). This prior creates complex nonlinear relationships between features and targets, simulating real-world tabular data with intricate patterns.
+
+**Parameters:**
+- `num_layers`: Number of hidden layers in the MLP
+- `prior_mlp_hidden_dim`: Hidden dimension size in the MLP
+- `prior_mlp_activations`: Activation functions to use (e.g., ReLU, Tanh)
+- `noise_std`: Standard deviation of noise added to outputs
+- `init_std`: Standard deviation for weight initialization
+- `prior_mlp_dropout_prob`: Dropout probability for MLP weights
+- `is_causal`: Whether to use a causal structure
+- `num_causes`: Number of causal variables if using causal structure
+- `add_uninformative_features`: Whether to add uninformative features
+- `sampling`: Data sampling strategy - 'normal', 'mixed', or 'uniform'
+
+**Example Usage:**
+```python
+from ticl.priors import MLPPrior
+config = {
+    'num_layers': 3, 
+    'prior_mlp_hidden_dim': 128,
+    'noise_std': 0.1,
+    'sampling': 'normal'
+}
+prior = MLPPrior(config)
+```
+
+#### BooleanConjunctionPrior
+Generates data based on boolean conjunctions (AND operations) with random feature selection. This prior creates logical rule-based datasets where the target depends on logical combinations of binary features.
+
+**Parameters:**
+- `max_rank`: Maximum number of features to include in each conjunction
+- `max_fraction_uninformative`: Maximum fraction of uninformative features
+- `p_uninformative`: Probability of adding uninformative features
+
+**Example Usage:**
+```python
+from ticl.priors import BooleanConjunctionPrior
+config = {
+    'max_rank': 5,
+    'max_fraction_uninformative': 0.3,
+    'p_uninformative': 0.2
+}
+prior = BooleanConjunctionPrior(config)
+```
+
+#### GPPrior
+Generates synthetic data using Gaussian Process regression with configurable kernels. This prior creates smooth, continuous functional relationships between inputs and targets.
+
+**Parameters:**
+- `outputscale`: Output scale parameter for the RBF kernel
+- `lengthscale`: Length scale parameter for the RBF kernel
+- `noise`: Noise level in the Gaussian likelihood
+- `sampling`: Data sampling strategy - 'uniform' or 'normal'
+
+**Example Usage:**
+```python
+from ticl.priors import GPPrior
+config = {
+    'outputscale': {'distribution': 'log_uniform', 'min': 1e-5, 'max': 8},
+    'lengthscale': {'distribution': 'log_uniform', 'min': 1e-5, 'max': 8},
+    'noise': 0.01,
+    'sampling': 'normal'
+}
+prior = GPPrior(config)
+```
+
+#### BagPrior
+Combines multiple prior types into a single prior by sampling from them according to specified weights. This allows training on a mixture of different data-generating processes.
+
+**Parameters:**
+- `base_priors`: Dictionary of prior objects to sample from
+- `prior_weights`: Dictionary of weights for each prior
+
+**Example Usage:**
+```python
+from ticl.priors import BagPrior, MLPPrior, StepFunctionPrior
+mlp_prior = MLPPrior({'num_layers': 3, 'sampling': 'normal'})
+step_prior = StepFunctionPrior({'max_steps': 2})
+bag_prior = BagPrior(
+    base_priors={'mlp': mlp_prior, 'step': step_prior},
+    prior_weights={'mlp': 0.7, 'step': 0.3}
+)
+```
+
+#### ClassificationAdapterPrior
+Wraps other priors to adapt them for classification tasks. It handles creating class boundaries, balancing classes, adding missing values (NaNs), and categorical features.
+
+**Parameters:**
+- `base_prior`: The prior to wrap
+- `max_num_classes`: Maximum number of classes (0 means regression)
+- `num_classes`: Number of classes to use for a specific batch
+- `multiclass_type`: Type of multiclass boundary ('steps' or 'rank')
+- `nan_prob_no_reason`: Probability of inserting NaNs randomly
+- `nan_prob_a_reason`: Probability of inserting NaNs with correlation to features
+- `categorical_feature_p`: Probability of converting features to categorical
+- `pad_zeros`: Whether to pad with zeros for consistent feature count
+- `feature_curriculum`: Whether to use curriculum learning for features
+
+**Example Usage:**
+```python
+from ticl.priors import ClassificationAdapterPrior, MLPPrior
+base_prior = MLPPrior({'num_layers': 3})
+config = {
+    'max_num_classes': 10,
+    'multiclass_type': 'rank',
+    'categorical_feature_p': 0.2,
+    'nan_prob_no_reason': 0.05,
+    'feature_curriculum': False
+}
+prior = ClassificationAdapterPrior(base_prior, **config)
+```
+
+### Using Priors in Training
+
+When training models, the prior type is specified using the `--prior-type` command line argument. The most common option is `prior_bag`, which combines multiple priors:
+
+```bash
+python -m ticl.fit_model mothernet --prior-type prior_bag
+```
+
+For single prior types:
+
+```bash
+python -m ticl.fit_model mothernet --prior-type step_function
+python -m ticl.fit_model mothernet --prior-type boolean_only
+```
+
+Prior hyperparameters can be configured through various command line arguments under the `prior` group. For example:
+
+```bash
+python -m ticl.fit_model mothernet --prior-type prior_bag --num-features 100 --n-samples 1024
+```
+
+The distribution of priors in the bag is configured in the model configuration file, with weights specified for each prior type.
+
 ## Papers
 This work is described in [MotherNet: A Foundational Hypernetwork for Tabular Classification](https://arxiv.org/pdf/2312.08598).
 Please cite that work when using this code. As this work rests on the TabPFN work, I would suggest you also cite their [paper](https://arxiv.org/abs/2207.01848),

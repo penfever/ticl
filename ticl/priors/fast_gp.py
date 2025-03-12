@@ -68,8 +68,6 @@ class GPPrior:
                             is_fitted = True
                     except RuntimeError:  # This can happen when torch.linalg.eigh fails. Restart with new init resolves this.
                         print('GP Fitting unsuccessful, retrying.. ')
-                        print(x)
-                        print(self.config)
                         # clear the memory
                         torch.cuda.empty_cache()
                         del model, likelihood, d

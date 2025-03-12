@@ -15,6 +15,7 @@ from ticl.models.biattention_tabpfn import BiAttentionTabPFN
 from ticl.models.gamformer import GAMformer
 from ticl.models.mothernet import MotherNet
 from ticl.config_utils import nested_dict
+from ticl.utils import IGNORE_INDEX
 
 try:
     from functools import cache
@@ -29,7 +30,7 @@ def get_criterion(max_num_classes):
     elif max_num_classes == 2:
         loss = nn.BCEWthLogitsLoss(reduction='none')
     elif max_num_classes > 2:
-        loss = nn.CrossEntropyLoss(reduction='none')
+        loss = nn.CrossEntropyLoss(reduction='none', ignore_index=IGNORE_INDEX)
     else:
         raise ValueError(f"Invalid number of classes: {max_num_classes}")
     return loss

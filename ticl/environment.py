@@ -1,7 +1,7 @@
 # Add your wandb info here
 
 WANDB_INFO = {
-    "project": "tabflex_new",
-    "entity": "mothernet",
+    "project": "semantic_tabflex",
+    "entity": "nyu-dice-lab",
     "dir": './wandb',
 }

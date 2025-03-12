@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from ticl.utils import default_device
+from ticl.utils import default_device, broadcast_for_normal
 from ticl.distributions import parse_distributions, sample_distributions
 from ticl.config_utils import str2bool
 
@@ -17,7 +17,10 @@ class GaussianNoise(nn.Module):
         self.device = device
 
     def forward(self, x):
-        return x + torch.normal(torch.zeros_like(x), self.std)
+        mean = torch.zeros_like(x)
+        if isinstance(self.std, torch.Tensor):
+            mean, self.std = broadcast_for_normal(mean, self.std)
+        return x + torch.normal(mean, self.std)
 
 
 def causes_sampler_f(num_causes):
@@ -64,6 +67,10 @@ class MLP(torch.nn.Module):
             # This means that the mean and standard deviation of each cause is determined in advance
             if self.pre_sample_causes:
                 self.causes_mean, self.causes_std = causes_sampler_f(self.num_causes)
+                # If we are using MPS, convert numpy array to float32
+                if device == 'mps':
+                    self.causes_mean = self.causes_mean.astype(np.float32)
+                    self.causes_std = self.causes_std.astype(np.float32)
                 self.causes_mean = torch.tensor(self.causes_mean, device=device).unsqueeze(0).unsqueeze(0).tile(
                     (n_samples, 1, 1))
                 self.causes_std = torch.tensor(self.causes_std, device=device).unsqueeze(0).unsqueeze(0).tile(
