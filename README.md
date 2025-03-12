@@ -210,17 +210,77 @@ torchrun --nproc_per_node=<num_gpus> -m ticl.fit_model <model_type> [options]
 
 ### Experiment Tracking
 
-By default, experiments are tracked using MLFlow if the `MLFLOW_HOSTNAME` environment variable is set:
+The framework supports two experiment tracking platforms: MLFlow and Weights & Biases (wandb).
+
+#### MLFlow Integration
+
+MLFlow tracking is enabled with the `--use-mlflow` flag. You need to set the `MLFLOW_HOSTNAME` environment variable to specify the MLFlow server:
 
 ```bash
-export MLFLOW_HOSTNAME=localhost
+export MLFLOW_HOSTNAME=localhost  # or your MLFlow server address
 python -m ticl.fit_model mothernet --use-mlflow
 ```
 
-Alternatively, you can use Weights & Biases for tracking:
+MLFlow configuration options:
+- `--experiment` - Name of the MLFlow experiment (default: 'Default')
+- `-R, --create-new-run` - Create a new MLFlow run even when continuing training
+- `--save-every` - Save checkpoints every N epochs (default: 10)
+
+Example with custom experiment name:
+```bash
+python -m ticl.fit_model mothernet --use-mlflow --experiment "MotherNet-Experiments"
+```
+
+#### Weights & Biases (wandb) Integration
+
+Weights & Biases tracking is enabled with the `--use-wandb` flag:
 
 ```bash
 python -m ticl.fit_model mothernet --use-wandb
+```
+
+wandb configuration options:
+- `--wandb-overwrite` - Whether to overwrite existing wandb runs (default: False)
+
+The wandb project, entity, and directory are configured in the `environment.py` file. To customize these settings, you should edit this file:
+
+```python
+# ticl/environment.py
+WANDB_INFO = {
+    "project": "your-project-name",  # Change to your project name
+    "entity": "your-username",       # Change to your wandb username or team
+    "dir": './wandb',                # Directory for wandb files
+}
+```
+
+Alternatively, you can set wandb parameters using environment variables:
+```bash
+export WANDB_PROJECT="your-project-name"
+export WANDB_ENTITY="your-username"
+export WANDB_DIR="./custom-wandb-dir"
+python -m ticl.fit_model mothernet --use-wandb
+```
+
+#### Using Both Tracking Systems
+
+You can use both MLFlow and wandb simultaneously:
+
+```bash
+export MLFLOW_HOSTNAME=localhost
+python -m ticl.fit_model mothernet --use-mlflow --use-wandb --experiment "Dual-Tracking-Experiment"
+```
+
+#### Continuing Experiments
+
+To continue training from a checkpoint with experiment tracking:
+
+```bash
+python -m ticl.fit_model mothernet -f /path/to/checkpoint.pt -c --use-mlflow
+```
+
+If you want to create a new run in MLFlow even when continuing:
+```bash
+python -m ticl.fit_model mothernet -f /path/to/checkpoint.pt -c -R --use-mlflow
 ```
 
 ## Papers
