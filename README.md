@@ -175,7 +175,7 @@ The default hyperparameters are found in ticl/model_configs.py in the
   classification_task=True
   - Optimizer: learning_rate=0.00003, epochs=4000, warmup_epochs=20
   - Prior/Data: num_features=100, n_samples=1152, batch_size=8,
-  num_steps=8192, prior-type=prior_bag
+  num_steps=8192, prior-type=prior_bag, nan_prob_no_reason=0, nan_prob_a_reason=0, categorical_feature_p=.2, pad-zeros=True, multiclass-type=rank
 
 ```bash
 python -m ticl.fit_model tabpfn -h
