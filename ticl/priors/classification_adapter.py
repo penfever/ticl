@@ -7,6 +7,7 @@ from ticl.utils import (get_nan_value, normalize_by_used_features_f, normalize_d
 
 from ticl.distributions import sample_distributions, uniform_int_sampler_f, parse_distributions, safe_randint
 from ticl.priors.boundaries import *
+from ticl.datasets.semantic_prior_data_sample import random_tensor as semantic_data
 from .utils import CategoricalActivation, randomize_classes
 
 
@@ -37,7 +38,9 @@ class RegressionNormalized:
 
 
 class MulticlassSteps:
-    """"Sample piecewise constant functions with random number of steps and random class boundaries"""
+    """"Sample piecewise constant functions 
+    with random number of steps 
+    and random class boundaries"""
 
     def __init__(self, num_classes, max_steps=10):
         self.num_classes = class_sampler_f(2, num_classes)()
@@ -161,7 +164,7 @@ class ClassificationAdapter:
                 elif self.h['multiclass_type'] == 'steps':
                     self.class_assigner = MulticlassSteps(self.h['num_classes'], self.h['multiclass_max_steps'])
                 else:
-                    raise ValueError("Unknow Multiclass type")
+                    raise ValueError("Unknown Multiclass type")
             elif self.h['num_classes'] == 2 and self.h['balanced']:
                 self.class_assigner = BalancedBinarize()
             elif self.h['num_classes'] > 2 and self.h['balanced']:
@@ -178,6 +181,111 @@ class ClassificationAdapter:
 
     def drop_for_no_reason(self, x, v):
         x[torch.rand(x.shape, device=x.device) < random.random() * self.h['nan_prob_no_reason']] = v
+        return x
+        
+    def _apply_semantic_prior(self, x, semantic_features, device):
+        """
+        Apply semantic prior to the features.
+        With 30% probability, make the feature causal to the target.
+        
+        Parameters:
+        -----------
+        x : torch.Tensor
+            The feature tensor with shape (samples, batch_size, num_features)
+        semantic_features : list
+            List of indices of semantic features
+        device : torch.device
+            The device to use
+            
+        Returns:
+        --------
+        torch.Tensor
+            The updated feature tensor
+        """
+        # Import the semantic prior data
+        from ticl.datasets.semantic_prior_data_sample import random_tensor as semantic_data
+        
+        # Make sure semantic_data is on the correct device
+        semantic_data = semantic_data.to(device)
+        
+        # Number of semantic classes (first dimension of semantic_data)
+        num_semantic_classes = semantic_data.shape[0]
+        
+        # Probability of a semantic feature being causal
+        causal_prob = 0.3
+        
+        # For each batch item
+        for b in range(x.shape[1]):
+            # Randomly select a semantic class for this batch
+            semantic_class = random.randint(0, num_semantic_classes - 1)
+            tokens = semantic_data[semantic_class]
+            
+            # For each semantic feature
+            for feat_idx, feat in enumerate(semantic_features):
+                # Determine if this feature is causal
+                is_causal = random.random() < causal_prob
+                
+                if is_causal:
+                    # This feature will be causally related to the target
+                    
+                    # Set zero probability (between 0.1 and 0.5 for causal features)
+                    # Less zeros for causal features to ensure stronger signal
+                    zero_prob = random.randrange(1, 5) / 10
+                    
+                    # Generate a proxy ranking for this batch
+                    # This will serve as a "target-like" ranking to create correlations
+                    rank_proxy = torch.rand(x.shape[0], device=device)
+                    
+                    # Sort the proxy to get a ranking
+                    _, sorted_indices = torch.sort(rank_proxy)
+                    
+                    # Choose a small subset of tokens (2-10) to be "significant" for this feature
+                    num_sig_tokens = random.randint(2, min(10, len(tokens)))
+                    sig_token_indices = random.sample(range(len(tokens)), num_sig_tokens)
+                    
+                    # Assign these tokens to different quantiles of the ranking
+                    quantile_size = x.shape[0] // num_sig_tokens
+                    
+                    # For each significant token
+                    for i, token_idx in enumerate(sig_token_indices):
+                        # Define the range of indices for this quantile
+                        start_idx = i * quantile_size
+                        end_idx = (i + 1) * quantile_size if i < num_sig_tokens - 1 else x.shape[0]
+                        
+                        # Get the indices of samples in this quantile
+                        quantile_indices = sorted_indices[start_idx:end_idx]
+                        
+                        # For each sample in this quantile
+                        for idx in quantile_indices:
+                            # Assign the token with some probability (inverse of zero_prob)
+                            if random.random() > zero_prob:
+                                x[idx, b, feat] = tokens[token_idx]
+                    
+                    # Fill in the remaining positions randomly
+                    for pos in range(x.shape[0]):
+                        # If the position is still zero, maybe fill it with a random token
+                        if x[pos, b, feat] == 0 and random.random() > zero_prob:
+                            # Use a random token (excluding the significant ones)
+                            avail_tokens = [i for i in range(len(tokens)) if i not in sig_token_indices]
+                            if avail_tokens:  # If there are any available tokens
+                                random_token_idx = random.choice(avail_tokens)
+                                x[pos, b, feat] = tokens[random_token_idx]
+                else:
+                    # Non-causal feature - just random tokens with zeros
+                    # Set zero probability (between 0.2 and 0.9)
+                    zero_prob = random.randrange(2, 9) / 10
+                    
+                    # For each sample position
+                    for pos in range(x.shape[0]):
+                        # Randomly decide whether to use a token or zero
+                        if random.random() < zero_prob:
+                            # Keep as zero (already initialized to zero)
+                            pass
+                        else:
+                            # Randomly select a token from the available tokens
+                            token_pos = random.randint(0, len(tokens) - 1)
+                            x[pos, b, feat] = tokens[token_pos]
+        
         return x
 
     def __call__(self, batch_size, n_samples, num_features, device, epoch=None, single_eval_pos=None):
@@ -204,8 +312,17 @@ class ClassificationAdapter:
             if random.random() < self.h['nan_prob_a_reason']:  # Missing for a reason
                 x = self.drop_for_reason(x, get_nan_value(self.h['set_value_to_nan']))
 
-        # Categorical features
+        # Categorical features and Semantic features
         categorical_features = []
+        semantic_features = []
+        
+        # Check for semantic features parameter
+        semantic_feature_p = self.h.get('semantic_feature_p', 0.0)
+        info['semantic_feature_p'] = semantic_feature_p
+        
+        # If semantic feature probability is > 0, prepare to add 50 extra features
+        use_semantic_features = semantic_feature_p > 0.0
+        
         if random.random() < self.h['categorical_feature_p']:
             p = random.random()
             for col in range(x.shape[2]):
@@ -220,7 +337,6 @@ class ClassificationAdapter:
                         'polynomial',
                         'periodic', 
                         'clustered', 
-                        # 'threshold_exceptions',
                         'information_theoretic',
                     ]
                     boundary_type = options[random.randint(0, len(options)-1)]  
@@ -233,7 +349,24 @@ class ClassificationAdapter:
                 if random.random() < p:
                     categorical_features.append(col)
                     x[:, :, col] = m(x[:, :, col])
+        
+        # Add the 50 extra semantic features if needed
+        if use_semantic_features:
+            num_semantic_features = 50
+            info['num_semantic_features'] = num_semantic_features
+            
+            # Add the semantic features (initialized to 0.0)
+            semantic_padding = torch.zeros((x.shape[0], x.shape[1], num_semantic_features), device=device)
+            x = torch.cat([x, semantic_padding], dim=2)
+            
+            # Record indices of semantic features
+            semantic_features = list(range(x.shape[2] - num_semantic_features, x.shape[2]))
+            
+            # Apply semantic prior to the features
+            x = self._apply_semantic_prior(x, semantic_features, device)
+        
         info['categorical_features'] = categorical_features
+        info['semantic_features'] = semantic_features
         x = remove_outliers(x, categorical_features=categorical_features)
         x, y = normalize_data(x), normalize_data(y)
 

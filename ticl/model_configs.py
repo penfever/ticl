@@ -133,6 +133,7 @@ def get_prior_config(max_features=100, n_samples=1024+128):
         'multiclass_max_steps': 10,
         "multiclass_type": 'rank',
         'categorical_feature_p': .2,  # diff: .0
+        'semantic_feature_p': 0.1,    # new parameter for semantic features
         'nan_prob_no_reason': 0.0,
         'nan_prob_a_reason': 0.0,
         'set_value_to_nan': .9,

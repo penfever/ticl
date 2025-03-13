@@ -203,6 +203,7 @@ def argparser_from_config(parser, description="Train Mothernet"):
     classification_prior.add_argument('--nan-prob-no-reason', help="NaN probability missing at random.", type=float)
     classification_prior.add_argument('--nan-prob-a-reason', help="NaN probability missing not at random.", type=float)
     classification_prior.add_argument('--categorical-feature-p', help="Categorical feature probability.", type=float)
+    classification_prior.add_argument('--semantic-feature-p', help="Semantic feature probability.", type=float)
     classification_prior.add_argument('--feature-curriculum', help="Whether to use a curriculum for number of features", type=str2bool)
     classification_prior.set_defaults(**config['prior']['classification'])
 

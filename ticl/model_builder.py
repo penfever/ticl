@@ -234,7 +234,19 @@ def get_model(
         n_out = 1
 
     model_type = config['model_type']
+    
+    # Check if semantic features are enabled
+    semantic_feature_p = config['prior']['classification'].get('semantic_feature_p', 0.0)
     n_features = config['prior']['num_features']
+    
+    # If semantic features are enabled, add 50 to the number of features
+    if semantic_feature_p > 0.0:
+        original_features = n_features
+        n_features += 50  # Add 50 extra features for semantic features
+        print(f"Semantic features enabled (p={semantic_feature_p}). Adding 50 extra features.")
+        print(f"Total features increased from {original_features} to {n_features}.")
+        # Update the config to reflect the new number of features
+        config['prior']['num_features'] = n_features
 
     if model_type == "mothernet":
         model = MotherNet(
