@@ -299,6 +299,98 @@ If you want to create a new run in MLFlow even when continuing:
 python -m ticl.fit_model mothernet -f /path/to/checkpoint.pt -c -R --use-mlflow
 ```
 
+## Semantic Features and Text-Based Classification
+
+This repository includes support for semantic features and text-based classification, allowing models to learn meaningful associations between features and classes, as well as enabling classification based on text descriptions rather than numeric class indices.
+
+### Semantic Features
+
+Semantic features are a special type of feature that can be associated with class meanings, enabling more interpretable models. To enable semantic features during training, use the `--semantic-feature-p` parameter:
+
+```bash
+python -m ticl.fit_model tabpfn --semantic-feature-p 0.3
+```
+
+This will:
+1. Add 50 semantic feature columns to your model
+2. Create consistent associations between semantic feature patterns and class labels
+3. Enable a semantic prediction head in the model that learns these associations
+
+The `semantic-feature-p` parameter controls the probability of semantic features being used (0.0-1.0).
+
+### Text-Based Classification
+
+Once a model has been trained with semantic features, you can use it for text-based classification. This means you can:
+
+1. Classify data using text descriptions instead of class indices
+2. Generate new class boundaries from text descriptions without retraining
+
+#### Using TextualClassifier
+
+The `TextualClassifier` class provides a simplified interface for text-based classification:
+
+```python
+from ticl.text_classifier import TextualClassifier
+from ticl.datasets.semantic_prior_data_sample import random_tensor
+from ticl.model_builder import get_model
+
+# Load a model trained with semantic features
+config = {
+    'model_type': 'tabpfn',
+    'semantic_prediction': True,
+    'prior': {
+        'classification': {
+            'semantic_feature_p': 0.3
+        }
+    }
+}
+_, model, _, _ = get_model(config, device='cpu', should_train=False)
+
+# Create the text classifier
+classifier = TextualClassifier(model, random_tensor)
+
+# Classify using a text description
+predictions, similarity = classifier.classify_with_text(
+    data,
+    "High income customers with good credit score"
+)
+
+# Generate new class boundaries from text descriptions
+class_descriptions = {
+    "high_risk": "Customers with low income and high debt",
+    "medium_risk": "Customers with average income and moderate debt",
+    "low_risk": "Customers with high income and low debt"
+}
+predictions, class_mapping = classifier.classify_with_descriptions(data, class_descriptions)
+```
+
+#### Advanced Usage
+
+For more advanced use cases, you can use the `SemanticTextMapper` directly:
+
+```python
+from ticl.semantic_text_mapper import SemanticTextMapper
+
+# Initialize the text mapper
+text_mapper = SemanticTextMapper()
+
+# Encode text descriptions as embeddings
+embeddings = text_mapper.encode_text("High income customers")
+
+# Map text to existing classes
+best_class, similarity = text_mapper.map_text_to_class(
+    "High income", 
+    class_token_patterns, 
+    semantic_data
+)
+
+# Generate new class boundaries
+class_token_patterns = text_mapper.generate_class_boundaries(
+    class_descriptions,
+    semantic_data
+)
+```
+
 ## Understanding Priors
 
 Training models in this repository relies on synthetic data generation using various "priors" - different ways of generating synthetic tabular datasets with known properties. These priors help the model learn generalizable patterns for in-context learning. The repository includes several prior types with different characteristics:
@@ -422,6 +514,7 @@ Wraps other priors to adapt them for classification tasks. It handles creating c
 - `nan_prob_no_reason`: Probability of inserting NaNs randomly
 - `nan_prob_a_reason`: Probability of inserting NaNs with correlation to features
 - `categorical_feature_p`: Probability of converting features to categorical
+- `semantic_feature_p`: Probability of using semantic features (0.0-1.0)
 - `pad_zeros`: Whether to pad with zeros for consistent feature count
 - `feature_curriculum`: Whether to use curriculum learning for features
 

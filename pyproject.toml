@@ -44,6 +44,15 @@ full = [
     'openml>=0.12.2', # evaluation + baselines
     'seaborn==0.11', # evaluation
     'tqdm>=4.62.1', # training + evaluation
+    'mlflow>=1.24.0', # experiment tracking
+    'einops>=0.4.1', # tensor manipulations
+    'wandb>=0.13.0', # experiment tracking
+    'gitpython>=3.1.18', # git operations
+]
+
+semantic-features = [
+    'transformers>=4.18.0', # text models
+    'sentence-transformers>=2.2.0', # text embeddings
 ]
 
 [project.urls]

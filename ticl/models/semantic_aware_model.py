@@ -81,6 +81,117 @@ class SemanticAwareClassifier(nn.Module):
             'class_preds': class_preds,
             'semantic_preds': semantic_preds
         }
+    
+    def predict_from_text(self, x, text_description, semantic_data, text_mapper=None):
+        """
+        Make predictions using text description to map to classes.
+        
+        Parameters:
+        -----------
+        x : torch.Tensor
+            Input tensor
+        text_description : str
+            Text description of the class
+        semantic_data : torch.Tensor
+            Semantic token data used for training
+        text_mapper : SemanticTextMapper, optional
+            Text mapper to use (created if None)
+            
+        Returns:
+        --------
+        dict
+            Dictionary containing class predictions based on text mapping
+        """
+        # Import the text mapper only when needed
+        from ticl.semantic_text_mapper import SemanticTextMapper
+        
+        # Create text mapper if not provided
+        if text_mapper is None:
+            text_mapper = SemanticTextMapper(device=x.device)
+        
+        # Get model's outputs
+        outputs = self.forward(x)
+        semantic_preds = outputs['semantic_logits']
+        
+        # Convert semantic predictions to class info
+        semantic_classes = semantic_preds.argmax(dim=-1)
+        
+        # Create a mapping from semantic classes to the model's internal class tokens
+        class_mapping = {}
+        for c in range(semantic_classes.max().item() + 1):
+            # Find samples classified as this semantic class
+            mask = semantic_classes == c
+            if mask.any():
+                # Use most common predicted class for this semantic class
+                class_mapping[c] = {
+                    'semantic_class': c,
+                    'token_indices': torch.arange(10).tolist(),  # Simplification
+                    'tokens': torch.ones(10)  # Placeholder
+                }
+        
+        # Map text to closest class
+        best_class, similarity = text_mapper.map_text_to_class(
+            text_description, 
+            class_mapping, 
+            semantic_data
+        )
+        
+        # Get the class predictions
+        if best_class >= 0:
+            # Find samples with the matched semantic class
+            mask = semantic_classes == best_class
+            class_preds = torch.full_like(semantic_classes, -1)
+            class_preds[mask] = outputs['class_logits'][mask].argmax(dim=-1)
+        else:
+            # Fallback to regular class predictions if no match
+            class_preds = outputs['class_logits'].argmax(dim=-1)
+        
+        return {
+            'class_preds': class_preds,
+            'mapped_class': best_class,
+            'similarity': similarity
+        }
+    
+    def generate_boundaries_from_text(self, x, class_descriptions, semantic_data, text_mapper=None):
+        """
+        Generate new class boundaries from text descriptions.
+        
+        Parameters:
+        -----------
+        x : torch.Tensor
+            Input tensor
+        class_descriptions : Dict[str, str]
+            Dictionary mapping class names to text descriptions
+        semantic_data : torch.Tensor
+            Semantic token data used for training
+        text_mapper : SemanticTextMapper, optional
+            Text mapper to use (created if None)
+            
+        Returns:
+        --------
+        dict
+            Dictionary containing new class predictions based on text-generated boundaries
+        """
+        # Import the text mapper only when needed
+        from ticl.semantic_text_mapper import SemanticTextMapper
+        
+        # Create text mapper if not provided
+        if text_mapper is None:
+            text_mapper = SemanticTextMapper(device=x.device)
+        
+        # Generate class boundaries from text descriptions
+        class_token_patterns = text_mapper.generate_class_boundaries(
+            class_descriptions,
+            semantic_data
+        )
+        
+        # Apply these boundaries to classify the input
+        predictions = text_mapper.apply_text_boundaries(x, class_token_patterns)
+        
+        return {
+            'class_preds': predictions,
+            'class_mapping': {i: name for i, name in enumerate(class_descriptions.keys())}
+        }
 
 
 class SemanticConsistencyLoss(nn.Module):
@@ -129,7 +240,12 @@ class SemanticConsistencyLoss(nn.Module):
         
         # Compute the semantic loss (only if we have semantic targets)
         if semantic_targets is not None:
-            semantic_loss = self.semantic_loss(semantic_logits, semantic_targets)
+            # Reshape semantic_logits from [samples, batch, num_semantic_classes] to [samples*batch, num_semantic_classes]
+            batch_size = semantic_logits.size(1)
+            semantic_logits_flat = semantic_logits.reshape(-1, semantic_logits.size(-1))
+            semantic_targets_flat = semantic_targets.reshape(-1)
+            
+            semantic_loss = self.semantic_loss(semantic_logits_flat, semantic_targets_flat)
             # Combined loss
             return class_loss + self.semantic_weight * semantic_loss
         else:
