@@ -24,15 +24,21 @@ except ImportError:
     cache = lru_cache(maxsize=None)
 
 
-def get_criterion(max_num_classes):
-    if max_num_classes == 0:
-        loss = nn.MSELoss(reduction='none')
-    elif max_num_classes == 2:
-        loss = nn.BCEWthLogitsLoss(reduction='none')
-    elif max_num_classes > 2:
-        loss = nn.CrossEntropyLoss(reduction='none', ignore_index=IGNORE_INDEX)
+def get_criterion(max_num_classes, use_semantic_loss=False):
+    if use_semantic_loss:
+        # Use the semantic consistency loss for models with semantic heads
+        from ticl.models.semantic_aware_model import SemanticConsistencyLoss
+        loss = SemanticConsistencyLoss(semantic_weight=0.5)
     else:
-        raise ValueError(f"Invalid number of classes: {max_num_classes}")
+        # Standard losses for regular models
+        if max_num_classes == 0:
+            loss = nn.MSELoss(reduction='none')
+        elif max_num_classes == 2:
+            loss = nn.BCEWithLogitsLoss(reduction='none')
+        elif max_num_classes > 2:
+            loss = nn.CrossEntropyLoss(reduction='none', ignore_index=IGNORE_INDEX)
+        else:
+            raise ValueError(f"Invalid number of classes: {max_num_classes}")
     return loss
 
 
@@ -199,7 +205,12 @@ def get_model(
     verbose_train, verbose_prior = verbose >= 1, verbose >= 2
     config['verbose'] = verbose_prior
 
-    criterion = get_criterion(config['prior']['classification']['max_num_classes'])
+    # Use semantic loss if semantic features are enabled
+    use_semantic_loss = config.get('semantic_prediction', False)
+    criterion = get_criterion(
+        config['prior']['classification']['max_num_classes'],
+        use_semantic_loss=use_semantic_loss
+    )
 
 
     if 'transformer' in config:
@@ -247,6 +258,11 @@ def get_model(
         print(f"Total features increased from {original_features} to {n_features}.")
         # Update the config to reflect the new number of features
         config['prior']['num_features'] = n_features
+        
+        # Enable semantic prediction head if using semantic features
+        config['semantic_prediction'] = True
+        # Default number of semantic classes from the semantic prior data
+        config['num_semantic_classes'] = 3  # Default from semantic_prior_data_sample.py
 
     if model_type == "mothernet":
         model = MotherNet(
@@ -292,6 +308,13 @@ def get_model(
         )
     else:
         raise ValueError(f"Unknown model type {model_type}.")
+        
+    # If semantic features are enabled, wrap the model with SemanticAwareClassifier
+    if config.get('semantic_prediction', False):
+        from ticl.models.semantic_aware_model import create_semantic_aware_model
+        num_semantic_classes = config.get('num_semantic_classes', 3)
+        print(f"Creating semantic-aware model with {num_semantic_classes} semantic classes")
+        model = create_semantic_aware_model(model, num_semantic_classes)
 
     if model_state is not None:
         if not load_model_strict:

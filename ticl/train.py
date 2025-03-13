@@ -13,7 +13,58 @@ from ticl.utils import ExponentialLR, ReduceLROnSpike, init_dist, get_autocast_c
 import pdb
 
 
-def eval_criterion(criterion, targets, output, device, n_out):
+def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
+    """
+    Evaluate the criterion based on model output and targets.
+    
+    Parameters:
+    -----------
+    criterion : nn.Module
+        Loss function to use
+    targets : torch.Tensor
+        Target values
+    output : torch.Tensor or dict
+        Model output (either tensor or dictionary for semantic models)
+    device : str
+        Device to use
+    n_out : int
+        Number of output classes
+    batch_info : dict, optional
+        Additional batch information (for semantic models)
+        
+    Returns:
+    --------
+    tuple
+        (Loss, NaN share)
+    """
+    # Check if this is a semantic model with dictionary output
+    is_semantic_model = isinstance(output, dict) and 'class_logits' in output and 'semantic_logits' in output
+    
+    if is_semantic_model:
+        # For semantic models with our custom loss
+        from ticl.models.semantic_aware_model import SemanticConsistencyLoss
+        if isinstance(criterion, SemanticConsistencyLoss):
+            # Extract semantic targets from batch info
+            semantic_targets = None
+            if batch_info is not None and 'semantic_targets' in batch_info:
+                semantic_targets = batch_info['semantic_targets'].to(device)
+                
+            # Create target dictionary
+            target_dict = {
+                'class_targets': targets.to(device).long(),
+                'semantic_targets': semantic_targets
+            }
+            
+            # Compute loss
+            loss = criterion(output, target_dict)
+            
+            # Return loss as a tensor for compatibility
+            return loss.unsqueeze(0).unsqueeze(0), 0.0
+        else:
+            # Fallback to just using class logits with standard loss
+            output = output['class_logits']
+    
+    # Standard loss functions
     if isinstance(criterion, nn.GaussianNLLLoss):
         assert output.shape[-1] == 2, \
             'need to write a little bit of code to handle multiple regression targets at once'
@@ -30,6 +81,7 @@ def eval_criterion(criterion, targets, output, device, n_out):
         )
     else:
         losses = criterion(output, targets)
+        
     losses = losses.view(*output.shape[0:2])
     return utils.torch_nanmean(losses.mean(0), return_nanshare=True)
 
@@ -61,8 +113,19 @@ def train_epoch(
     if progress_bar:
         dl = tqdm(dl)
     
-    for batch, (data, targets, single_eval_pos) in enumerate(dl):
-        # change the description of the progress bar
+    for batch, batch_data in enumerate(dl):
+        # Unpack batch data - could now include info dict for semantic features
+        if len(batch_data) == 3:
+            # Standard format: (data, targets, single_eval_pos)
+            data, targets, single_eval_pos = batch_data
+            batch_info = None
+        elif len(batch_data) == 4:
+            # Extended format: (data, targets, single_eval_pos, info)
+            data, targets, single_eval_pos, batch_info = batch_data
+        else:
+            raise ValueError(f"Unexpected batch format with {len(batch_data)} elements")
+            
+        # Change the description of the progress bar
         if progress_bar:
             dl.set_description(f'| train sample number: {single_eval_pos} | test sample number: {data[1].shape[0] - single_eval_pos}')
         if wandb.run is not None:
@@ -93,6 +156,9 @@ def train_epoch(
 
                 if single_eval_pos is not None:
                     targets = targets[single_eval_pos:]
+                    # Also adjust semantic targets if present
+                    if batch_info is not None and 'semantic_targets' in batch_info:
+                        batch_info['semantic_targets'] = batch_info['semantic_targets'][single_eval_pos:]
 
                 valid_labels = targets != -100
                 if valid_labels.sum() == 0:
@@ -104,7 +170,8 @@ def train_epoch(
                     targets, 
                     output, 
                     device=device, 
-                    n_out=n_out
+                    n_out=n_out,
+                    batch_info=batch_info
                 )
                 loss = loss / aggregate_k_gradients
 

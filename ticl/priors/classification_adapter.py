@@ -183,10 +183,97 @@ class ClassificationAdapter:
         x[torch.rand(x.shape, device=x.device) < random.random() * self.h['nan_prob_no_reason']] = v
         return x
         
-    def _apply_semantic_prior(self, x, semantic_features, device):
+    def create_semantic_class_mapping(self, num_classes, semantic_data, device):
         """
-        Apply semantic prior to the features.
-        With 30% probability, make the feature causal to the target.
+        Create a mapping between class indices and semantic token patterns.
+        Each class is associated with a specific pattern of semantic tokens.
+        
+        Parameters:
+        -----------
+        num_classes : int
+            Number of classes to create mappings for
+        semantic_data : torch.Tensor
+            Tensor of semantic tokens with shape [num_semantic_classes, num_tokens]
+        device : torch.device
+            Device to use
+            
+        Returns:
+        --------
+        dict
+            Mapping from class indices to token patterns
+        """
+        # For each class, assign a characteristic pattern of semantic tokens
+        class_token_patterns = {}
+        
+        num_semantic_classes = semantic_data.shape[0]
+        
+        # Ensure each class gets a different semantic class if possible
+        available_semantic_classes = list(range(num_semantic_classes))
+        if num_classes <= num_semantic_classes:
+            selected_semantic_classes = random.sample(available_semantic_classes, num_classes)
+        else:
+            # If more classes than semantic classes, we'll have some duplicates
+            selected_semantic_classes = [random.choice(available_semantic_classes) for _ in range(num_classes)]
+        
+        for class_idx in range(num_classes):
+            # Select a semantic class (row) from our semantic data
+            semantic_class = selected_semantic_classes[class_idx]
+            
+            # Select a subset of tokens to represent this class (5-10 tokens)
+            num_signature_tokens = random.randint(5, min(10, semantic_data.shape[1]))
+            token_indices = random.sample(range(semantic_data.shape[1]), num_signature_tokens)
+            signature_tokens = semantic_data[semantic_class, token_indices].to(device)
+            
+            class_token_patterns[class_idx] = {
+                'tokens': signature_tokens,
+                'semantic_class': semantic_class,
+                'token_indices': token_indices
+            }
+        
+        return class_token_patterns
+    
+    def create_semantic_targets(self, y, class_token_patterns):
+        """
+        Create semantic target tensor based on class labels.
+        This will be used for the self-supervised learning objective.
+        
+        Parameters:
+        -----------
+        y : torch.Tensor
+            Class labels tensor of shape [samples, batch_size]
+        class_token_patterns : dict
+            Mapping from class indices to token patterns
+            
+        Returns:
+        --------
+        torch.Tensor
+            Semantic target tensor of shape [samples, batch_size]
+        """
+        # Initialize targets with ignore index (-100)
+        semantic_targets = torch.full_like(y, -100)
+        
+        # For each sample, set the target based on the class
+        for i in range(y.shape[0]):
+            for b in range(y.shape[1]):
+                class_idx = int(y[i, b].item())
+                
+                # Skip if invalid class
+                if class_idx < 0 or class_idx >= len(class_token_patterns):
+                    continue
+                
+                # Get the semantic class for this class
+                semantic_class = class_token_patterns[class_idx]['semantic_class']
+                
+                # Set the semantic target to the semantic class
+                semantic_targets[i, b] = semantic_class
+        
+        return semantic_targets
+    
+    def _apply_semantic_prior(self, x, semantic_features, device, y=None):
+        """
+        Apply semantic prior to the features, ensuring consistent 
+        relationships between semantic features and class labels.
+        With a guaranteed minimum of causal features per class.
         
         Parameters:
         -----------
@@ -196,11 +283,13 @@ class ClassificationAdapter:
             List of indices of semantic features
         device : torch.device
             The device to use
+        y : torch.Tensor, optional
+            The target tensor with shape (samples, batch_size)
             
         Returns:
         --------
-        torch.Tensor
-            The updated feature tensor
+        tuple
+            (Updated feature tensor, Semantic info dictionary)
         """
         # Import the semantic prior data
         from ticl.datasets.semantic_prior_data_sample import random_tensor as semantic_data
@@ -211,69 +300,76 @@ class ClassificationAdapter:
         # Number of semantic classes (first dimension of semantic_data)
         num_semantic_classes = semantic_data.shape[0]
         
-        # Probability of a semantic feature being causal
-        causal_prob = 0.3
+        # If y is not provided (initial call), generate proxy targets
+        if y is None:
+            # Create a temporary random target for initial feature generation
+            y = torch.randint(0, max(2, self.h['num_classes']), 
+                             (x.shape[0], x.shape[1]), device=device).float()
+        
+        # Create class-token mapping if not already created
+        if not hasattr(self, 'class_token_patterns'):
+            num_classes = max(2, self.h['num_classes'])
+            self.class_token_patterns = self.create_semantic_class_mapping(num_classes, semantic_data, device)
+        
+        # Create semantic targets for training
+        semantic_targets = self.create_semantic_targets(y, self.class_token_patterns)
+        
+        # Track which features are causal for each batch item
+        causal_features_map = {b: [] for b in range(x.shape[1])}
+        
+        # Minimum proportion of semantic features that should be causal
+        min_causal_ratio = 0.3
+        max_causal_ratio = 0.6
         
         # For each batch item
         for b in range(x.shape[1]):
-            # Randomly select a semantic class for this batch
-            semantic_class = random.randint(0, num_semantic_classes - 1)
-            tokens = semantic_data[semantic_class]
+            # Determine how many features should be causal (at least 30%, at most 60%)
+            num_causal = max(
+                int(len(semantic_features) * min_causal_ratio),
+                min(int(len(semantic_features) * max_causal_ratio), 1)
+            )
             
-            # For each semantic feature
+            # Randomly select causal features
+            causal_indices = random.sample(range(len(semantic_features)), num_causal)
+            causal_features = [semantic_features[i] for i in causal_indices]
+            causal_features_map[b] = causal_features
+            
+            # For all semantic features
             for feat_idx, feat in enumerate(semantic_features):
-                # Determine if this feature is causal
-                is_causal = random.random() < causal_prob
+                is_causal = feat in causal_features
                 
                 if is_causal:
-                    # This feature will be causally related to the target
+                    # This feature will be causally related to the class
                     
-                    # Set zero probability (between 0.1 and 0.5 for causal features)
+                    # Set zero probability (between 0.1 and 0.3 for causal features)
                     # Less zeros for causal features to ensure stronger signal
-                    zero_prob = random.randrange(1, 5) / 10
+                    zero_prob = random.randrange(1, 3) / 10
                     
-                    # Generate a proxy ranking for this batch
-                    # This will serve as a "target-like" ranking to create correlations
-                    rank_proxy = torch.rand(x.shape[0], device=device)
-                    
-                    # Sort the proxy to get a ranking
-                    _, sorted_indices = torch.sort(rank_proxy)
-                    
-                    # Choose a small subset of tokens (2-10) to be "significant" for this feature
-                    num_sig_tokens = random.randint(2, min(10, len(tokens)))
-                    sig_token_indices = random.sample(range(len(tokens)), num_sig_tokens)
-                    
-                    # Assign these tokens to different quantiles of the ranking
-                    quantile_size = x.shape[0] // num_sig_tokens
-                    
-                    # For each significant token
-                    for i, token_idx in enumerate(sig_token_indices):
-                        # Define the range of indices for this quantile
-                        start_idx = i * quantile_size
-                        end_idx = (i + 1) * quantile_size if i < num_sig_tokens - 1 else x.shape[0]
-                        
-                        # Get the indices of samples in this quantile
-                        quantile_indices = sorted_indices[start_idx:end_idx]
-                        
-                        # For each sample in this quantile
-                        for idx in quantile_indices:
-                            # Assign the token with some probability (inverse of zero_prob)
-                            if random.random() > zero_prob:
-                                x[idx, b, feat] = tokens[token_idx]
-                    
-                    # Fill in the remaining positions randomly
+                    # For each sample position
                     for pos in range(x.shape[0]):
-                        # If the position is still zero, maybe fill it with a random token
-                        if x[pos, b, feat] == 0 and random.random() > zero_prob:
-                            # Use a random token (excluding the significant ones)
-                            avail_tokens = [i for i in range(len(tokens)) if i not in sig_token_indices]
-                            if avail_tokens:  # If there are any available tokens
-                                random_token_idx = random.choice(avail_tokens)
-                                x[pos, b, feat] = tokens[random_token_idx]
+                        # Get the class for this sample
+                        class_idx = int(y[pos, b].item())
+                        
+                        # Skip if invalid class
+                        if class_idx < 0 or class_idx >= len(self.class_token_patterns):
+                            continue
+                        
+                        # Get tokens specific to this class
+                        class_tokens = self.class_token_patterns[class_idx]['tokens']
+                        
+                        # Randomly decide whether to use a class-specific token or zero
+                        if random.random() > zero_prob:
+                            # Use a token from the class pattern
+                            token_idx = random.randint(0, len(class_tokens) - 1)
+                            x[pos, b, feat] = class_tokens[token_idx]
                 else:
                     # Non-causal feature - just random tokens with zeros
-                    # Set zero probability (between 0.2 and 0.9)
-                    zero_prob = random.randrange(2, 9) / 10
+                    # Set zero probability (between 0.2 and 0.7)
+                    zero_prob = random.randrange(2, 7) / 10
+                    
+                    # Get random semantic class
+                    semantic_class = random.randint(0, num_semantic_classes - 1)
+                    tokens = semantic_data[semantic_class]
                     
                     # For each sample position
                     for pos in range(x.shape[0]):
@@ -286,7 +382,14 @@ class ClassificationAdapter:
                             token_pos = random.randint(0, len(tokens) - 1)
                             x[pos, b, feat] = tokens[token_pos]
         
-        return x
+        # Create info dictionary with semantic information
+        semantic_info = {
+            'class_token_patterns': self.class_token_patterns,
+            'semantic_targets': semantic_targets,
+            'causal_features_map': causal_features_map
+        }
+        
+        return x, semantic_info
 
     def __call__(self, batch_size, n_samples, num_features, device, epoch=None, single_eval_pos=None):
         info = {}
@@ -362,8 +465,11 @@ class ClassificationAdapter:
             # Record indices of semantic features
             semantic_features = list(range(x.shape[2] - num_semantic_features, x.shape[2]))
             
-            # Apply semantic prior to the features
-            x = self._apply_semantic_prior(x, semantic_features, device)
+            # Apply semantic prior to the features with class-based consistency
+            x, semantic_info = self._apply_semantic_prior(x, semantic_features, device, y)
+            
+            # Store semantic information in the info dictionary
+            info.update(semantic_info)
         
         info['categorical_features'] = categorical_features
         info['semantic_features'] = semantic_features

@@ -61,7 +61,16 @@ class PriorDataLoader(DataLoader):
         )
         # we return sampled hyperparameters from get_batch for testing but we don't want to use them as style.
         x, y, target_y, info = batch if len(batch) == 4 else (batch[0], batch[1], batch[2], None)
-        return (info, x, y), target_y, single_eval_pos
+        
+        # Check if this is a semantic-aware model that needs semantic information
+        semantic_model = getattr(self.model, 'semantic_head', None) is not None
+        
+        if semantic_model and info is not None and 'semantic_targets' in info:
+            # Include info in the output for semantic models
+            return (info, x, y), target_y, single_eval_pos, info
+        else:
+            # Standard output format for regular models
+            return (info, x, y), target_y, single_eval_pos
 
     def __len__(self):
         return self.num_steps
