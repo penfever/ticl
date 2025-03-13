@@ -101,6 +101,7 @@ class ClassificationAdapter:
                 raise NotImplementedError("Balanced multiclass training is not possible")
 
     def drop_for_reason(self, x, v):
+        # Categorical activation only called here
         nan_prob_sampler = CategoricalActivation(ordered_p=0.0, categorical_p=1.0, num_classes_sampler=lambda: 20)
         d = nan_prob_sampler(x)
         # TODO: Make a different ordering for each activation
@@ -126,7 +127,7 @@ class ClassificationAdapter:
         args = {'device': device, 'n_samples': n_samples, 'num_features': num_features_used,
                 'batch_size': batch_size, 'epoch': epoch, 'single_eval_pos': single_eval_pos}
         x, y, y_ = self.base_prior.get_batch(**args)
-
+        breakpoint()
         assert x.shape[2] == num_features_used
 
         if self.h['nan_prob_no_reason']+self.h['nan_prob_a_reason'] > 0 and random.random() > 0.5:  # Only one out of two datasets should have nans

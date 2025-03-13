@@ -88,6 +88,7 @@ class CategoricalActivation(nn.Module):
         """
         super().__init__()
         
+        #TODO: refactor this, num classes should not be hardcoded
         if num_classes_sampler is None:
             num_classes_sampler = zipf_sampler_f(0.8, 1, 10)
         self.categorical_p = categorical_p

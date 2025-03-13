@@ -165,6 +165,22 @@ Different model types have additional specific configuration options:
 
 Here are examples for training different model types:
 
+#### Training TabPFN
+
+The default hyperparameters are found in ticl/model_configs.py in the
+   get_tabpfn_default_config() function, which inherits from
+  get_shared_defaults(). Key parameters include:
+
+  - Transformer: emsize=512, nlayers=12, nhead=4, y_encoder="one_hot",
+  classification_task=True
+  - Optimizer: learning_rate=0.00003, epochs=4000, warmup_epochs=20
+  - Prior/Data: num_features=100, n_samples=1152, batch_size=8,
+  num_steps=8192, prior-type=prior_bag
+
+```bash
+python -m ticl.fit_model tabpfn -h
+```
+
 #### Training MotherNet
 
 Basic training with default parameters:
@@ -386,6 +402,13 @@ bag_prior = BagPrior(
     base_priors={'mlp': mlp_prior, 'step': step_prior},
     prior_weights={'mlp': 0.7, 'step': 0.3}
 )
+```
+
+NOTE: This is currently hard-coded to MLP, GP, heavily favoring MLP
+
+```python
+prior = BagPrior(base_priors={'gp': gp_flexible, 'mlp': mlp_flexible},
+                         prior_weights={'mlp': 0.961, 'gp': 0.039})
 ```
 
 #### ClassificationAdapterPrior
