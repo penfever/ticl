@@ -11,11 +11,16 @@ class TabPFN(nn.Module):
     def __init__(self, *, n_out, emsize, nhead, nhid_factor, nlayers, n_features, dropout=0.0,  y_encoder_layer=None,
                  decoder=None, input_normalization=False, init_method=None, pre_norm=False,
                  activation='gelu', recompute_attn=False, classification_task=True,
-                 all_layers_same_init=False, efficient_eval_masking=True, y_encoder=None, tabpfn_zero_weights=False):
+                 all_layers_same_init=False, efficient_eval_masking=True, y_encoder=None, tabpfn_zero_weights=False,
+                 semantic_feature_p=None):
         super().__init__()
         self.classification_task = classification_task
         self.y_encoder = y_encoder_layer
         nhid = emsize * nhid_factor
+        
+        # Store semantic feature probability if provided
+        if semantic_feature_p is not None:
+            self.semantic_feature_p = semantic_feature_p
 
         def encoder_layer_creator(): return TransformerEncoderLayer(
             emsize, 
@@ -32,7 +37,22 @@ class TabPFN(nn.Module):
         print("Number of parameters in backbone: ", backbone_size)
 
         self.emsize = emsize
+        
+        # Set up the encoder for the correct number of features
+        # For TabPFN with semantic features, classification_adapter.py adds 50 features
+        # The n_features parameter passed here should already include these 50 features
+        # So we'll make the encoder accept exactly this number of features
         self.encoder = Linear(n_features, emsize, replace_nan_by_zero=True)
+        
+        # Store the semantic feature probability for reference
+        if not hasattr(self, 'semantic_feature_p'):
+            self.semantic_feature_p = 0.0
+            
+        # Print feature configuration for debugging
+        if self.semantic_feature_p > 0.0:
+            print(f"TabPFN encoder configured for {n_features} features")
+            print(f"  - Original features: {n_features - 50}")
+            print(f"  - Semantic features: 50")
         self.decoder = decoder(emsize, nhid, n_out) if decoder is not None else nn.Sequential(nn.Linear(emsize, nhid), nn.GELU(), nn.Linear(nhid, n_out))
         self.input_ln = SeqBN(emsize) if input_normalization else None
         self.init_method = init_method

@@ -110,8 +110,15 @@ def train_epoch(
     is_mps = device == 'mps'
     is_cpu = device == 'cpu'
     
+    # Initialize progress bar with more informative metrics
     if progress_bar:
-        dl = tqdm(dl)
+        dl = tqdm(dl, desc='Epoch Progress', leave=True)
+        # Set initial progress bar formatting
+        dl.set_description('Training')
+    
+    # For tracking GPU utilization
+    gpu_util = 0.0
+    batch_loss_history = []
     
     for batch, batch_data in enumerate(dl):
         # Unpack batch data - could now include info dict for semantic features
@@ -124,12 +131,41 @@ def train_epoch(
             data, targets, single_eval_pos, batch_info = batch_data
         else:
             raise ValueError(f"Unexpected batch format with {len(batch_data)} elements")
-            
-        # Change the description of the progress bar
+        
+        # Get GPU utilization if available
+        if is_cuda:
+            try:
+                import pynvml
+                pynvml.nvmlInit()
+                handle = pynvml.nvmlDeviceGetHandleByIndex(0)  # Assuming first GPU
+                info = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                gpu_util = info.gpu  # GPU utilization percentage
+            except (ImportError, pynvml.NVMLError):
+                gpu_util = -1  # Unable to get GPU utilization
+                
+        # Update the progress bar with detailed metrics
         if progress_bar:
-            dl.set_description(f'| train sample number: {single_eval_pos} | test sample number: {data[1].shape[0] - single_eval_pos}')
+            progress_desc = f'Batch {batch}/{steps_per_epoch}'
+            if batch_loss_history:
+                avg_loss = sum(batch_loss_history[-10:]) / min(len(batch_loss_history), 10)
+                progress_desc += f' | Loss: {avg_loss:.4f}'
+            
+            progress_desc += f' | Train/Test: {single_eval_pos}/{data[1].shape[0] - single_eval_pos}'
+            
+            if gpu_util > 0:
+                progress_desc += f' | GPU: {gpu_util}%'
+            
+            dl.set_description(progress_desc)
+            
+        # Log to wandb if enabled
         if wandb.run is not None:
-            wandb.log({'train_train_sample_number': single_eval_pos, 'train_test_sample_number': data[1].shape[0] - single_eval_pos})
+            wandb.log({
+                'train_train_sample_number': single_eval_pos, 
+                'train_test_sample_number': data[1].shape[0] - single_eval_pos,
+                'batch': batch,
+                'steps_per_epoch': steps_per_epoch,
+                'gpu_utilization': gpu_util
+            })
 
         if using_dist and not (batch % aggregate_k_gradients == aggregate_k_gradients - 1):
             cm = model.no_sync()
@@ -175,9 +211,18 @@ def train_epoch(
                 )
                 loss = loss / aggregate_k_gradients
 
-            # Log the loss
+            # Get current batch loss value and log it
+            current_batch_loss = loss.mean().cpu().detach().item() * aggregate_k_gradients
+            batch_loss_history.append(current_batch_loss)
+            
+            # Log to wandb
             if wandb.run: 
-                wandb.log({'batch_loss': loss.mean().cpu().detach().item() * aggregate_k_gradients})
+                wandb.log({'batch_loss': current_batch_loss})
+            
+            # Update progress bar with current loss
+            if progress_bar:
+                avg_loss = sum(batch_loss_history[-10:]) / min(len(batch_loss_history), 10)
+                dl.set_postfix(loss=f"{avg_loss:.4f}", refresh=True)
             
             # Backward pass
             loss.backward()
@@ -385,7 +430,27 @@ def train(dl, model, criterion, optimizer_state=None, scheduler=None,
         train_time, inference_time, train_gpu_time = [], [], []
         for epoch in range(start_epoch, epochs + 1):
             if verbose:
-                print(f"Start of epoch {epoch}")
+                # More informative epoch start message
+                progress_banner = f"{'='*20} Epoch {epoch}/{epochs} {'='*20}"
+                print(f"\n{progress_banner}")
+                
+                # Print current hyperparameters
+                print(f"Learning rate: {scheduler.get_last_lr()[0]:.8f}")
+                
+                # Print GPU memory usage if on CUDA
+                if is_cuda:
+                    try:
+                        free_mem, total_mem = torch.cuda.mem_get_info()
+                        free_mem_gb = free_mem / (1024**3)
+                        total_mem_gb = total_mem / (1024**3)
+                        used_mem_gb = total_mem_gb - free_mem_gb
+                        print(f"GPU memory: {used_mem_gb:.2f}GB used / {total_mem_gb:.2f}GB total ({used_mem_gb/total_mem_gb*100:.1f}%)")
+                    except:
+                        # Older PyTorch versions or other issues
+                        print(f"GPU: {torch.cuda.get_device_name(0)}")
+                
+                print(f"Steps per epoch: {len(dl)}")
+                print("-" * len(progress_banner))
 
             # Record starting time
             epoch_start_time = time.time()

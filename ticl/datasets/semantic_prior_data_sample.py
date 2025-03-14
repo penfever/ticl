@@ -1,10 +1,18 @@
-import torch
+"""
+Backward compatibility module for semantic prior data.
 
-# Generate random floats between 0 and 1 for 3 semantic classes with 50 tokens each
-random_tensor = torch.rand(3, 50)
+This module is retained for backward compatibility.
+New code should use semantic_prior_data_loader.py instead.
+"""
 
-# Scale to the range [1, 49404]
-random_tensor = 1 + random_tensor * (49404 - 1)
+import warnings
+from ticl.datasets.semantic_prior_data_loader import get_random_semantic_data
 
-# Round to the nearest integer but keep as float
-random_tensor = torch.round(random_tensor)
+warnings.warn(
+    "semantic_prior_data_sample is deprecated. Use semantic_prior_data_loader instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
+
+# For backward compatibility
+random_tensor = get_random_semantic_data()

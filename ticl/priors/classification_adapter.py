@@ -7,8 +7,11 @@ from ticl.utils import (get_nan_value, normalize_by_used_features_f, normalize_d
 
 from ticl.distributions import sample_distributions, uniform_int_sampler_f, parse_distributions, safe_randint
 from ticl.priors.boundaries import *
-from ticl.datasets.semantic_prior_data_sample import random_tensor as semantic_data
+from ticl.datasets.semantic_prior_data_loader import get_random_semantic_data
 from .utils import CategoricalActivation, randomize_classes
+
+# For backward compatibility, using the same variable name
+semantic_data = get_random_semantic_data()
 
 
 class BalancedBinarize:

@@ -1018,15 +1018,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "--max-tokens", 
         type=int, 
-        default=201,
-        help="Maximum number of tokens to keep (lt)"
+        default=200,
+        help="Maximum number of tokens to keep (lt/eq)"
     )
     
     parser.add_argument(
         "--max-non-zero-tokens", 
         type=int, 
-        default=201,
-        help="Maximum number of non-zero tokens to return (lt)"
+        default=200,
+        help="Maximum number of non-zero tokens to return (lt/eq)"
     )
     
     parser.add_argument(

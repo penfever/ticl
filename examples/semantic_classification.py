@@ -18,7 +18,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
 from ticl.model_builder import get_model
-from ticl.datasets.semantic_prior_data_sample import random_tensor
+from ticl.datasets.semantic_prior_data_loader import get_random_semantic_data
 from ticl.text_classifier import TextualClassifier
 
 
@@ -65,7 +65,8 @@ def text_classification_example():
     _, model, _, _ = get_model(config, device='cpu', should_train=False)
     
     print("Creating a TextualClassifier...")
-    classifier = TextualClassifier(model, random_tensor)
+    semantic_data = get_random_semantic_data()
+    classifier = TextualClassifier(model, semantic_data)
     
     # Convert test data to torch tensor with appropriate shape for demonstration
     # Real data would have been properly preprocessed

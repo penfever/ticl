@@ -250,19 +250,19 @@ def get_model(
     semantic_feature_p = config['prior']['classification'].get('semantic_feature_p', 0.0)
     n_features = config['prior']['num_features']
     
-    # If semantic features are enabled, add 50 to the number of features
+    # Check if we need to include semantic features
     if semantic_feature_p > 0.0:
-        original_features = n_features
-        n_features += 50  # Add 50 extra features for semantic features
-        print(f"Semantic features enabled (p={semantic_feature_p}). Adding 50 extra features.")
-        print(f"Total features increased from {original_features} to {n_features}.")
-        # Update the config to reflect the new number of features
-        config['prior']['num_features'] = n_features
+        # For compatibility with classification_adapter.py which adds 50 features
+        print(f"Semantic features enabled (p={semantic_feature_p}).")
+        print(f"Note: Classification adapter will add 50 extra semantic features at runtime.")
         
         # Enable semantic prediction head if using semantic features
         config['semantic_prediction'] = True
-        # Default number of semantic classes from the semantic prior data
-        config['num_semantic_classes'] = 3  # Default from semantic_prior_data_sample.py
+        
+        # Get the number of semantic classes dynamically from the data loader
+        # Import the function we created earlier for this purpose
+        from ticl.models.semantic_aware_model import get_semantic_class_count
+        config['num_semantic_classes'] = get_semantic_class_count()  # This will get the actual count
 
     if model_type == "mothernet":
         model = MotherNet(
@@ -276,7 +276,19 @@ def get_model(
             n_out=n_out, n_features=n_features,
             y_encoder_layer=y_encoder, **config['transformer'], **config['mothernet'], **config['additive'])
     elif model_type == "tabpfn":
-        model = TabPFN(n_out=n_out, n_features=n_features, y_encoder_layer=y_encoder, **config['transformer'])
+        # For TabPFN, we need to include the semantic features in the feature count
+        total_features = n_features
+        if semantic_feature_p > 0.0:
+            total_features += 50  # Add 50 features for semantic data
+            
+        # Create TabPFN with the total feature count
+        model = TabPFN(
+            n_out=n_out, 
+            n_features=total_features,  # Include semantic features
+            y_encoder_layer=y_encoder, 
+            semantic_feature_p=semantic_feature_p,
+            **config['transformer']
+        )
     elif model_type == "batabpfn":
         # FIXME hack
         config['transformer']['nhead'] = 4

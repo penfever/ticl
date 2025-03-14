@@ -196,7 +196,6 @@ def example_usage():
     """Example of how to use the TextualClassifier interface."""
     import torch
     from ticl.model_builder import get_model
-    from ticl.datasets.semantic_prior_data_sample import random_tensor
     
     # Load a pretrained model
     config = {
@@ -215,8 +214,12 @@ def example_usage():
     # This would be your actual trained model
     _, model, _, _ = get_model(config, device='cpu', should_train=False)
     
+    # Get semantic data
+    from ticl.datasets.semantic_prior_data_loader import get_random_semantic_data
+    semantic_data = get_random_semantic_data()
+    
     # Create TextualClassifier
-    classifier = TextualClassifier(model, random_tensor)
+    classifier = TextualClassifier(model, semantic_data)
     
     # Sample data
     data = torch.rand(10, 150)  # 10 samples, 150 features (including 50 semantic)
