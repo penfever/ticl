@@ -105,8 +105,34 @@ class SemanticAwareClassifier(nn.Module):
         
         # Extract the transformer's encoded features for semantic processing
         # The semantic head expects features with shape [batch_size, emsize]
-        if hasattr(self.base_model, 'transformer_encoder') and hasattr(self.base_model, 'encoder'):
+        memory_logger.debug(f"Base model type: {type(self.base_model).__name__}")
+        
+        # Check if the model has exposed features directly (best option)
+        if hasattr(self.base_model, 'features') and self.base_model.features is not None:
+            # If the base model directly exposes features (preferred method)
+            features = self.base_model.features
+            memory_logger.debug(f"Using directly exposed features: {features.shape}")
+        
+        # Check for TabFlex model
+        elif hasattr(self.base_model, 'get_cls_embedding'):
+            # TabFlex models have a get_cls_embedding method for classification token
+            memory_logger.debug("Detected TabFlex model, using CLS embedding")
+            features = self.base_model.get_cls_embedding()
+            
+            # Handle test set specific features for TabFlex
+            if single_eval_pos is not None and hasattr(features, 'shape') and len(features.shape) > 1:
+                if single_eval_pos < features.shape[0]:
+                    # Use only evaluation samples for semantic features
+                    features = features[single_eval_pos:]
+                    # Average over samples if needed
+                    if len(features.shape) > 2:
+                        features = features.mean(dim=0)
+        
+        # Check for TabPFN model with encoder + transformer structure
+        elif hasattr(self.base_model, 'transformer_encoder') and hasattr(self.base_model, 'encoder'):
             # For TabPFN, we need to reconstruct the encoder features
+            memory_logger.debug("Detected TabPFN model, reconstructing encoder features")
+            
             if len(x) == 3:  # style is given
                 style_src, x_src, y_src = x
             else:
@@ -115,7 +141,6 @@ class SemanticAwareClassifier(nn.Module):
             # Encode input features
             x_encoded = self.base_model.encoder(x_src)
             
-            # Apply the transformer encoder
             # For semantic features, we'll use features from the test set
             if single_eval_pos is not None and single_eval_pos < x_encoded.shape[0]:
                 # Use only evaluation samples for semantic features
@@ -125,17 +150,32 @@ class SemanticAwareClassifier(nn.Module):
             else:
                 # Fallback: use all samples and average them
                 features = x_encoded.mean(dim=0)
-        elif hasattr(self.base_model, 'features') and self.base_model.features is not None:
-            # If the base model directly exposes features
-            features = self.base_model.features
+                
+        # Check for MotherNet or other models with hidden states
+        elif hasattr(self.base_model, 'hidden_states') and self.base_model.hidden_states is not None:
+            # For MotherNet or similar models that store hidden states
+            memory_logger.debug("Using model's hidden states")
+            features = self.base_model.hidden_states[-1]  # Use last layer's hidden states
+            
+            # Extract test set features if applicable
+            if single_eval_pos is not None and single_eval_pos < features.shape[0]:
+                features = features[single_eval_pos:]
+                
+            # Average if needed
+            if len(features.shape) > 2:
+                features = features.mean(dim=0)
+                
         else:
-            # Last resort fallback - try to reshape the output
+            # Last resort fallback - try to extract from the output
+            memory_logger.debug(f"Using fallback feature extraction, base_output shape: {base_output.shape}")
             if len(base_output.shape) == 3:
                 # Average over samples to get [batch_size, output_dim]
                 features = base_output.mean(dim=0)
             else:
                 # Otherwise use as is
                 features = base_output
+                
+        memory_logger.debug(f"Extracted features shape: {features.shape}")
         
         # Project features to CLIP text model dimension
         projected_features = self.semantic_projection(features)
@@ -782,7 +822,7 @@ def get_clip_text_embeddings(texts, clip_model, tokenizer, batch_size=5, device=
         return torch.zeros((0, clip_model.config.hidden_size), device=processing_device)
 
 
-def create_semantic_aware_model(base_model, num_semantic_classes=None, freeze_clip=False):
+def create_semantic_aware_model(base_model, num_semantic_classes=None, freeze_clip=True):
     """
     Factory function to create a CLIP-style semantic-aware model.
     
