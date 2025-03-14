@@ -63,6 +63,7 @@ dependencies:
       - asttokens==2.4.1
       - async-timeout==4.0.3
       - attrs==23.2.0
+      - beautifulsoup4<=4.13.3
       - blinker==1.8.2
       - cachetools==5.3.3
       - cffi==1.16.0
@@ -117,6 +118,7 @@ dependencies:
       - joblib==1.4.2
       - jupyter-client==8.6.2
       - jupyter-core==5.7.2
+      - kaggle<=1.7.4.1
       - kiwisolver==1.4.5
       - liac-arff==2.5.0
       - lightgbm==4.5.0
@@ -180,6 +182,7 @@ dependencies:
       - six==1.16.0
       - slicer==0.0.8
       - smmap==5.0.1
+      - spacy<=3.8.4
       - sqlalchemy==2.0.31
       - sqlparse==0.5.0
       - stack-data==0.6.3

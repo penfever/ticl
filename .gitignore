@@ -188,6 +188,9 @@ ticl/models_diff
 mlruns
 **/wandb/
 
+secrets.yml
+**/*.pt.partial*
+
 # drafts
 
 

@@ -29,6 +29,14 @@ class DownloadProgressBar(tqdm):
             self.total = tsize
         self.update(b * bsize - self.n)
 
+def load_secrets():
+    import yaml
+    import os
+    secrets = {}
+    with open('secrets.yml', 'r') as file:
+        secrets = yaml.safe_load(file)
+    for k, v in secrets.items():
+        os.environ[k] = v
 
 def fetch_model(file_name):
     model_path = Path(get_module_path()) / 'models_diff' / file_name
