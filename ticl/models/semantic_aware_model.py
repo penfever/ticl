@@ -1,13 +1,14 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 from ticl.utils import log_gpu_memory, log_tensor_info, memory_logger, track_tensors_memory
 
 class SemanticAwareClassifier(nn.Module):
     """
-    Extension of base TabPFN or similar models with an additional semantic prediction head.
-    This model uses a pretrained CLIP text encoder for handling semantic class relationships
-    for more efficient text encoding and class prediction.
+    Extension of base TabPFN or similar models with a CLIP-style semantic head.
+    This model uses CLIP's text encoder directly to compare tabular features with
+    text descriptions using a contrastive approach similar to the original CLIP paper.
     """
     
     def __init__(self, base_model, num_semantic_classes):
@@ -19,7 +20,7 @@ class SemanticAwareClassifier(nn.Module):
         base_model : nn.Module
             The base tabular model (TabPFN, MotherNet, etc.)
         num_semantic_classes : int
-            Number of semantic classes to predict
+            Number of semantic classes to predict (only used for compatibility)
         """
         super().__init__()
         
@@ -41,35 +42,28 @@ class SemanticAwareClassifier(nn.Module):
         # Import CLIP-related modules
         from transformers import CLIPTokenizerFast, CLIPTextModel
         
-        # Constants for the semantic prediction head
+        # Store semantic class count for compatibility
         self.num_semantic_classes = num_semantic_classes
-        self.clip_vocab_size = 49408  # CLIP tokenizer vocab size
         self.num_tokens_per_class = 5  # Top-k tokens per semantic class for interpretability
         
         # Initialize the CLIP tokenizer and text encoder
         self.model_name = "openai/clip-vit-base-patch32"
         self.tokenizer = CLIPTokenizerFast.from_pretrained(self.model_name)
         
-        # Load pretrained CLIP text model (freeze its parameters by default)
+        # Load pretrained CLIP text model
         self.clip_text_model = CLIPTextModel.from_pretrained(self.model_name)
         
-        # Freeze CLIP text encoder parameters for better stability
+        # Freeze CLIP text encoder parameters by default
         for param in self.clip_text_model.parameters():
             param.requires_grad = False
             
         # Get transformer dimensions from the CLIP model
         transformer_dim = self.clip_text_model.config.hidden_size  # Usually 512 for base model
         
-        # Project input features to transformer dimension
+        # Project tabular features to CLIP embedding space
         self.semantic_projection = nn.Linear(self.emsize, transformer_dim)
         
-        # Create a lookup table for semantic class embeddings
-        self.semantic_class_embeddings = nn.Parameter(
-            torch.randn(num_semantic_classes, transformer_dim),
-            requires_grad=True
-        )
-        
-        # Intermediate projection for feature enhancement before class matching
+        # Feature enhancement network to better align tabular features with text space
         self.feature_enhancer = nn.Sequential(
             nn.Linear(transformer_dim, transformer_dim * 2),
             nn.LayerNorm(transformer_dim * 2),
@@ -77,11 +71,15 @@ class SemanticAwareClassifier(nn.Module):
             nn.Dropout(0.1),
             nn.Linear(transformer_dim * 2, transformer_dim)
         )
+        
+        # Temperature parameter for similarity scaling (learnable)
+        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
     
     def forward(self, x, single_eval_pos=None, class_texts=None):
         """
-        Forward pass with both class and semantic predictions using a pretrained CLIP text encoder.
-        This method processes tabular features and can compare them with text embeddings.
+        Forward pass with CLIP-style text-tabular contrastive learning.
+        This implementation directly encodes class text descriptions with CLIP
+        and computes similarities with tabular features in a shared embedding space.
         
         Parameters:
         -----------
@@ -90,7 +88,7 @@ class SemanticAwareClassifier(nn.Module):
         single_eval_pos : int, optional
             Position to split training and evaluation data
         class_texts : list of str, optional
-            Text descriptions for semantic classes (for embedding during training)
+            Text descriptions for semantic classes
             
         Returns:
         --------
@@ -99,7 +97,7 @@ class SemanticAwareClassifier(nn.Module):
         """
         # Profiling: Log initial memory state
         log_gpu_memory("Start of SemanticAwareClassifier.forward")
-        memory_logger.debug("Running CLIP-based semantic matching")
+        memory_logger.debug("Running CLIP-style contrastive matching")
         
         # Pass the input through the base model's forward method 
         # which properly handles single_eval_pos
@@ -149,34 +147,31 @@ class SemanticAwareClassifier(nn.Module):
         batch_size = projected_features.shape[0]
         
         # Apply feature enhancement to match CLIP embedding space
-        enhanced_features = self.feature_enhancer(projected_features)
+        tabular_features = self.feature_enhancer(projected_features)
         
         # Average pooling over batch if needed
-        if enhanced_features.dim() > 2:
-            enhanced_features = enhanced_features.mean(dim=1)
+        if tabular_features.dim() > 2:
+            tabular_features = tabular_features.mean(dim=1)
         
-        # ===== CLIP-like semantic similarity computation =====
-        # Use the stored class embeddings to compute similarities
-        semantic_similarities = torch.matmul(
-            enhanced_features,                         # [batch_size, dim]
-            self.semantic_class_embeddings.transpose(0, 1)  # [dim, num_classes]
-        )
+        # Normalize feature vectors to enable proper cosine similarity
+        tabular_features = F.normalize(tabular_features, dim=1)
         
-        # ===== Process class texts if provided (used during training) =====
+        # ===== Process class texts with CLIP text encoder =====
+        text_features = None
         all_token_texts = []
+        text_tokens = None  # Track for memory management
         
-        # If class texts are provided, use CLIP to compute their embeddings
         if class_texts and len(class_texts) > 0:
             memory_logger.debug(f"Processing {len(class_texts)} class texts with CLIP")
             
             # Create CLIP embeddings for class texts (execute on CPU to save GPU memory)
             with torch.no_grad():
-                # Tokenize on CPU - process in small batches to conserve memory
-                clip_device = "cpu"  # Always process text on CPU first
+                # Process batches of text to save memory
+                clip_device = "cpu"  # Process text on CPU first
                 text_features_list = []
                 
-                # Process in batches of up to 10 texts to control memory usage
-                batch_size = min(10, len(class_texts))
+                # Process in batches to control memory usage
+                batch_size = min(16, len(class_texts))
                 for i in range(0, len(class_texts), batch_size):
                     batch_texts = class_texts[i:i+batch_size]
                     
@@ -190,35 +185,73 @@ class SemanticAwareClassifier(nn.Module):
                     ).to(clip_device)
                     
                     # Extract text features with CLIP text encoder
-                    batch_text_features = self.clip_text_model(**text_tokens).pooler_output
+                    batch_outputs = self.clip_text_model(**text_tokens)
+                    batch_text_features = batch_outputs.pooler_output
                     text_features_list.append(batch_text_features)
-                
-                # Concatenate all batches of features
-                all_text_features = torch.cat(text_features_list, dim=0)
-                
-                # Create a simple mapping between texts and their CLIP embeddings
-                for i, text in enumerate(class_texts):
-                    # Store text-feature mapping
-                    top_tokens = self.tokenizer.tokenize(text)[:self.num_tokens_per_class]
                     
-                    # Store token information
-                    class_tokens = {
-                        'text': text,
-                        'tokens': top_tokens,
-                        'class_idx': i,
-                    }
-                    all_token_texts.append(class_tokens)
+                    # Store token information for interpretability
+                    for j, text in enumerate(batch_texts):
+                        token_ids = text_tokens.input_ids[j].tolist()
+                        token_texts = self.tokenizer.convert_ids_to_tokens(token_ids)
+                        # Filter out special tokens
+                        token_texts = [t for t in token_texts if t not in ['<pad>', '<|startoftext|>', '<|endoftext|>']]
+                        
+                        class_tokens = {
+                            'text': text,
+                            'tokens': token_texts[:self.num_tokens_per_class],
+                            'class_idx': i + j,
+                        }
+                        all_token_texts.append(class_tokens)
+                    
+                    # Clean up batch tensors
+                    del text_tokens
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                
+                # Concatenate all text features
+                text_features = torch.cat(text_features_list, dim=0)
+                
+                # Move to same device as tabular features if needed for computation
+                if tabular_features.device.type != text_features.device.type:
+                    text_features = text_features.to(tabular_features.device)
+                
+                # Normalize text features for cosine similarity
+                text_features = F.normalize(text_features, dim=1)
+                
+                # Clean up intermediates
+                del text_features_list
         
-        # Create the return dictionary
+        # ===== Compute CLIP-style contrastive similarities =====
+        # If we have text features, compute cosine similarity scaled by temperature
+        if text_features is not None:
+            # Get temperature-scaled logits (similar to CLIP)
+            logit_scale = self.logit_scale.exp()
+            
+            # Compute similarity: [batch_size, embed_dim] x [embed_dim, n_classes]
+            semantic_logits = logit_scale * torch.matmul(
+                tabular_features,
+                text_features.transpose(0, 1)
+            )
+        else:
+            # No class texts provided - create empty similarity matrix
+            semantic_logits = torch.zeros(
+                (tabular_features.shape[0], self.num_semantic_classes),
+                device=tabular_features.device
+            )
+        
+        # Create the return dictionary with CLIP-style outputs
         result = {
             'class_logits': base_output,
-            'semantic_logits': semantic_similarities,  # [batch_size, num_classes]
-            'token_texts': all_token_texts,  # For interpretability
+            'semantic_logits': semantic_logits,    # [batch_size, num_classes]
+            'tabular_features': tabular_features,  # Normalized tabular features
+            'text_features': text_features,        # Normalized text features (if available)
+            'token_texts': all_token_texts,        # Text tokenization info
         }
         
         # Clean up intermediate tensors
         del projected_features
-        del enhanced_features
+        if 'text_tokens' in locals() and text_tokens is not None:
+            del text_tokens
         
         # Memory cleanup
         if torch.cuda.is_available():
@@ -564,39 +597,40 @@ class SemanticAwareClassifier(nn.Module):
 
 class SemanticConsistencyLoss(nn.Module):
     """
-    Combined loss function for classification and CLIP-style semantic prediction.
-    This loss combines standard classification loss with a contrastive loss for semantic alignment.
+    CLIP-style contrastive loss for aligning text descriptions with tabular features.
+    This implements the InfoNCE/NT-Xent contrastive loss from the CLIP paper, combined
+    with standard classification loss.
     """
     
-    def __init__(self, semantic_weight=0.5, temperature=0.07):
+    def __init__(self, semantic_weight=0.5):
         """
         Initialize the loss function.
         
         Parameters:
         -----------
         semantic_weight : float
-            Weight for the semantic prediction loss component
-        temperature : float
-            Temperature parameter for the contrastive loss calculation
+            Weight for the semantic contrastive loss component
         """
         super().__init__()
         self.semantic_weight = semantic_weight
-        self.temperature = temperature
         
         # Main classification loss
         self.class_loss = nn.CrossEntropyLoss()
         
-        # Semantic similarity loss (CLIP-style contrastive loss)
-        self.semantic_loss = nn.CrossEntropyLoss()
+        # Component loss values for logging
+        self.last_class_loss = 0.0
+        self.last_semantic_loss = 0.0
         
     def forward(self, outputs, targets):
         """
-        Compute the combined loss with CLIP-style contrastive supervision.
+        Compute the combined loss with true CLIP-style contrastive learning.
+        This implements symmetric cross-entropy loss over the similarity matrix.
         
         Parameters:
         -----------
         outputs : dict
-            Model outputs containing 'class_logits' and 'semantic_logits'
+            Model outputs containing 'class_logits', 'semantic_logits',
+            'tabular_features', and 'text_features'
         targets : dict
             Target values containing 'class_targets' and 'semantic_targets'
             
@@ -605,36 +639,52 @@ class SemanticConsistencyLoss(nn.Module):
         torch.Tensor
             Combined loss value
         """
-        # Get outputs
+        # Get class prediction outputs
         class_logits = outputs['class_logits']
-        semantic_logits = outputs.get('semantic_logits', None)
         
-        # Get targets
+        # Get targets for standard classification
         class_targets = targets['class_targets']
-        semantic_targets = targets.get('semantic_targets', None)
         
-        # Compute class loss
+        # Compute standard classification loss
         class_loss = self.class_loss(class_logits, class_targets)
         
         # Initialize semantic loss
         semantic_loss = torch.tensor(0.0, device=class_loss.device)
         
-        # Compute semantic loss if targets are provided
-        if semantic_targets is not None and semantic_logits is not None:
-            # Reshape if needed
-            if len(semantic_logits.shape) > 2:
-                semantic_logits_flat = semantic_logits.reshape(-1, semantic_logits.size(-1))
-                semantic_targets_flat = semantic_targets.reshape(-1)
-            else:
-                semantic_logits_flat = semantic_logits
-                semantic_targets_flat = semantic_targets
+        # Compute CLIP-style contrastive loss if we have the necessary components
+        if 'semantic_logits' in outputs and 'semantic_targets' in targets:
+            semantic_logits = outputs['semantic_logits']
+            semantic_targets = targets['semantic_targets']
+            
+            # Get batch size
+            batch_size = semantic_logits.shape[0]
+            
+            # True CLIP-style loss uses the logits directly (already temperature-scaled in forward)
+            # Create labels for contrastive learning - diagonal of similarity matrix should be 1s
+            labels = torch.arange(batch_size, device=semantic_logits.device)
+            
+            # Symmetric contrastive loss (both tabular->text and text->tabular directions)
+            # We use the semantic_targets to mask the logits if needed
+            
+            # For samples with valid targets, compute contrastive loss
+            valid_mask = semantic_targets != -100
+            
+            if valid_mask.sum() > 0:
+                # Filter to valid samples only
+                valid_logits = semantic_logits[valid_mask]
                 
-            # Apply temperature scaling for contrastive loss
-            scaled_logits = semantic_logits_flat / self.temperature
-                
-            # Apply semantic loss
-            semantic_loss = self.semantic_loss(scaled_logits, semantic_targets_flat)
-        
+                # For proper contrastive loss, we need a square similarity matrix
+                # Ensure we have at least one valid sample
+                if valid_logits.shape[0] > 0:
+                    # Row-wise (text->tabular)
+                    loss_text_to_tabular = F.cross_entropy(valid_logits, semantic_targets[valid_mask])
+                    
+                    # Column-wise (tabular->text)
+                    loss_tabular_to_text = F.cross_entropy(valid_logits.t(), semantic_targets[valid_mask])
+                    
+                    # Symmetric loss (mean of both directions)
+                    semantic_loss = (loss_text_to_tabular + loss_tabular_to_text) / 2.0
+            
         # Combine losses
         total_loss = class_loss + self.semantic_weight * semantic_loss
         
@@ -734,7 +784,7 @@ def get_clip_text_embeddings(texts, clip_model, tokenizer, batch_size=5, device=
 
 def create_semantic_aware_model(base_model, num_semantic_classes=None, freeze_clip=True):
     """
-    Factory function to create a semantic-aware model with a pretrained CLIP text encoder.
+    Factory function to create a CLIP-style semantic-aware model.
     
     Parameters:
     -----------
@@ -749,7 +799,7 @@ def create_semantic_aware_model(base_model, num_semantic_classes=None, freeze_cl
     Returns:
     --------
     SemanticAwareClassifier
-        The extended model with CLIP text encoder
+        The extended model with CLIP contrastive learning
     """
     if num_semantic_classes is None:
         num_semantic_classes = get_semantic_class_count()
@@ -771,16 +821,16 @@ def create_semantic_aware_model(base_model, num_semantic_classes=None, freeze_cl
     clip_params = sum(p.numel() for p in model.clip_text_model.parameters())
     trainable_clip_params = sum(p.numel() for p in model.clip_text_model.parameters() if p.requires_grad)
     projection_params = sum(p.numel() for p in model.semantic_projection.parameters())
-    class_embedding_params = sum(p.numel() for p in model.semantic_class_embeddings)
     enhancer_params = sum(p.numel() for p in model.feature_enhancer.parameters())
+    logit_scale_params = 1  # Single temperature parameter
     
-    trainable_params = projection_params + class_embedding_params + enhancer_params + trainable_clip_params
-    total_params = clip_params + projection_params + class_embedding_params + enhancer_params
+    trainable_params = projection_params + enhancer_params + trainable_clip_params + logit_scale_params
+    total_params = clip_params + projection_params + enhancer_params + logit_scale_params
     
     print(f"Semantic head has {total_params:,} parameters ({trainable_params:,} trainable)")
     print(f"  - CLIP Text Encoder: {clip_params:,} ({trainable_clip_params:,} trainable)")
     print(f"  - Projection: {projection_params:,}")
-    print(f"  - Class embeddings: {class_embedding_params:,}")
     print(f"  - Feature enhancer: {enhancer_params:,}")
+    print(f"  - Logit scale: {logit_scale_params}")
     
     return model
