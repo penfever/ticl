@@ -27,7 +27,8 @@ class TextualClassifier:
         self, 
         model: SemanticAwareClassifier,
         semantic_data: torch.Tensor,
-        device: Optional[str] = None
+        device: Optional[str] = None,
+        use_mixed_precision: bool = True
     ):
         """
         Initialize the textual classifier.
@@ -40,20 +41,33 @@ class TextualClassifier:
             Semantic token data used during training
         device : str, optional
             Device to run inference on (auto-detected if None)
+        use_mixed_precision : bool
+            Whether to use mixed precision (FP16) for inference to save memory
         """
         # Determine device
         if device is None:
             self.device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
         else:
             self.device = device
+        
+        # Enable mixed precision for memory efficiency (CUDA only)
+        self.use_mixed_precision = use_mixed_precision and torch.cuda.is_available() and self.device == "cuda"
             
         # Store model and semantic data (keep semantic data on CPU to save GPU memory)
         self.model = model.to(self.device)
         self.model.eval()
-        self.semantic_data = semantic_data.to("cpu")  # Store on CPU, only move to GPU when needed
         
-        # Initialize text mapper - also keep on CPU for text processing
+        # Ensure semantic data is int32 to save memory and stays on CPU
+        if semantic_data.dtype != torch.int32 and semantic_data.dtype != torch.int64:
+            semantic_data = semantic_data.to(dtype=torch.int32)
+        self.semantic_data = semantic_data.to("cpu")  # Always store on CPU to save GPU memory
+        
+        # Initialize text mapper - keep on CPU for text processing
         self.text_mapper = SemanticTextMapper(device="cpu")
+        
+        # Clean up GPU memory after initialization
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
     def preprocess_data(
         self, 
@@ -102,6 +116,7 @@ class TextualClassifier:
     ) -> Tuple[torch.Tensor, float]:
         """
         Classify data using a text description.
+        Memory-efficient implementation that uses mixed precision and CPU offloading.
         
         Parameters:
         -----------
@@ -118,23 +133,38 @@ class TextualClassifier:
         # Preprocess data
         x = self.preprocess_data(data)
         
-        # Move semantic data to GPU only for this operation
-        semantic_data_gpu = self.semantic_data.to(self.device)
+        # IMPORTANT: Don't load all semantic data to GPU at once - the model actually 
+        # doesn't use it directly. For backward compatibility, we still pass it,
+        # but keep it on CPU where it's actually accessed.
         
-        # Get predictions based on text
+        # Get predictions based on text - use mixed precision if enabled
         try:
             with torch.no_grad():
-                results = self.model.predict_from_text(
-                    x, 
-                    text_description, 
-                    semantic_data_gpu,
-                    self.text_mapper
-                )
+                if self.use_mixed_precision and torch.cuda.is_available() and x.device.type == 'cuda':
+                    # CUDA with mixed precision
+                    with torch.cuda.amp.autocast():
+                        results = self.model.predict_from_text(
+                            x, 
+                            text_description, 
+                            self.semantic_data,  # Keep on CPU
+                            self.text_mapper
+                        )
+                else:
+                    # Standard precision for MPS/CPU or when mixed precision is disabled
+                    results = self.model.predict_from_text(
+                        x, 
+                        text_description, 
+                        self.semantic_data,  # Keep on CPU
+                        self.text_mapper
+                    )
+                
         finally:
-            # Make sure we clean up GPU memory even if there's an error
-            semantic_data_gpu = semantic_data_gpu.cpu()
-            del semantic_data_gpu
-            torch.cuda.empty_cache()
+            # Explicit cleanup after prediction
+            if x.device.type != 'cpu':
+                x = x.cpu()
+                del x
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         
         return results['class_preds'], results['similarity']
     
@@ -145,6 +175,7 @@ class TextualClassifier:
     ) -> Tuple[torch.Tensor, Dict[int, str]]:
         """
         Classify data using multiple class descriptions.
+        Memory-efficient implementation that uses mixed precision and CPU offloading.
         
         Parameters:
         -----------
@@ -161,23 +192,37 @@ class TextualClassifier:
         # Preprocess data
         x = self.preprocess_data(data)
         
-        # Move semantic data to GPU only for this operation
-        semantic_data_gpu = self.semantic_data.to(self.device)
+        # IMPORTANT: Don't load all semantic data to GPU at once - the model actually 
+        # doesn't use it directly. For backward compatibility, we still pass it,
+        # but keep it on CPU where it's actually accessed.
         
-        # Generate boundaries and classify
+        # Generate boundaries and classify - use mixed precision if enabled
         try:
             with torch.no_grad():
-                results = self.model.generate_boundaries_from_text(
-                    x,
-                    class_descriptions,
-                    semantic_data_gpu,
-                    self.text_mapper
-                )
+                if self.use_mixed_precision and torch.cuda.is_available() and x.device.type == 'cuda':
+                    # CUDA with mixed precision
+                    with torch.cuda.amp.autocast():
+                        results = self.model.generate_boundaries_from_text(
+                            x,
+                            class_descriptions,
+                            self.semantic_data,  # Keep on CPU
+                            self.text_mapper
+                        )
+                else:
+                    # Standard precision for MPS/CPU or when mixed precision is disabled
+                    results = self.model.generate_boundaries_from_text(
+                        x,
+                        class_descriptions,
+                        self.semantic_data,  # Keep on CPU
+                        self.text_mapper
+                    )
         finally:
-            # Make sure we clean up GPU memory even if there's an error
-            semantic_data_gpu = semantic_data_gpu.cpu()
-            del semantic_data_gpu
-            torch.cuda.empty_cache()
+            # Explicit cleanup after prediction
+            if x.device.type != 'cpu':
+                x = x.cpu()
+                del x
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         
         return results['class_preds'], results['class_mapping']
     
@@ -187,6 +232,7 @@ class TextualClassifier:
     ) -> torch.Tensor:
         """
         Get class probabilities using the base model.
+        Memory-efficient implementation using mixed precision.
         
         Parameters:
         -----------
@@ -196,15 +242,40 @@ class TextualClassifier:
         Returns:
         --------
         torch.Tensor
-            Class probabilities
+            Class probabilities on CPU
         """
         # Preprocess data
         x = self.preprocess_data(data)
         
-        # Get base model predictions
-        with torch.no_grad():
-            outputs = self.model(x)
-            probs = torch.softmax(outputs['class_logits'], dim=-1)
+        # Get base model predictions with mixed precision if enabled
+        try:
+            with torch.no_grad():
+                if self.use_mixed_precision and torch.cuda.is_available() and x.device.type == 'cuda':
+                    # CUDA with mixed precision
+                    with torch.cuda.amp.autocast():
+                        outputs = self.model(x)
+                else:
+                    # Standard precision for MPS/CPU or when mixed precision is disabled
+                    outputs = self.model(x)
+                
+                # Get class logits and compute probabilities
+                class_logits = outputs['class_logits']
+                
+                # Do softmax on CPU to save memory
+                class_logits_cpu = class_logits.cpu()
+                probs = torch.softmax(class_logits_cpu, dim=-1)
+                
+                # Clean up
+                del outputs
+                del class_logits
+                del class_logits_cpu
+        finally:
+            # Explicit cleanup
+            if x.device.type != 'cpu':
+                x = x.cpu()
+                del x
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         
         return probs
 

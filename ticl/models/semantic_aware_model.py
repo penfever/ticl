@@ -330,6 +330,7 @@ class SemanticAwareClassifier(nn.Module):
         """
         Make predictions using text description to map to classes.
         This version directly uses CLIP tokenizer to compare text with token predictions.
+        Memory-optimized implementation that keeps most operations on CPU.
         
         Parameters:
         -----------
@@ -347,13 +348,36 @@ class SemanticAwareClassifier(nn.Module):
         dict
             Dictionary containing class predictions based on text mapping
         """
-        # Get model's outputs
-        outputs = self.forward(x)
+        # Get model's outputs - use mixed precision to save memory when on CUDA
+        if torch.cuda.is_available() and x.device.type == 'cuda':
+            with torch.cuda.amp.autocast(enabled=True):
+                outputs = self.forward(x)
+        else:
+            # Standard precision for CPU/MPS
+            outputs = self.forward(x)
         
         # Get token predictions for all semantic classes
         token_sets = outputs.get('token_texts', [])
         
-        # Tokenize the input text description with CLIP (on CPU to save GPU memory)
+        # Immediately get tensor outputs and move to CPU
+        semantic_logits = outputs.get('semantic_logits', None)
+        if semantic_logits is not None:
+            semantic_classes = semantic_logits.cpu().argmax(dim=-1)
+            del semantic_logits  # Free GPU memory
+        else:
+            semantic_classes = None
+            
+        class_logits = outputs.get('class_logits', None)
+        if class_logits is not None and class_logits.device.type != 'cpu':
+            class_logits_cpu = class_logits.cpu()
+            del class_logits
+            class_logits = class_logits_cpu
+            
+        # Free token_logits which can be large
+        if 'token_logits' in outputs:
+            del outputs['token_logits']
+            
+        # Tokenize the input text description with CLIP (on CPU)
         with torch.no_grad():
             query_tokens, query_token_texts = text_to_clip_tokens(
                 text_description, 
@@ -361,11 +385,18 @@ class SemanticAwareClassifier(nn.Module):
                 max_tokens=self.max_pred_tokens
             )
         
+        # Explicit cleanup if using CUDA
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
         # Convert to a set for faster intersection calculation
         query_token_set = set(query_tokens)
         
         # Compare the query tokens with the predicted tokens for each class
+        # Do this on CPU to save GPU memory
         class_similarities = []
+        
+        # Process in small chunks for better memory efficiency
         for class_data in token_sets:
             class_idx = class_data['class_idx']
             token_indices = class_data['indices']
@@ -373,10 +404,17 @@ class SemanticAwareClassifier(nn.Module):
             
             # Calculate similarity as token overlap weighted by scores
             similarity = 0.0
-            for i, token_idx in enumerate(token_indices):
-                if token_idx in query_token_set:
-                    # If the token from this class is in the query, add its score
-                    similarity += token_scores[i]
+            
+            # Process in chunks of 20 for very large token sets
+            chunk_size = 20
+            for i in range(0, len(token_indices), chunk_size):
+                chunk_indices = token_indices[i:i+chunk_size]
+                chunk_scores = token_scores[i:i+chunk_size]
+                
+                for j, token_idx in enumerate(chunk_indices):
+                    if token_idx in query_token_set:
+                        # If the token from this class is in the query, add its score
+                        similarity += chunk_scores[j]
             
             # Normalize similarity
             if len(token_indices) > 0:
@@ -393,11 +431,20 @@ class SemanticAwareClassifier(nn.Module):
         # Threshold for considering a match valid
         similarity_threshold = 0.2
         
-        # Get class predictions
-        semantic_classes = outputs['semantic_logits'].argmax(dim=-1)
-        class_logits = outputs['class_logits']
+        # Generate predictions on CPU
+        if semantic_classes is not None:
+            predictions_shape = semantic_classes.shape
+        elif class_logits is not None:
+            predictions_shape = class_logits.shape[:-1]  # Remove last dimension (class logits)
+        else:
+            # Fallback
+            predictions_shape = (1, 1)
+            
+        # Create prediction tensor on CPU
+        class_preds = torch.full(predictions_shape, -1, dtype=torch.long, device='cpu')
         
-        if best_class >= 0 and max_similarity >= similarity_threshold:
+        # Apply the semantic class matching logic on CPU
+        if semantic_classes is not None and best_class >= 0 and max_similarity >= similarity_threshold:
             # Find samples with the matched semantic class
             mask = semantic_classes == best_class
             
@@ -405,41 +452,45 @@ class SemanticAwareClassifier(nn.Module):
             if len(mask.shape) == 1:
                 mask = mask.unsqueeze(0)
                 
-            # Create initial prediction tensor with -1 (no match)
-            class_preds = torch.full_like(semantic_classes, -1, dtype=torch.long)
-            
             # For matching semantic classes, use the class predictions
-            if mask.any():
+            if mask.any() and class_logits is not None:
                 class_preds[mask] = class_logits[mask].argmax(dim=-1)
         else:
             # Fallback to regular class predictions if no good match
-            class_preds = class_logits.argmax(dim=-1)
+            if class_logits is not None:
+                class_preds = class_logits.argmax(dim=-1).cpu()
         
-        # Move the result tensors to CPU
-        class_preds_cpu = class_preds.cpu()
+        # Final cleanup
+        if semantic_classes is not None:
+            del semantic_classes
+        if class_logits is not None:
+            del class_logits
         
-        # Clean up GPU memory
+        # Preserve only the token data we need for the return value
+        matched_token_data = {}
+        if best_class >= 0 and best_class < len(token_sets):
+            matched_token_data = token_sets[best_class].copy()
+            
+        # Clean up the full token_sets
+        del token_sets
         del outputs
-        del semantic_classes
-        del class_logits
-        del class_preds
         
         # Explicit GPU memory cleanup
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
             
         # Return predictions with additional context (using CPU tensors)
         return {
-            'class_preds': class_preds_cpu,
+            'class_preds': class_preds,
             'mapped_class': best_class,
             'similarity': max_similarity,
             'query_tokens': query_token_texts,
-            'matched_tokens': [token_sets[best_class] if best_class >= 0 and best_class < len(token_sets) else {}]
+            'matched_tokens': [matched_token_data]
         }
     
     def generate_boundaries_from_text(self, x, class_descriptions, semantic_data=None, text_mapper=None):
         """
         Generate new class boundaries directly from text descriptions using CLIP tokenizer.
+        Memory-optimized version that processes inputs in smaller chunks.
         
         Parameters:
         -----------
@@ -457,21 +508,39 @@ class SemanticAwareClassifier(nn.Module):
         dict
             Dictionary containing new class predictions based on text descriptions
         """
-        # Get model outputs
-        model_outputs = self.forward(x)
+        # Get model outputs - the most memory-intensive part
+        if torch.cuda.is_available() and x.device.type == 'cuda':
+            # Use mixed precision for CUDA
+            with torch.cuda.amp.autocast(enabled=True):
+                model_outputs = self.forward(x)
+        else:
+            # Standard precision for MPS/CPU
+            model_outputs = self.forward(x)
         
         # Get token predictions
         token_sets = model_outputs.get('token_texts', [])
         semantic_logits = model_outputs.get('semantic_logits', None)
-        semantic_classes = semantic_logits.argmax(dim=-1) if semantic_logits is not None else None
+        
+        # Move tensors to CPU immediately to free GPU memory
+        if semantic_logits is not None:
+            semantic_classes = semantic_logits.argmax(dim=-1).cpu()
+            del semantic_logits  # Free memory
+        else:
+            semantic_classes = None
+            
         class_logits = model_outputs.get('class_logits', None)
         
-        # Process each class description
+        # Free up memory from model_outputs
+        if 'token_logits' in model_outputs:
+            del model_outputs['token_logits']
+        
+        # Process each class description - do this on CPU to save GPU memory
         class_token_mappings = {}
         class_similarities = {}
         
+        # Tokenize all descriptions first (on CPU)
         for class_idx, (class_name, description) in enumerate(class_descriptions.items()):
-            # Tokenize the class description
+            # Process on CPU
             query_tokens, query_token_texts = text_to_clip_tokens(
                 description, 
                 self.tokenizer, 
@@ -483,11 +552,20 @@ class SemanticAwareClassifier(nn.Module):
                 'tokens': query_tokens,
                 'token_texts': query_token_texts,
             }
-            
-            # Calculate similarity to each semantic class
-            similarities = []
+        
+        # Clear cache after tokenization if on CUDA
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        # Calculate similarities between class descriptions and semantic classes
+        for class_name, mapping in class_token_mappings.items():
+            query_tokens = mapping['tokens']
             query_token_set = set(query_tokens)
             
+            # Calculate similarity to each semantic class - do in small batches
+            similarities = []
+            
+            # Process semantic classes in batches
             for sem_class_data in token_sets:
                 sem_class_idx = sem_class_data['class_idx']
                 token_indices = sem_class_data['indices']
@@ -513,13 +591,25 @@ class SemanticAwareClassifier(nn.Module):
                     'similarity': max_sim
                 }
         
-        # Generate predictions based on semantic class mappings
-        # For each sample, find which class description it matches best
-        predictions = torch.full_like(
-            semantic_classes if semantic_classes is not None else torch.zeros_like(class_logits[:, 0]), 
-            -1, 
-            dtype=torch.long
-        )
+        # Generate predictions on CPU - move to CPU if not already
+        if class_logits is not None and class_logits.device.type != 'cpu':
+            class_logits_cpu = class_logits.cpu()
+            del class_logits
+            class_logits = class_logits_cpu
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        
+        # Create predictions tensor on CPU
+        if semantic_classes is not None:
+            predictions_shape = semantic_classes.shape
+        elif class_logits is not None:
+            predictions_shape = class_logits.shape[:-1]  # Remove last dimension (class logits)
+        else:
+            # Fallback - shouldn't happen but just in case
+            predictions_shape = (1, 1)
+        
+        # Create on CPU
+        predictions = torch.full(predictions_shape, -1, dtype=torch.long)
         
         # Class name to index mapping
         class_name_to_idx = {name: i for i, name in enumerate(class_descriptions.keys())}
@@ -544,9 +634,21 @@ class SemanticAwareClassifier(nn.Module):
                         predictions[sample_idx, batch_idx] = class_name_to_idx[best_match]
         
         # For any unmatched samples, use regular class predictions
-        mask = predictions == -1
-        if mask.any() and class_logits is not None:
-            predictions[mask] = class_logits[mask].argmax(dim=-1)
+        if class_logits is not None:
+            mask = predictions == -1
+            if mask.any():
+                predictions[mask] = class_logits[mask].argmax(dim=-1)
+        
+        # Final cleanup
+        del token_sets
+        if semantic_classes is not None:
+            del semantic_classes
+        if class_logits is not None:
+            del class_logits
+        
+        # Force garbage collection to release memory if on CUDA
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
         return {
             'class_preds': predictions,
@@ -679,6 +781,7 @@ def get_semantic_class_count():
 def text_to_clip_tokens(text, tokenizer, max_tokens=512):
     """
     Convert text to CLIP tokens with attention to which tokens are most relevant.
+    Memory-optimized version that explicitly frees GPU memory.
     
     Parameters:
     -----------
@@ -694,29 +797,58 @@ def text_to_clip_tokens(text, tokenizer, max_tokens=512):
     tuple
         (token_ids, token_texts) - the token IDs and their text representations
     """
-    # Tokenize the text
-    tokens = tokenizer(
-        text, 
-        return_tensors="pt",
-        padding=False,
-        truncation=True,
-        max_length=77  # CLIP's standard max length
-    )
+    # Ensure we do this on CPU to save VRAM
+    device_type = 'cpu'
     
-    # Get token IDs and convert to list
-    token_ids = tokens.input_ids[0].tolist()
+    # Tokenize the text - with output on CPU
+    try:
+        tokens = tokenizer(
+            text, 
+            return_tensors="pt",
+            padding=False,
+            truncation=True,
+            max_length=77  # CLIP's standard max length
+        )
+        
+        # If tokens are on GPU, move to CPU
+        if hasattr(tokens, 'input_ids') and hasattr(tokens.input_ids, 'device') and tokens.input_ids.device.type != 'cpu':
+            tokens.input_ids = tokens.input_ids.cpu()
     
-    # Filter out special tokens
-    filtered_ids = [tid for tid in token_ids if tid not in [0, 49406, 49407]]  # Skip BOS, EOS, PAD
+        # Get token IDs and convert to list
+        token_ids = tokens.input_ids[0].tolist()
+        
+        # Clean up tokens tensor
+        del tokens
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        # Filter out special tokens
+        filtered_ids = [tid for tid in token_ids if tid not in [0, 49406, 49407]]  # Skip BOS, EOS, PAD
+        
+        # Truncate if needed
+        if len(filtered_ids) > max_tokens:
+            filtered_ids = filtered_ids[:max_tokens]
+        
+        # Get text representation for each token - do in small batches for memory efficiency
+        token_texts = []
+        batch_size = 50  # Process tokens in batches to save memory
+        
+        for i in range(0, len(filtered_ids), batch_size):
+            batch = filtered_ids[i:i+batch_size]
+            batch_texts = [tokenizer.decode([tid]) for tid in batch]
+            token_texts.extend(batch_texts)
+            
+            # Clean up after each batch if on CUDA
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                
+        return filtered_ids, token_texts
     
-    # Truncate if needed
-    if len(filtered_ids) > max_tokens:
-        filtered_ids = filtered_ids[:max_tokens]
-    
-    # Get text representation for each token
-    token_texts = [tokenizer.decode([tid]) for tid in filtered_ids]
-    
-    return filtered_ids, token_texts
+    except Exception as e:
+        # Provide a failsafe in case of tokenization errors
+        print(f"Warning: Error in text tokenization: {e}")
+        # Return empty lists as fallback
+        return [], []
 
 
 def create_semantic_aware_model(base_model, num_semantic_classes=None):

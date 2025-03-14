@@ -121,7 +121,8 @@ def load_semantic_prior_data(
     log_file_path: str = "ticl/datasets/completed_columns.json",
     clip_tokenizer_name: str = "openai/clip-vit-base-patch32",
     target_tensor_size: Optional[int] = None,
-    force_non_numeric: bool = True
+    force_non_numeric: bool = True,
+    max_columns: Optional[int] = None
 ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
     """
     Load semantic column data from completed_columns.json.
@@ -141,6 +142,8 @@ def load_semantic_prior_data(
         Target size for all tensors (will pad/truncate as needed)
     force_non_numeric : bool
         If True, only include columns that don't appear to be numeric
+    max_columns : int, optional
+        If set, limit the number of columns to load to save memory
         
     Returns:
     --------
@@ -172,14 +175,25 @@ def load_semantic_prior_data(
         target_tensor_size = max(sizes) if sizes else 100
         logger.info(f"Using detected maximum tensor size: {target_tensor_size}")
     
-    # Process each column
+    # Filter non-numeric columns first
+    filtered_columns = {}
     for col_name, tensor_data in completed_columns.items():
-        # Skip numeric columns if requested
-        if force_non_numeric and is_numeric_column(col_name):
-            continue
-        
+        if not force_non_numeric or not is_numeric_column(col_name):
+            filtered_columns[col_name] = tensor_data
+    
+    # If max_columns is set, limit the number of columns to process
+    if max_columns is not None and max_columns < len(filtered_columns):
+        # Sort by column name for deterministic behavior
+        sorted_cols = sorted(filtered_columns.keys())
+        # Take the first max_columns
+        selected_cols = sorted_cols[:max_columns]
+        filtered_columns = {col: filtered_columns[col] for col in selected_cols}
+        logger.info(f"Limited to {len(filtered_columns)} columns due to max_columns={max_columns}")
+    
+    # Process each column
+    for col_name, tensor_data in filtered_columns.items():
         # Convert tensor data to tensor
-        col_tensor = torch.tensor(tensor_data)
+        col_tensor = torch.tensor(tensor_data, dtype=torch.int32)  # Use int32 to save memory
         
         # Ensure consistent tensor size
         if col_tensor.size(0) < target_tensor_size:
@@ -243,11 +257,12 @@ def get_random_semantic_data(
         Tensor of shape [num_classes, tensor_size] containing semantic data
     """
     try:
-        # Try to load real data first
+        # Try to load real data first, but limit to exactly num_classes columns to save memory
         _, column_values = load_semantic_prior_data(
             log_file_path=log_file_path,
             target_tensor_size=tensor_size,
-            force_non_numeric=True
+            force_non_numeric=True,
+            max_columns=num_classes * 2  # Load slightly more than needed for some variety
         )
         
         # If we have enough columns, sample from them
@@ -258,7 +273,12 @@ def get_random_semantic_data(
             
             # Stack tensors
             tensors = [column_values[columns[i]] for i in selected_columns]
-            return torch.stack(tensors)
+            semantic_tensor = torch.stack(tensors)
+            
+            # Force to int32 to save memory
+            semantic_tensor = semantic_tensor.to(dtype=torch.int32)
+            
+            return semantic_tensor
     except (FileNotFoundError, ValueError) as e:
         logger.warning(f"Could not load semantic data from file: {e}")
     
@@ -268,7 +288,7 @@ def get_random_semantic_data(
     # Scale to the range [1, 49404]
     random_tensor = 1 + random_tensor * (49404 - 1)
     # Round to the nearest integer
-    random_tensor = torch.round(random_tensor)
+    random_tensor = torch.round(random_tensor).to(dtype=torch.int32)  # Use int32 to save memory
     
     return random_tensor
 
