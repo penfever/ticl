@@ -294,8 +294,9 @@ class ClassificationAdapter:
         tuple
             (Updated feature tensor, Semantic info dictionary)
         """
-        # Import the semantic prior data
-        from ticl.datasets.semantic_prior_data_sample import random_tensor as semantic_data
+        # Use the semantic prior data from the top of the file
+        # which is loaded from semantic_prior_data_loader
+        global semantic_data
         
         # Make sure semantic_data is on the correct device
         semantic_data = semantic_data.to(device)

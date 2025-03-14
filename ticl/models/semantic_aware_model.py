@@ -51,26 +51,26 @@ class SemanticAwareClassifier(nn.Module):
         
         # Optimized transformer architecture targeting ~20M parameters
         # Project input features to a larger dimension
-        transformer_dim = 640  # Increased from 512 to 640
+        transformer_dim = 512
         self.semantic_projection = nn.Linear(self.emsize, transformer_dim)
         
         # Powerful transformer for semantic token prediction
         transformer_layer = nn.TransformerEncoderLayer(
             d_model=transformer_dim,
-            nhead=10,  # Increased from 8 to 10
-            dim_feedforward=2560,  # Increased from 2048 to 2560 (4x hidden dim)
+            nhead=8,
+            dim_feedforward=2048,
             dropout=0.1,
             batch_first=True,
             activation="gelu"
         )
         self.semantic_transformer = nn.TransformerEncoder(
             transformer_layer,
-            num_layers=4  # Keep at 4 layers
+            num_layers=4
         )
         
         # Token-level prediction head
         # Expanded prediction space closer to full CLIP vocabulary
-        self.max_pred_tokens = 3072  # Increased from 2048 to 3072
+        self.max_pred_tokens = 2048
         
         # Initialize the token prediction head:
         # For each semantic class, predict probabilities over tokens

@@ -150,7 +150,7 @@ def train_epoch(
                 avg_loss = sum(batch_loss_history[-10:]) / min(len(batch_loss_history), 10)
                 progress_desc += f' | Loss: {avg_loss:.4f}'
             
-            progress_desc += f' | Train/Test: {single_eval_pos}/{data[1].shape[0] - single_eval_pos}'
+            progress_desc += f' | TrainSeq/TestSeq: {single_eval_pos}/{data[1].shape[0] - single_eval_pos}'
             
             if gpu_util > 0:
                 progress_desc += f' | GPU: {gpu_util}%'

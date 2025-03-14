@@ -331,7 +331,7 @@ The `TextualClassifier` class provides a simplified interface for text-based cla
 
 ```python
 from ticl.text_classifier import TextualClassifier
-from ticl.datasets.semantic_prior_data_sample import random_tensor
+from ticl.datasets.semantic_prior_data_loader import get_random_semantic_data
 from ticl.model_builder import get_model
 
 # Load a model trained with semantic features
@@ -347,7 +347,7 @@ config = {
 _, model, _, _ = get_model(config, device='cpu', should_train=False)
 
 # Create the text classifier
-classifier = TextualClassifier(model, random_tensor)
+classifier = TextualClassifier(model, get_random_semantic_data())
 
 # Classify using a text description
 predictions, similarity = classifier.classify_with_text(
