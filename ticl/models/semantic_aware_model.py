@@ -782,7 +782,7 @@ def get_clip_text_embeddings(texts, clip_model, tokenizer, batch_size=5, device=
         return torch.zeros((0, clip_model.config.hidden_size), device=processing_device)
 
 
-def create_semantic_aware_model(base_model, num_semantic_classes=None, freeze_clip=True):
+def create_semantic_aware_model(base_model, num_semantic_classes=None, freeze_clip=False):
     """
     Factory function to create a CLIP-style semantic-aware model.
     
