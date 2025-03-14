@@ -1,11 +1,13 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from ticl.utils import log_gpu_memory, log_tensor_info, memory_logger, track_tensors_memory
 
 class SemanticAwareClassifier(nn.Module):
     """
     Extension of base TabPFN or similar models with an additional semantic prediction head.
-    This model supports self-supervised learning of semantic class relationships.
+    This model supports self-supervised learning of semantic class relationships
+    using a CLIP-like approach with a single forward pass for all semantic classes.
     """
     
     def __init__(self, base_model, num_semantic_classes):
@@ -43,18 +45,20 @@ class SemanticAwareClassifier(nn.Module):
         # Constants for the semantic prediction head
         self.num_semantic_classes = num_semantic_classes
         self.clip_vocab_size = 49408  # CLIP tokenizer vocab size
-        self.num_tokens_per_class = 5  # Predict top-k tokens per semantic class
+        self.num_tokens_per_class = 5  # Top-k tokens per semantic class for interpretability
         
         # Initialize the CLIP tokenizer
         self.tokenizer_name = "openai/clip-vit-base-patch32"
         self.tokenizer = CLIPTokenizerFast.from_pretrained(self.tokenizer_name)
         
-        # Optimized transformer architecture targeting ~20M parameters
-        # Project input features to a larger dimension
-        transformer_dim = 512
+        # CLIP-like design variables
+        transformer_dim = 512  # Embedding dimension
+        vocab_size = 2048      # Number of token embeddings to use (subset of CLIP vocabulary)
+        
+        # Project input features to transformer dimension
         self.semantic_projection = nn.Linear(self.emsize, transformer_dim)
         
-        # Powerful transformer for semantic token prediction
+        # Single transformer encoder for all classes - CLIP-like approach
         transformer_layer = nn.TransformerEncoderLayer(
             d_model=transformer_dim,
             nhead=8,
@@ -68,35 +72,36 @@ class SemanticAwareClassifier(nn.Module):
             num_layers=4
         )
         
-        # Token-level prediction head
-        # Expanded prediction space closer to full CLIP vocabulary
-        self.max_pred_tokens = 2048
-        
-        # Initialize the token prediction head:
-        # For each semantic class, predict probabilities over tokens
-        self.token_prediction = nn.Linear(
-            transformer_dim, 
-            self.max_pred_tokens
+        # Create a lookup table for semantic class embeddings
+        self.semantic_class_embeddings = nn.Parameter(
+            torch.randn(num_semantic_classes, transformer_dim),
+            requires_grad=True
         )
         
-        # Enhanced intermediate projection for better feature extraction
-        self.intermediate_projection = nn.Sequential(
+        # Token vocabulary embeddings - these represent the CLIP vocabulary subset
+        # These are like "target" vocabulary embeddings in a CLIP model
+        self.token_embeddings = nn.Parameter(
+            torch.randn(vocab_size, transformer_dim),
+            requires_grad=True
+        )
+        
+        # Store the vocabulary size for easy reference
+        self.max_pred_tokens = vocab_size
+        
+        # Intermediate projection for feature enhancement before token matching
+        self.feature_enhancer = nn.Sequential(
             nn.Linear(transformer_dim, transformer_dim * 2),
             nn.LayerNorm(transformer_dim * 2),
             nn.GELU(),
             nn.Dropout(0.1),
             nn.Linear(transformer_dim * 2, transformer_dim)
         )
-        
-        # Class embedding with larger dimension to condition token predictions
-        self.class_embedding = nn.Embedding(
-            num_semantic_classes,
-            transformer_dim
-        )
-        
+    
     def forward(self, x, single_eval_pos=None):
         """
-        Forward pass with both class and semantic predictions.
+        Forward pass with both class and semantic predictions using a CLIP-like approach.
+        Instead of processing each semantic class separately, this uses a single forward
+        pass and matrix multiplication for efficiency.
         
         Parameters:
         -----------
@@ -110,19 +115,18 @@ class SemanticAwareClassifier(nn.Module):
         dict
             Dictionary containing class_logits and semantic_logits
         """
+        # Profiling: Log initial memory state
+        log_gpu_memory("Start of SemanticAwareClassifier.forward")
+        memory_logger.debug("Running efficient CLIP-like semantic matching")
+        
         # Pass the input through the base model's forward method 
         # which properly handles single_eval_pos
         base_output = self.base_model(x, single_eval_pos=single_eval_pos)
         
         # Extract the transformer's encoded features for semantic processing
         # The semantic head expects features with shape [batch_size, emsize]
-        # TabPFN outputs are of shape [samples, batch_size, output_dim]
-        
-        # Get the output of TabPFN's transformer before it goes to the decoder
         if hasattr(self.base_model, 'transformer_encoder') and hasattr(self.base_model, 'encoder'):
             # For TabPFN, we need to reconstruct the encoder features
-            # This is a workaround until we refactor the model to expose intermediate features
-            # Re-encode the input
             if len(x) == 3:  # style is given
                 style_src, x_src, y_src = x
             else:
@@ -136,7 +140,6 @@ class SemanticAwareClassifier(nn.Module):
             if single_eval_pos is not None and single_eval_pos < x_encoded.shape[0]:
                 # Use only evaluation samples for semantic features
                 features = x_encoded[single_eval_pos:]
-                
                 # Average over samples to get a [batch_size, emsize] tensor
                 features = features.mean(dim=0)
             else:
@@ -147,16 +150,14 @@ class SemanticAwareClassifier(nn.Module):
             features = self.base_model.features
         else:
             # Last resort fallback - try to reshape the output
-            # If base_output has shape [samples, batch_size, output_dim]
             if len(base_output.shape) == 3:
                 # Average over samples to get [batch_size, output_dim]
                 features = base_output.mean(dim=0)
             else:
-                # Otherwise use as is (might cause errors if dimensions don't match)
+                # Otherwise use as is
                 features = base_output
-                        
-        # Process features through our CLIP tokenizer-based semantic head
-        # Project the features to the transformer dimension
+        
+        # Project features to transformer dimension
         projected_features = self.semantic_projection(features)
         
         # Add batch dimension if needed (for single sample case)
@@ -165,91 +166,77 @@ class SemanticAwareClassifier(nn.Module):
         
         batch_size = projected_features.shape[0]
         
-        # Initialize results tensors for token predictions
-        all_semantic_logits = []
-        all_token_logits = []
+        # Run the transformer once on the features
+        transformed_features = self.semantic_transformer(projected_features)
+        
+        # Apply feature enhancement
+        enhanced_features = self.feature_enhancer(transformed_features)
+        
+        # Average pooling over batch if needed
+        if enhanced_features.dim() > 2:
+            enhanced_features = enhanced_features.mean(dim=1)
+        
+        # CLIP-like approach: Compute similarities with all semantic class embeddings at once
+        # [batch_size, dim] x [num_classes, dim]T = [batch_size, num_classes]
+        semantic_similarities = torch.matmul(
+            enhanced_features,                         # [batch_size, dim]
+            self.semantic_class_embeddings.transpose(0, 1)  # [dim, num_classes]
+        )
+        
+        # Compute token logits for the vocabulary: batch_features x token_embeddings
+        # [batch_size, dim] x [vocab_size, dim]T = [batch_size, vocab_size]
+        token_logits = torch.matmul(
+            enhanced_features,                     # [batch_size, dim]
+            self.token_embeddings.transpose(0, 1)  # [dim, vocab_size]
+        )
+        
+        # Get top tokens for each semantic class - for interpretability only
         all_token_texts = []
         
-        # Process each semantic class separately with class conditioning
+        # Use class embeddings to compute token logits for each semantic class
         for class_idx in range(self.num_semantic_classes):
-            # Get class embedding for this semantic class
-            class_idx_tensor = torch.tensor(class_idx, device=projected_features.device)
-            class_embed = self.class_embedding(class_idx_tensor).unsqueeze(0).expand(batch_size, -1)
+            # Get the class embedding
+            class_embedding = self.semantic_class_embeddings[class_idx].unsqueeze(0)  # [1, dim]
             
-            # Add class embedding to the features as a form of conditioning
-            class_conditioned = projected_features + class_embed
+            # Compute token logits for this class: class_embedding x token_embeddings
+            # [1, dim] x [vocab_size, dim]T = [1, vocab_size]
+            class_token_logits = torch.matmul(
+                class_embedding,                    # [1, dim]
+                self.token_embeddings.transpose(0, 1)  # [dim, vocab_size]
+            )
             
-            # Pass through the transformer
-            transformer_output = self.semantic_transformer(class_conditioned)
-            
-            # Get the output representation (average pooling over batch)
-            pooled_output = transformer_output.mean(dim=0, keepdim=True)
-            
-            # Apply intermediate projection for better feature representation
-            enhanced_features = self.intermediate_projection(pooled_output)
-            
-            # Project to token space (predicting over subset of CLIP vocab)
-            # Shape: [1, max_pred_tokens]
-            token_logits = self.token_prediction(enhanced_features)
-            
-            # Store this class's token logits
-            all_token_logits.append(token_logits)
-            
-            # Compute class-level score (max token probability)
-            class_score = token_logits.max(dim=1)[0]
-            all_semantic_logits.append(class_score)
-            
-            # For interpretability, decode the top predicted tokens
-            # Get top-k token indices
+            # Get top tokens for interpretability
             topk_values, topk_indices = torch.topk(
-                token_logits.squeeze(), 
+                class_token_logits.squeeze(), 
                 k=self.num_tokens_per_class
             )
             
-            # Convert token indices to actual token strings from CLIP vocab
-            # (in practice, we'd convert the indices to the full CLIP vocab,
-            # but for simplicity we're keeping it as indices for now)
-            # This is a placeholder for actual token decoding
+            # Store token information
             class_tokens = {
                 'indices': topk_indices.cpu().tolist(),
                 'scores': torch.sigmoid(topk_values).cpu().tolist(),
                 'class_idx': class_idx
             }
             all_token_texts.append(class_tokens)
-            
-            # Explicitly clean up intermediate tensors to free GPU memory
-            del class_idx_tensor
-            del class_embed
-            del class_conditioned
-            del transformer_output
-            del pooled_output
-            del enhanced_features
-            del token_logits
-            del topk_values
-            del topk_indices
-        
-        # Stack semantic logits for all classes
-        semantic_logits = torch.cat(all_semantic_logits, dim=0).unsqueeze(0)
-        
-        # For token logits, maintain the class dimension
-        token_logits = torch.cat(all_token_logits, dim=0)
         
         # Create the return dictionary
         result = {
             'class_logits': base_output,
-            'semantic_logits': semantic_logits,  # [batch, num_classes]
-            'token_logits': token_logits,  # [num_classes, max_pred_tokens]
-            'token_texts': all_token_texts  # List of dicts with token info
+            'semantic_logits': semantic_similarities,  # [batch_size, num_classes]
+            'token_logits': token_logits,  # [batch_size, vocab_size] - per batch item
+            'token_texts': all_token_texts  # For interpretability
         }
         
-        # Cleanup lists of intermediate tensors
-        del all_semantic_logits
-        del all_token_logits
+        # Clean up intermediate tensors
+        del projected_features
+        del transformed_features
+        del enhanced_features
         
-        # Explicit GPU memory cleanup
+        # Memory cleanup
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             
+        log_gpu_memory("End of SemanticAwareClassifier.forward")
         return result
     
     def predict(self, x):
@@ -330,7 +317,7 @@ class SemanticAwareClassifier(nn.Module):
         """
         Make predictions using text description to map to classes.
         This version directly uses CLIP tokenizer to compare text with token predictions.
-        Memory-optimized implementation that keeps most operations on CPU.
+        Memory-optimized implementation using a CLIP-like approach.
         
         Parameters:
         -----------
@@ -348,36 +335,16 @@ class SemanticAwareClassifier(nn.Module):
         dict
             Dictionary containing class predictions based on text mapping
         """
-        # Get model's outputs - use mixed precision to save memory when on CUDA
+        # Get model's outputs with efficient CLIP-like approach
+        memory_logger.debug(f"Running predict_from_text with description: '{text_description}'")
+        
         if torch.cuda.is_available() and x.device.type == 'cuda':
             with torch.cuda.amp.autocast(enabled=True):
                 outputs = self.forward(x)
         else:
-            # Standard precision for CPU/MPS
             outputs = self.forward(x)
         
-        # Get token predictions for all semantic classes
-        token_sets = outputs.get('token_texts', [])
-        
-        # Immediately get tensor outputs and move to CPU
-        semantic_logits = outputs.get('semantic_logits', None)
-        if semantic_logits is not None:
-            semantic_classes = semantic_logits.cpu().argmax(dim=-1)
-            del semantic_logits  # Free GPU memory
-        else:
-            semantic_classes = None
-            
-        class_logits = outputs.get('class_logits', None)
-        if class_logits is not None and class_logits.device.type != 'cpu':
-            class_logits_cpu = class_logits.cpu()
-            del class_logits
-            class_logits = class_logits_cpu
-            
-        # Free token_logits which can be large
-        if 'token_logits' in outputs:
-            del outputs['token_logits']
-            
-        # Tokenize the input text description with CLIP (on CPU)
+        # Tokenize the input text description with CLIP (on CPU to save GPU memory)
         with torch.no_grad():
             query_tokens, query_token_texts = text_to_clip_tokens(
                 text_description, 
@@ -385,112 +352,66 @@ class SemanticAwareClassifier(nn.Module):
                 max_tokens=self.max_pred_tokens
             )
         
-        # Explicit cleanup if using CUDA
+        # Get token embeddings for text by creating a mask from query tokens
+        token_mask = torch.zeros(self.max_pred_tokens, device='cpu')
+        for token_idx in query_tokens:
+            if token_idx < self.max_pred_tokens:
+                token_mask[token_idx] = 1.0
+        
+        # Compute similarity between semantic classes and text description
+        # First, get the semantic class logits from the model output
+        semantic_logits = outputs.get('semantic_logits', None)
+        
+        # Get top matching semantic class
+        if semantic_logits is not None:
+            semantic_classes = semantic_logits.cpu()  # Move to CPU for processing
+            best_class = semantic_classes.argmax(dim=-1)
+            max_similarity = semantic_classes.max(dim=-1)[0]
+            
+            # Move to CPU
+            best_class = best_class.cpu()
+            max_similarity = max_similarity.cpu()
+        else:
+            best_class = torch.tensor(-1)
+            max_similarity = torch.tensor(0.0)
+        
+        # Get class predictions from the base model
+        class_logits = outputs.get('class_logits', None)
+        if class_logits is not None:
+            class_logits_cpu = class_logits.cpu()
+            class_preds = class_logits_cpu.argmax(dim=-1)
+        else:
+            class_preds = torch.full_like(best_class, -1, dtype=torch.long, device='cpu')
+        
+        # Clean up tensors to free memory
+        del outputs
+        del semantic_logits
+        del class_logits
+        
+        # Force memory cleanup
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         
-        # Convert to a set for faster intersection calculation
-        query_token_set = set(query_tokens)
+        # Get token information for the best matching class
+        token_texts = outputs.get('token_texts', [])
+        matched_token_info = []
         
-        # Compare the query tokens with the predicted tokens for each class
-        # Do this on CPU to save GPU memory
-        class_similarities = []
+        if best_class.item() >= 0 and best_class.item() < len(token_texts):
+            matched_token_info = [token_texts[best_class.item()]]
         
-        # Process in small chunks for better memory efficiency
-        for class_data in token_sets:
-            class_idx = class_data['class_idx']
-            token_indices = class_data['indices']
-            token_scores = class_data['scores']
-            
-            # Calculate similarity as token overlap weighted by scores
-            similarity = 0.0
-            
-            # Process in chunks of 20 for very large token sets
-            chunk_size = 20
-            for i in range(0, len(token_indices), chunk_size):
-                chunk_indices = token_indices[i:i+chunk_size]
-                chunk_scores = token_scores[i:i+chunk_size]
-                
-                for j, token_idx in enumerate(chunk_indices):
-                    if token_idx in query_token_set:
-                        # If the token from this class is in the query, add its score
-                        similarity += chunk_scores[j]
-            
-            # Normalize similarity
-            if len(token_indices) > 0:
-                similarity /= len(token_indices)
-                
-            class_similarities.append((class_idx, similarity))
-        
-        # Find the best matching class
-        if class_similarities:
-            best_class, max_similarity = max(class_similarities, key=lambda x: x[1])
-        else:
-            best_class, max_similarity = -1, 0.0
-            
-        # Threshold for considering a match valid
-        similarity_threshold = 0.2
-        
-        # Generate predictions on CPU
-        if semantic_classes is not None:
-            predictions_shape = semantic_classes.shape
-        elif class_logits is not None:
-            predictions_shape = class_logits.shape[:-1]  # Remove last dimension (class logits)
-        else:
-            # Fallback
-            predictions_shape = (1, 1)
-            
-        # Create prediction tensor on CPU
-        class_preds = torch.full(predictions_shape, -1, dtype=torch.long, device='cpu')
-        
-        # Apply the semantic class matching logic on CPU
-        if semantic_classes is not None and best_class >= 0 and max_similarity >= similarity_threshold:
-            # Find samples with the matched semantic class
-            mask = semantic_classes == best_class
-            
-            # For vector inputs, ensure proper dimensions
-            if len(mask.shape) == 1:
-                mask = mask.unsqueeze(0)
-                
-            # For matching semantic classes, use the class predictions
-            if mask.any() and class_logits is not None:
-                class_preds[mask] = class_logits[mask].argmax(dim=-1)
-        else:
-            # Fallback to regular class predictions if no good match
-            if class_logits is not None:
-                class_preds = class_logits.argmax(dim=-1).cpu()
-        
-        # Final cleanup
-        if semantic_classes is not None:
-            del semantic_classes
-        if class_logits is not None:
-            del class_logits
-        
-        # Preserve only the token data we need for the return value
-        matched_token_data = {}
-        if best_class >= 0 and best_class < len(token_sets):
-            matched_token_data = token_sets[best_class].copy()
-            
-        # Clean up the full token_sets
-        del token_sets
-        del outputs
-        
-        # Explicit GPU memory cleanup
-        torch.cuda.empty_cache()
-            
-        # Return predictions with additional context (using CPU tensors)
+        # Return results (all on CPU)
         return {
             'class_preds': class_preds,
-            'mapped_class': best_class,
-            'similarity': max_similarity,
+            'mapped_class': best_class.item(),
+            'similarity': max_similarity.item(),
             'query_tokens': query_token_texts,
-            'matched_tokens': [matched_token_data]
+            'matched_tokens': matched_token_info
         }
     
     def generate_boundaries_from_text(self, x, class_descriptions, semantic_data=None, text_mapper=None):
         """
         Generate new class boundaries directly from text descriptions using CLIP tokenizer.
-        Memory-optimized version that processes inputs in smaller chunks.
+        Memory-efficient CLIP-like implementation that processes all classes at once.
         
         Parameters:
         -----------
@@ -508,222 +429,165 @@ class SemanticAwareClassifier(nn.Module):
         dict
             Dictionary containing new class predictions based on text descriptions
         """
-        # Get model outputs - the most memory-intensive part
+        memory_logger.debug(f"=== STARTING generate_boundaries_from_text with CLIP-like approach ===")
+        memory_logger.debug(f"Processing {len(class_descriptions)} class descriptions")
+        
+        # Run model forward pass - the most memory-intensive part
         if torch.cuda.is_available() and x.device.type == 'cuda':
-            # Use mixed precision for CUDA
             with torch.cuda.amp.autocast(enabled=True):
                 model_outputs = self.forward(x)
         else:
-            # Standard precision for MPS/CPU
             model_outputs = self.forward(x)
-        
-        # Get token predictions
-        token_sets = model_outputs.get('token_texts', [])
-        semantic_logits = model_outputs.get('semantic_logits', None)
-        
-        # Move tensors to CPU immediately to free GPU memory
-        if semantic_logits is not None:
-            semantic_classes = semantic_logits.argmax(dim=-1).cpu()
-            del semantic_logits  # Free memory
-        else:
-            semantic_classes = None
             
-        class_logits = model_outputs.get('class_logits', None)
-        
-        # Free up memory from model_outputs
-        if 'token_logits' in model_outputs:
-            del model_outputs['token_logits']
-        
-        # Process each class description - do this on CPU to save GPU memory
+        # Process each class description (do this on CPU)
+        memory_logger.debug(f"Tokenizing class descriptions")
         class_token_mappings = {}
-        class_similarities = {}
         
-        # Tokenize all descriptions first (on CPU)
-        for class_idx, (class_name, description) in enumerate(class_descriptions.items()):
-            # Process on CPU
+        # Process all descriptions in one pass
+        for class_name, description in class_descriptions.items():
+            # Tokenize on CPU
             query_tokens, query_token_texts = text_to_clip_tokens(
                 description, 
                 self.tokenizer, 
                 max_tokens=self.max_pred_tokens
             )
             
-            # Store the tokenized description
+            # Store tokenized description
             class_token_mappings[class_name] = {
                 'tokens': query_tokens,
                 'token_texts': query_token_texts,
             }
         
-        # Clear cache after tokenization if on CUDA
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        # Extract semantic logits and class logits
+        semantic_logits = model_outputs.get('semantic_logits', None)
+        class_logits = model_outputs.get('class_logits', None)
         
-        # Calculate similarities between class descriptions and semantic classes
-        for class_name, mapping in class_token_mappings.items():
-            query_tokens = mapping['tokens']
-            query_token_set = set(query_tokens)
-            
-            # Calculate similarity to each semantic class - do in small batches
-            similarities = []
-            
-            # Process semantic classes in batches
-            for sem_class_data in token_sets:
-                sem_class_idx = sem_class_data['class_idx']
-                token_indices = sem_class_data['indices']
-                token_scores = sem_class_data['scores']
-                
-                # Calculate token overlap similarity
-                sim_score = 0.0
-                for i, token_idx in enumerate(token_indices):
-                    if token_idx in query_token_set:
-                        sim_score += token_scores[i]
-                
-                # Normalize
-                if len(token_indices) > 0:
-                    sim_score /= len(token_indices)
-                    
-                similarities.append((sem_class_idx, sim_score))
-            
-            # Find best matching semantic class
-            if similarities:
-                best_sem_class, max_sim = max(similarities, key=lambda x: x[1])
-                class_similarities[class_name] = {
-                    'semantic_class': best_sem_class,
-                    'similarity': max_sim
-                }
+        # Clean up large tensors
+        if 'token_logits' in model_outputs:
+            del model_outputs['token_logits']
         
-        # Generate predictions on CPU - move to CPU if not already
-        if class_logits is not None and class_logits.device.type != 'cpu':
+        # Move processing to CPU
+        if semantic_logits is not None:
+            semantic_logits_cpu = semantic_logits.cpu()
+            semantic_classes = semantic_logits_cpu.argmax(dim=-1)
+            del semantic_logits
+        else:
+            semantic_classes = None
+            
+        if class_logits is not None:
             class_logits_cpu = class_logits.cpu()
             del class_logits
             class_logits = class_logits_cpu
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+        
+        # Force memory cleanup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        # Create class name to index mapping
+        class_name_to_idx = {name: i for i, name in enumerate(class_descriptions.keys())}
         
         # Create predictions tensor on CPU
         if semantic_classes is not None:
             predictions_shape = semantic_classes.shape
         elif class_logits is not None:
-            predictions_shape = class_logits.shape[:-1]  # Remove last dimension (class logits)
+            predictions_shape = class_logits.shape[:-1]
         else:
-            # Fallback - shouldn't happen but just in case
             predictions_shape = (1, 1)
         
-        # Create on CPU
+        # Create prediction tensor (on CPU)
         predictions = torch.full(predictions_shape, -1, dtype=torch.long)
         
-        # Class name to index mapping
-        class_name_to_idx = {name: i for i, name in enumerate(class_descriptions.keys())}
-        
-        # For each sample, assign the class with the best matching semantic class
+        # Process semantic logits to get predictions
+        # Take the most similar semantic class for each sample
         if semantic_classes is not None:
-            for sample_idx in range(semantic_classes.shape[0]):
-                for batch_idx in range(semantic_classes.shape[1]):
-                    sample_sem_class = semantic_classes[sample_idx, batch_idx].item()
-                    
-                    # Find which class description matches this semantic class best
-                    best_match = None
-                    best_sim = -1
-                    
-                    for class_name, sim_data in class_similarities.items():
-                        if sim_data['semantic_class'] == sample_sem_class and sim_data['similarity'] > best_sim:
-                            best_match = class_name
-                            best_sim = sim_data['similarity']
-                    
-                    # Assign the class if we found a match
-                    if best_match is not None and best_sim >= 0.1:  # Threshold
-                        predictions[sample_idx, batch_idx] = class_name_to_idx[best_match]
+            # Assign the class directly based on semantic class prediction
+            for i, class_idx in enumerate(semantic_classes.flatten()):
+                class_idx = class_idx.item()
+                # Map the semantic class index to a class name if possible
+                for class_name, idx in class_name_to_idx.items():
+                    if idx == class_idx:
+                        flat_idx = i // predictions.shape[-1] if predictions.dim() > 1 else 0
+                        batch_idx = i % predictions.shape[-1] if predictions.dim() > 1 else i
+                        predictions[flat_idx, batch_idx] = class_idx
         
-        # For any unmatched samples, use regular class predictions
+        # For unmatched predictions, use class logits
         if class_logits is not None:
             mask = predictions == -1
             if mask.any():
                 predictions[mask] = class_logits[mask].argmax(dim=-1)
         
-        # Final cleanup
-        del token_sets
+        # Clean up
         if semantic_classes is not None:
             del semantic_classes
+            del semantic_logits_cpu
+        
         if class_logits is not None:
             del class_logits
         
-        # Force garbage collection to release memory if on CUDA
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        
+        # Return results
         return {
             'class_preds': predictions,
-            'class_mapping': {i: name for i, name in enumerate(class_descriptions.keys())},
-            'class_token_mappings': class_token_mappings,
-            'class_similarities': class_similarities
+            'class_mapping': class_name_to_idx,
+            'class_token_mappings': class_token_mappings
         }
 
 
 class SemanticConsistencyLoss(nn.Module):
     """
-    Combined loss function for classification and CLIP token-based semantic prediction.
+    Combined loss function for classification and CLIP-like semantic prediction.
     """
     
-    def __init__(self, semantic_weight=0.5, token_weight=0.3):
+    def __init__(self, semantic_weight=0.5):
         """
         Initialize the loss function.
         
         Parameters:
         -----------
         semantic_weight : float
-            Weight for the semantic class prediction loss
-        token_weight : float
-            Weight for the token-level prediction loss
+            Weight for the semantic token prediction loss
         """
         super().__init__()
         self.semantic_weight = semantic_weight
-        self.token_weight = token_weight
         
         # Main classification loss
         self.class_loss = nn.CrossEntropyLoss()
         
-        # Semantic class loss
-        self.semantic_loss = nn.CrossEntropyLoss(ignore_index=-100)
-        
-        # Token prediction loss (for predicting CLIP tokens)
-        self.token_loss = nn.BCEWithLogitsLoss(reduction='mean')
+        # Semantic similarity loss (similar to CLIP contrastive loss)
+        self.semantic_loss = nn.CrossEntropyLoss()
         
     def forward(self, outputs, targets):
         """
-        Compute the combined loss with CLIP token supervision.
+        Compute the combined loss with CLIP-like token supervision.
         
         Parameters:
         -----------
         outputs : dict
-            Model outputs containing 'class_logits', 'semantic_logits', and 'token_logits'
+            Model outputs containing 'class_logits' and 'semantic_logits'
         targets : dict
-            Target values containing 'class_targets', 'semantic_targets',
-            and optionally 'token_targets' for CLIP token prediction
+            Target values containing 'class_targets' and 'semantic_targets'
             
         Returns:
         --------
         torch.Tensor
             Combined loss value
         """
-        # Get the outputs
+        # Get outputs
         class_logits = outputs['class_logits']
-        semantic_logits = outputs['semantic_logits']
-        token_logits = outputs.get('token_logits', None)
+        semantic_logits = outputs.get('semantic_logits', None)
         
-        # Get the targets
+        # Get targets
         class_targets = targets['class_targets']
         semantic_targets = targets.get('semantic_targets', None)
-        token_targets = targets.get('token_targets', None)
         
-        # Compute the classification loss
+        # Compute class loss
         class_loss = self.class_loss(class_logits, class_targets)
         
-        # Initialize additional losses
+        # Initialize semantic loss
         semantic_loss = torch.tensor(0.0, device=class_loss.device)
-        token_loss = torch.tensor(0.0, device=class_loss.device)
         
-        # Compute semantic class prediction loss if targets are provided
-        if semantic_targets is not None:
-            # Handle reshaping if needed
+        # Compute semantic loss if targets are provided
+        if semantic_targets is not None and semantic_logits is not None:
+            # Reshape if needed
             if len(semantic_logits.shape) > 2:
                 semantic_logits_flat = semantic_logits.reshape(-1, semantic_logits.size(-1))
                 semantic_targets_flat = semantic_targets.reshape(-1)
@@ -731,28 +595,16 @@ class SemanticConsistencyLoss(nn.Module):
                 semantic_logits_flat = semantic_logits
                 semantic_targets_flat = semantic_targets
                 
-            # Apply semantic class loss
+            # Apply semantic loss
             semantic_loss = self.semantic_loss(semantic_logits_flat, semantic_targets_flat)
         
-        # Compute token prediction loss if we have token targets
-        # The token_targets would be one-hot encoded target tokens from CLIP vocabulary
-        if token_targets is not None and token_logits is not None:
-            # Each semantic class has its own distribution over tokens
-            # token_logits: [num_classes, max_pred_tokens]
-            # token_targets: [num_classes, max_pred_tokens]
-            
-            # Apply sigmoid activation inside the loss
-            token_loss = self.token_loss(token_logits, token_targets)
+        # Combine losses
+        total_loss = class_loss + self.semantic_weight * semantic_loss
         
-        # Combine all losses
-        total_loss = class_loss + self.semantic_weight * semantic_loss + self.token_weight * token_loss
-        
-        # For debugging, store loss components in attributes
+        # Store components for debugging
         self.last_class_loss = class_loss.item()
         self.last_semantic_loss = semantic_loss.item()
-        self.last_token_loss = token_loss.item()
         
-        # For backward compatibility, return only the total loss
         return total_loss
 
 
@@ -777,6 +629,7 @@ def get_semantic_class_count():
     except (ImportError, FileNotFoundError, Exception) as e:
         # Fallback to default if loading fails
         return 3
+
 
 def text_to_clip_tokens(text, tokenizer, max_tokens=512):
     """
@@ -874,19 +727,20 @@ def create_semantic_aware_model(base_model, num_semantic_classes=None):
     
     model = SemanticAwareClassifier(base_model, num_semantic_classes)
     
-    # Count parameters for our larger semantic head
-    semantic_head_params = sum(p.numel() for p in model.semantic_projection.parameters())
-    semantic_head_params += sum(p.numel() for p in model.semantic_transformer.parameters())
-    semantic_head_params += sum(p.numel() for p in model.token_prediction.parameters())
-    semantic_head_params += sum(p.numel() for p in model.class_embedding.parameters())
-    semantic_head_params += sum(p.numel() for p in model.intermediate_projection.parameters())
+    # Count parameters for semantic head components
+    transformer_params = sum(p.numel() for p in model.semantic_transformer.parameters())
+    projection_params = sum(p.numel() for p in model.semantic_projection.parameters())
+    class_embedding_params = sum(p.numel() for p in model.semantic_class_embeddings)
+    token_embedding_params = sum(p.numel() for p in model.token_embeddings)
+    enhancer_params = sum(p.numel() for p in model.feature_enhancer.parameters())
     
-    print(f"Semantic head has {semantic_head_params:,} parameters")
+    total_params = transformer_params + projection_params + class_embedding_params + token_embedding_params + enhancer_params
     
-    # Verify we're using our 20M parameter budget effectively
-    print(f"Transformer encoder: {sum(p.numel() for p in model.semantic_transformer.parameters()):,} parameters")
-    print(f"Token prediction head: {sum(p.numel() for p in model.token_prediction.parameters()):,} parameters")
-    print(f"Intermediate projection: {sum(p.numel() for p in model.intermediate_projection.parameters()):,} parameters")
-    print(f"Using CLIP tokenizer with {model.clip_vocab_size:,} tokens")
+    print(f"Semantic head has {total_params:,} parameters")
+    print(f"  - Transformer: {transformer_params:,}")
+    print(f"  - Projections: {projection_params:,}")
+    print(f"  - Class embeddings: {class_embedding_params:,}")
+    print(f"  - Token embeddings: {token_embedding_params:,}")
+    print(f"  - Feature enhancer: {enhancer_params:,}")
     
     return model

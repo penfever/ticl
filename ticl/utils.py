@@ -11,6 +11,28 @@ import numpy as np
 import torch, time
 from contextlib import nullcontext
 import pkg_resources
+import psutil
+import gc
+import logging
+
+# Configure memory profiling logging - using DEBUG level by default
+memory_logger = logging.getLogger("memory_profiling")
+memory_logger.setLevel(logging.DEBUG)  # Change to INFO or DEBUG to see memory logs
+# Add console handler if not already present
+if not memory_logger.handlers:
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    # Only show INFO and higher to console by default
+    console_handler.setLevel(logging.INFO)
+    memory_logger.addHandler(console_handler)
+    # Also add file handler for persistent logging - include DEBUG messages
+    try:
+        file_handler = logging.FileHandler("memory_profile.log")
+        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+        file_handler.setLevel(logging.DEBUG)
+        memory_logger.addHandler(file_handler)
+    except:
+        memory_logger.warning("Could not create log file for memory profiling")
 
 from pathlib import Path
 from torch import nn
@@ -916,3 +938,124 @@ def get_autocast_context(device=None, dtype=None, scaler=None):
         else:
             # Unsupported device
             return nullcontext()
+
+
+# Memory profiling functions
+def get_gpu_memory_info():
+    """Get current GPU memory usage information in a readable format"""
+    if not torch.cuda.is_available():
+        return "CUDA not available"
+    
+    info = []
+    device_count = torch.cuda.device_count()
+    
+    for i in range(device_count):
+        props = torch.cuda.get_device_properties(i)
+        total_memory = props.total_memory / (1024**3)  # Convert to GB
+        allocated = torch.cuda.memory_allocated(i) / (1024**3)
+        reserved = torch.cuda.memory_reserved(i) / (1024**3)
+        free = total_memory - allocated
+        
+        info.append(f"GPU {i} ({props.name}): "
+                   f"Used: {allocated:.2f}GB | "
+                   f"Reserved: {reserved:.2f}GB | "
+                   f"Free: {free:.2f}GB | "
+                   f"Total: {total_memory:.2f}GB")
+    
+    return '\n'.join(info)
+
+def log_gpu_memory(location="unspecified"):
+    """Log detailed GPU memory info at a specific location in the code"""
+    if not torch.cuda.is_available():
+        return
+    
+    # Get memory stats
+    memory_info = get_gpu_memory_info()
+    
+    # Log memory info at DEBUG level
+    memory_logger.debug(f"GPU Memory at {location}:\n{memory_info}")
+    
+    # Force synchronization to get accurate timing
+    torch.cuda.synchronize()
+
+def log_memory_usage_decorator(func):
+    """Decorator to log memory usage before and after a function call"""
+    def wrapper(*args, **kwargs):
+        # Log memory before function execution
+        func_name = func.__name__
+        log_gpu_memory(f"BEFORE {func_name}")
+        
+        # Force garbage collection
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
+        try:
+            # Call the function
+            result = func(*args, **kwargs)
+            
+            # Log memory after function execution
+            log_gpu_memory(f"AFTER {func_name}")
+            
+            return result
+        except Exception as e:
+            # Log memory in case of exception
+            log_gpu_memory(f"EXCEPTION in {func_name}: {str(e)}")
+            raise
+    
+    return wrapper
+
+def get_tensor_memory_usage(tensor):
+    """Get memory usage of a tensor in MB"""
+    if tensor is None:
+        return 0
+    
+    # Calculate bytes
+    try:
+        if hasattr(tensor, 'element_size'):
+            # PyTorch tensor
+            memory_bytes = tensor.element_size() * tensor.nelement()
+        else:
+            # NumPy array or other objects with nbytes
+            memory_bytes = tensor.nbytes
+    except:
+        return 0
+    
+    # Convert to MB
+    return memory_bytes / (1024 * 1024)
+
+def log_tensor_info(tensor, name="Tensor"):
+    """Log information about a tensor including shape, device, memory usage"""
+    if tensor is None:
+        memory_logger.debug(f"{name}: None")
+        return
+    
+    try:
+        shape = tensor.shape
+        device = tensor.device if hasattr(tensor, 'device') else "unknown"
+        dtype = tensor.dtype if hasattr(tensor, 'dtype') else type(tensor)
+        memory_mb = get_tensor_memory_usage(tensor)
+        
+        memory_logger.debug(f"{name}: shape={shape}, device={device}, dtype={dtype}, memory={memory_mb:.2f}MB")
+    except:
+        memory_logger.debug(f"{name}: Could not get tensor info")
+
+def track_tensors_memory(obj, prefix=""):
+    """Recursively track memory usage of all tensors in an object"""
+    if isinstance(obj, torch.Tensor):
+        log_tensor_info(obj, f"{prefix}")
+        return get_tensor_memory_usage(obj)
+    
+    if isinstance(obj, dict):
+        total = 0
+        for k, v in obj.items():
+            total += track_tensors_memory(v, f"{prefix}.{k}" if prefix else k)
+        return total
+    
+    if isinstance(obj, (list, tuple)):
+        total = 0
+        for i, v in enumerate(obj):
+            total += track_tensors_memory(v, f"{prefix}[{i}]")
+        return total
+    
+    return 0
