@@ -224,8 +224,11 @@ def train_epoch(
                 avg_loss = sum(batch_loss_history[-10:]) / min(len(batch_loss_history), 10)
                 dl.set_postfix(loss=f"{avg_loss:.4f}", refresh=True)
             
-            # Backward pass
-            loss.backward()
+            # Backward pass with scaler if applicable
+            if scaler is not None:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
 
             # print("LOSS")
             # print(loss.mean().cpu().detach().item() * aggregate_k_gradients)
