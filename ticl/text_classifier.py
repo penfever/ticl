@@ -47,13 +47,13 @@ class TextualClassifier:
         else:
             self.device = device
             
-        # Store model and semantic data
+        # Store model and semantic data (keep semantic data on CPU to save GPU memory)
         self.model = model.to(self.device)
         self.model.eval()
-        self.semantic_data = semantic_data.to(self.device)
+        self.semantic_data = semantic_data.to("cpu")  # Store on CPU, only move to GPU when needed
         
-        # Initialize text mapper
-        self.text_mapper = SemanticTextMapper(device=self.device)
+        # Initialize text mapper - also keep on CPU for text processing
+        self.text_mapper = SemanticTextMapper(device="cpu")
         
     def preprocess_data(
         self, 
@@ -118,14 +118,23 @@ class TextualClassifier:
         # Preprocess data
         x = self.preprocess_data(data)
         
+        # Move semantic data to GPU only for this operation
+        semantic_data_gpu = self.semantic_data.to(self.device)
+        
         # Get predictions based on text
-        with torch.no_grad():
-            results = self.model.predict_from_text(
-                x, 
-                text_description, 
-                self.semantic_data,
-                self.text_mapper
-            )
+        try:
+            with torch.no_grad():
+                results = self.model.predict_from_text(
+                    x, 
+                    text_description, 
+                    semantic_data_gpu,
+                    self.text_mapper
+                )
+        finally:
+            # Make sure we clean up GPU memory even if there's an error
+            semantic_data_gpu = semantic_data_gpu.cpu()
+            del semantic_data_gpu
+            torch.cuda.empty_cache()
         
         return results['class_preds'], results['similarity']
     
@@ -152,14 +161,23 @@ class TextualClassifier:
         # Preprocess data
         x = self.preprocess_data(data)
         
+        # Move semantic data to GPU only for this operation
+        semantic_data_gpu = self.semantic_data.to(self.device)
+        
         # Generate boundaries and classify
-        with torch.no_grad():
-            results = self.model.generate_boundaries_from_text(
-                x,
-                class_descriptions,
-                self.semantic_data,
-                self.text_mapper
-            )
+        try:
+            with torch.no_grad():
+                results = self.model.generate_boundaries_from_text(
+                    x,
+                    class_descriptions,
+                    semantic_data_gpu,
+                    self.text_mapper
+                )
+        finally:
+            # Make sure we clean up GPU memory even if there's an error
+            semantic_data_gpu = semantic_data_gpu.cpu()
+            del semantic_data_gpu
+            torch.cuda.empty_cache()
         
         return results['class_preds'], results['class_mapping']
     
