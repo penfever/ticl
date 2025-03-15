@@ -303,10 +303,18 @@ def get_model(
     elif model_type in ['tabflex', 'ssm_tabpfn']:
         from ticl.models.tabflex import TabFlex
         config['linear_attention'].pop('causal_mask', None)
+        
+        # For TabFlex, we need to include the semantic features in the feature count
+        total_features = n_features
+        if semantic_feature_p > 0.0:
+            total_features += 50  # Add 50 features for semantic data
+            print(f"TabFlex: Including 50 semantic features in feature count ({n_features} + 50 = {total_features})")
+            
         model = TabFlex(
             n_out=n_out, 
-            n_features=n_features, 
-            y_encoder_layer=y_encoder, 
+            n_features=total_features,  # Include semantic features
+            y_encoder_layer=y_encoder,
+            semantic_feature_p=semantic_feature_p,  # Pass the semantic feature probability
             **config['linear_attention']
         )
     elif model_type == 'la_mothernet':

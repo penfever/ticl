@@ -34,12 +34,22 @@ class TabFlex(nn.Module):
         norm_output = False,
         feature_map = 'identity',
         linear_attention_cfg=None,
+        semantic_feature_p=None,
     ):
         super().__init__()
         self.classification_task = classification_task
         self.y_encoder = y_encoder_layer
         nhid = emsize * nhid_factor
         self.model = model
+        
+        # Store semantic feature probability if provided
+        if semantic_feature_p is not None:
+            self.semantic_feature_p = semantic_feature_p
+            print(f"TabFlex configured with semantic_feature_p={semantic_feature_p}")
+            print(f"TabFlex encoder will handle {n_features} features")
+            if semantic_feature_p > 0.0:
+                print(f"  - Original features: {n_features - 50}")
+                print(f"  - Semantic features: 50")
         
         self.linear_attention = get_linear_attention_layers(
             d_model = emsize,
@@ -146,3 +156,33 @@ class TabFlex(nn.Module):
         except RuntimeError as e:
             print(f"ERROR in decoder or slicing with output.shape={output.shape}, single_eval_pos={single_eval_pos}")
             raise e
+            
+    def store_feature_count(self, n_features, semantic_feature_p=None):
+        """
+        Store information about feature counts and semantic features.
+        This is used for debugging and model introspection.
+        
+        Parameters:
+        -----------
+        n_features : int
+            Total number of features
+        semantic_feature_p : float, optional
+            Probability of using semantic features
+        """
+        if not hasattr(self, 'semantic_feature_p'):
+            if semantic_feature_p is not None:
+                self.semantic_feature_p = semantic_feature_p
+            else:
+                self.semantic_feature_p = 0.0
+                
+        # Store the feature counts
+        self.total_features = n_features
+        
+        if self.semantic_feature_p > 0.0:
+            self.original_features = n_features - 50
+            self.semantic_features = 50
+        else:
+            self.original_features = n_features
+            self.semantic_features = 0
+            
+        print(f"TabFlex feature counts stored: total={self.total_features}, original={self.original_features}, semantic={self.semantic_features}")
