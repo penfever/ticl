@@ -19,21 +19,45 @@ import logging
 memory_logger = logging.getLogger("memory_profiling")
 memory_logger.setLevel(logging.DEBUG)  # Logger itself always captures DEBUG level
 
+# Create a more detailed formatter for debug logs
+debug_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s - [%(filename)s:%(lineno)d]')
+standard_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
 # Console handler with configurable level (will be set by CLI arg)
 console_handler = logging.StreamHandler()
-console_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+console_handler.setFormatter(standard_formatter)
 # Default to INFO, will be updated from command line
 console_handler.setLevel(logging.INFO)
 memory_logger.addHandler(console_handler)
 
+# Create log directory if it doesn't exist
+log_dir = "logs"
+if not os.path.exists(log_dir):
+    try:
+        os.makedirs(log_dir)
+    except Exception as e:
+        print(f"Could not create log directory: {e}")
+        log_dir = "."  # Fallback to current directory
+
 # File handler for persistent logging - always include DEBUG messages
 try:
-    file_handler = logging.FileHandler("memory_profile.log")
-    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    # General memory profile log
+    memory_log_path = os.path.join(log_dir, "memory_profile.log")
+    file_handler = logging.FileHandler(memory_log_path)
+    file_handler.setFormatter(debug_formatter)
     file_handler.setLevel(logging.DEBUG)
     memory_logger.addHandler(file_handler)
+    
+    # Specific semantic data log
+    semantic_log_path = os.path.join(log_dir, "semantic_data_debug.log")
+    semantic_handler = logging.FileHandler(semantic_log_path)
+    semantic_handler.setFormatter(debug_formatter)
+    semantic_handler.setLevel(logging.DEBUG)
+    memory_logger.addHandler(semantic_handler)
+    
+    print(f"Logging to {memory_log_path} and {semantic_log_path}")
 except Exception as e:
-    print(f"Could not create log file for memory profiling: {e}")
+    print(f"Could not create log files for debugging: {e}")
 
 # Function to set log level from command line
 def set_log_level(level_name):

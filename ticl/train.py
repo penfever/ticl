@@ -6,9 +6,10 @@ from torch import nn
 from tqdm import tqdm
 from torch.cuda.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+import logging
 
 import ticl.utils as utils
-from ticl.utils import ExponentialLR, ReduceLROnSpike, init_dist, get_autocast_context, IGNORE_INDEX
+from ticl.utils import ExponentialLR, ReduceLROnSpike, init_dist, get_autocast_context, IGNORE_INDEX, memory_logger
 
 import pdb
 
@@ -37,6 +38,50 @@ def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
     tuple
         (Loss, NaN share)
     """
+    # Debug logging for input data
+    memory_logger.debug(f"Loss inputs - targets shape: {targets.shape}, dtype: {targets.dtype}")
+    memory_logger.debug(f"Target values: min={targets.min().item()}, max={targets.max().item()}")
+    
+    # Try to get class distribution if targets are integers
+    try:
+        if torch.is_floating_point(targets):
+            # For float targets, bincount won't work directly
+            memory_logger.debug("Targets are float type - likely regression task")
+        else:
+            # For integer targets, we can use bincount
+            valid_targets = targets[targets>=0].long()  # Ensure long type for bincount
+            memory_logger.debug(f"Target classes distribution: {torch.bincount(valid_targets)}")
+    except Exception as e:
+        memory_logger.debug(f"Could not compute target distribution: {e}")
+    
+    # Log output structure
+    if isinstance(output, dict):
+        for k, v in output.items():
+            if isinstance(v, torch.Tensor):
+                memory_logger.debug(f"Model output['{k}']: shape={v.shape}, dtype={v.dtype}")
+                if k == 'class_logits':
+                    # Log more details about class predictions
+                    class_probs = torch.softmax(v, dim=-1)
+                    predicted_classes = torch.argmax(class_probs, dim=-1)
+                    memory_logger.debug(f"Predicted classes: {predicted_classes}")
+                    memory_logger.debug(f"Max class probability: {torch.max(class_probs, dim=-1)[0]}")
+    else:
+        memory_logger.debug(f"Model output: shape={output.shape}, dtype={output.dtype}")
+        # Log class predictions for standard output
+        if len(output.shape) > 1 and output.shape[-1] > 1:  # Multi-class case
+            class_probs = torch.softmax(output, dim=-1)
+            predicted_classes = torch.argmax(class_probs, dim=-1)
+            memory_logger.debug(f"Predicted classes: {predicted_classes}")
+    
+    # Log batch_info if present
+    if batch_info is not None:
+        memory_logger.debug(f"batch_info keys: {list(batch_info.keys())}")
+        if 'semantic_targets' in batch_info:
+            sem_targets = batch_info['semantic_targets']
+            memory_logger.debug(f"Semantic targets: shape={sem_targets.shape}, dtype={sem_targets.dtype}")
+            if sem_targets.numel() > 0:
+                memory_logger.debug(f"Semantic target values: min={sem_targets.min().item()}, max={sem_targets.max().item()}")
+    
     # Check if this is a semantic model with dictionary output
     is_semantic_model = isinstance(output, dict) and 'class_logits' in output and 'semantic_logits' in output
     
@@ -46,8 +91,22 @@ def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
         if isinstance(criterion, SemanticConsistencyLoss):
             # Extract semantic targets from batch info
             semantic_targets = None
-            if batch_info is not None and 'semantic_targets' in batch_info:
-                semantic_targets = batch_info['semantic_targets'].to(device)
+            
+            # Check if batch contains semantic targets
+            has_semantic_features = False
+            if batch_info is not None:
+                if 'semantic_targets' in batch_info:
+                    semantic_targets = batch_info['semantic_targets'].to(device)
+                    memory_logger.debug(f"Semantic targets moved to device: {device}")
+                    has_semantic_features = True
+                elif 'semantic_feature_p' in batch_info:
+                    # This batch was generated with semantic features disabled 
+                    # (determined by semantic_feature_p probability)
+                    memory_logger.debug(f"This batch has no semantic targets (semantic_feature_p: {batch_info.get('semantic_feature_p', 0.0)})")
+                    
+            # Log semantic feature presence
+            if not has_semantic_features:
+                memory_logger.debug("No semantic targets in this batch - normal with probability (1-semantic_feature_p)")
                 
             # Create target dictionary
             target_dict = {
@@ -55,17 +114,31 @@ def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
                 'semantic_targets': semantic_targets
             }
             
+            # Log targets dictionary
+            memory_logger.debug(f"Target dict - class_targets: {target_dict['class_targets'].shape}")
+            if semantic_targets is not None:
+                memory_logger.debug(f"Target dict - semantic_targets: {target_dict['semantic_targets'].shape}")
+                
+                # Check for valid semantic targets
+                valid_count = (semantic_targets != -100).sum().item()
+                if valid_count == 0:
+                    memory_logger.debug("WARNING: Semantic targets present but all are -100 (ignored)")
+            
             # Compute loss
+            memory_logger.debug("Computing loss with SemanticConsistencyLoss")
             loss = criterion(output, target_dict)
+            memory_logger.debug(f"Loss value: {loss.item()}")
             
             # Return loss as a tensor for compatibility
             return loss.unsqueeze(0).unsqueeze(0), 0.0
         else:
             # Fallback to just using class logits with standard loss
+            memory_logger.debug("Using standard loss with semantic model class_logits output")
             output = output['class_logits']
     
     # Standard loss functions
     if isinstance(criterion, nn.GaussianNLLLoss):
+        memory_logger.debug(f"Using GaussianNLLLoss")
         assert output.shape[-1] == 2, \
             'need to write a little bit of code to handle multiple regression targets at once'
 
@@ -73,17 +146,31 @@ def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
         var_pred = output[..., 1].abs()
         losses = criterion(mean_pred.flatten(), targets.to(device).flatten(), var=var_pred.flatten())
     elif isinstance(criterion, (nn.MSELoss, nn.BCEWithLogitsLoss)):
+        loss_name = 'MSELoss' if isinstance(criterion, nn.MSELoss) else 'BCEWithLogitsLoss'
+        memory_logger.debug(f"Using {loss_name}")
         losses = criterion(output.flatten(), targets.to(device).flatten())
     elif isinstance(criterion, nn.CrossEntropyLoss):
-        losses = criterion(
-            output.reshape(-1, n_out)[:, :int(targets.max()) + 1], 
-            targets.to(device).long().flatten(),
-        )
-    else:
-        losses = criterion(output, targets)
+        memory_logger.debug(f"Using CrossEntropyLoss")
+        # Debug reshape dimensions
+        reshaped_output = output.reshape(-1, n_out)[:, :int(targets.max()) + 1]
+        flattened_targets = targets.to(device).long().flatten()
+        memory_logger.debug(f"Reshaped output for CE loss: {reshaped_output.shape}")
+        memory_logger.debug(f"Flattened targets for CE loss: {flattened_targets.shape}")
         
+        losses = criterion(reshaped_output, flattened_targets)
+    else:
+        memory_logger.debug(f"Using custom criterion: {type(criterion).__name__}")
+        losses = criterion(output, targets)
+    
+    # Log final loss values
+    if isinstance(losses, torch.Tensor):
+        memory_logger.debug(f"Raw loss tensor: shape={losses.shape}, mean={losses.mean().item()}")
+    
     losses = losses.view(*output.shape[0:2])
-    return utils.torch_nanmean(losses.mean(0), return_nanshare=True)
+    loss_mean, nan_share = utils.torch_nanmean(losses.mean(0), return_nanshare=True)
+    memory_logger.debug(f"Final loss: {loss_mean.item()}, nan_share: {nan_share}")
+    
+    return loss_mean, nan_share
 
 
 def train_epoch(
@@ -121,16 +208,49 @@ def train_epoch(
     batch_loss_history = []
     
     for batch, batch_data in enumerate(dl):
+        # Debug log batch information
+        memory_logger.debug(f"Processing batch {batch}/{steps_per_epoch}")
+        memory_logger.debug(f"Batch data type: {type(batch_data)}, length: {len(batch_data)}")
+        
         # Unpack batch data - could now include info dict for semantic features
         if len(batch_data) == 3:
             # Standard format: (data, targets, single_eval_pos)
             data, targets, single_eval_pos = batch_data
             batch_info = None
+            memory_logger.debug("Standard batch format (no semantic info)")
         elif len(batch_data) == 4:
             # Extended format: (data, targets, single_eval_pos, info)
             data, targets, single_eval_pos, batch_info = batch_data
+            memory_logger.debug(f"Extended batch format with semantic info: {list(batch_info.keys() if batch_info else [])}")
         else:
             raise ValueError(f"Unexpected batch format with {len(batch_data)} elements")
+            
+        # Log data shapes and types
+        if isinstance(data, tuple):
+            memory_logger.debug(f"Data is tuple with {len(data)} elements")
+            for i, item in enumerate(data):
+                if torch.is_tensor(item):
+                    memory_logger.debug(f"  data[{i}]: shape={item.shape}, dtype={item.dtype}")
+        else:
+            memory_logger.debug(f"Data shape: {data.shape}, dtype: {data.dtype}")
+            
+        memory_logger.debug(f"Raw targets shape: {targets.shape}, dtype: {targets.dtype}")
+        memory_logger.debug(f"single_eval_pos: {single_eval_pos}")
+        
+        # Log semantic targets if present
+        if batch_info is not None and 'semantic_targets' in batch_info:
+            sem_targets = batch_info['semantic_targets']
+            memory_logger.debug(f"Semantic targets: shape={sem_targets.shape}, dtype={sem_targets.dtype}")
+            if sem_targets.numel() > 0:
+                try:
+                    memory_logger.debug(f"Semantic target values: min={sem_targets.min().item()}, max={sem_targets.max().item()}")
+                    
+                    # Only try to compute distribution if integer type
+                    if not torch.is_floating_point(sem_targets):
+                        valid_sem_targets = sem_targets[sem_targets>=0].long()
+                        memory_logger.debug(f"Semantic target distribution: {torch.bincount(valid_sem_targets)}")
+                except Exception as e:
+                    memory_logger.debug(f"Could not calculate semantic target stats: {e}")
         
         # Get GPU utilization if available
         if is_cuda:
@@ -188,19 +308,126 @@ def train_epoch(
                     device_data = data.to(device)
                 
                 # Forward pass
-                output = model(device_data, single_eval_pos=single_eval_pos)
+                memory_logger.debug(f"Running model forward pass with single_eval_pos={single_eval_pos}")
+                
+                # Check if we have semantic information to pass to the model
+                class_texts = None
+                
+                # Debug the batch_info contents
+                if batch_info is not None:
+                    memory_logger.debug(f"batch_info contains: {list(batch_info.keys())}")
+                    if 'semantic_feature_p' in batch_info:
+                        memory_logger.debug(f"semantic_feature_p = {batch_info['semantic_feature_p']}")
+                    if 'semantic_targets' in batch_info:
+                        memory_logger.debug(f"semantic_targets shape: {batch_info['semantic_targets'].shape}")
+                else:
+                    memory_logger.debug("batch_info is None")
+                
+                if batch_info is not None and 'class_token_patterns' in batch_info:
+                    # Extract class texts from token patterns
+                    class_token_patterns = batch_info['class_token_patterns']
+                    memory_logger.debug(f"Found class_token_patterns for {len(class_token_patterns)} classes")
+                    
+                    # Debug the token patterns
+                    for class_idx in sorted(class_token_patterns.keys())[:2]:  # Look at first few
+                        pattern = class_token_patterns[class_idx]
+                        memory_logger.debug(f"Class {class_idx} pattern keys: {list(pattern.keys())}")
+                        if 'tokens' in pattern:
+                            memory_logger.debug(f"Class {class_idx} tokens: {pattern['tokens'].shape} - Type: {type(pattern['tokens'])}")
+                    
+                    # Generate text descriptions from the class token patterns
+                    class_texts = []
+                    
+                    # Try to import CLIP tokenizer for token decoding
+                    try:
+                        from transformers import CLIPTokenizerFast
+                        tokenizer = CLIPTokenizerFast.from_pretrained("openai/clip-vit-base-patch32")
+                        has_tokenizer = True
+                        memory_logger.debug("Using CLIP tokenizer to decode tokens for class descriptions")
+                    except (ImportError, Exception):
+                        has_tokenizer = False
+                        memory_logger.debug("CLIP tokenizer not available, using simplified class descriptions")
+                    
+                    # Generate meaningful descriptions for each class
+                    for class_idx in sorted(class_token_patterns.keys()):
+                        pattern = class_token_patterns[class_idx]
+                        semantic_class = pattern.get('semantic_class', 0)
+                        
+                        # First try to use the class_name if available (from our enhanced token patterns)
+                        if 'class_name' in pattern:
+                            text = pattern['class_name']
+                            memory_logger.debug(f"Using class_name from pattern: {text}")
+                        # Otherwise, try to create a more descriptive text if we have token information and tokenizer
+                        elif 'tokens' in pattern and has_tokenizer and len(pattern['tokens']) > 0:
+                            try:
+                                # Get the tokens and try to decode them
+                                tokens = pattern['tokens'].cpu().tolist()
+                                token_texts = tokenizer.decode(tokens[:5])  # Use first few tokens
+                                # Clean up the token text
+                                token_texts = token_texts.replace("<|startoftext|>", "").replace("<|endoftext|>", "").strip()
+                                if token_texts:
+                                    text = f"Data class {class_idx}: {token_texts}"
+                                else:
+                                    text = f"Data class {class_idx} from semantic class {semantic_class}"
+                            except Exception as e:
+                                memory_logger.debug(f"Error decoding tokens: {e}")
+                                text = f"Data class {class_idx} from semantic class {semantic_class}"
+                        else:
+                            # Fallback to simple description
+                            text = f"Data class {class_idx} from semantic class {semantic_class}"
+                            
+                        memory_logger.debug(f"Class {class_idx} text: '{text}'")
+                            
+                        class_texts.append(text)
+                        
+                    memory_logger.debug(f"Generated {len(class_texts)} class text descriptions: {class_texts[:3]}...")
+                
+                # Pass class_texts to the model's forward method if available
+                output = model(device_data, single_eval_pos=single_eval_pos, class_texts=class_texts)
+                
+                # Log model output details
+                if isinstance(output, dict):
+                    memory_logger.debug(f"Model output is dictionary with keys: {list(output.keys())}")
+                    for k, v in output.items():
+                        if isinstance(v, torch.Tensor):
+                            memory_logger.debug(f"Output['{k}']: shape={v.shape}, dtype={v.dtype}")
+                else:
+                    memory_logger.debug(f"Model output: shape={output.shape}, dtype={output.dtype}")
 
+                # Process targets for evaluation 
+                memory_logger.debug(f"Pre-filtered targets shape: {targets.shape}")
                 if single_eval_pos is not None:
                     targets = targets[single_eval_pos:]
+                    memory_logger.debug(f"Filtered targets with single_eval_pos={single_eval_pos}, new shape: {targets.shape}")
+                    
                     # Also adjust semantic targets if present
                     if batch_info is not None and 'semantic_targets' in batch_info:
+                        orig_shape = batch_info['semantic_targets'].shape
                         batch_info['semantic_targets'] = batch_info['semantic_targets'][single_eval_pos:]
+                        memory_logger.debug(f"Filtered semantic targets from {orig_shape} to {batch_info['semantic_targets'].shape}")
+                        
+                        # Ensure semantic targets are long tensor type (for bincount and loss functions)
+                        if batch_info['semantic_targets'].dtype != torch.long:
+                            memory_logger.debug(f"Converting semantic targets from {batch_info['semantic_targets'].dtype} to torch.long")
+                            batch_info['semantic_targets'] = batch_info['semantic_targets'].long()
 
+                # Check for valid labels
                 valid_labels = targets != -100
-                if valid_labels.sum() == 0:
+                valid_count = valid_labels.sum().item()
+                memory_logger.debug(f"Valid labels: {valid_count}/{targets.numel()} ({valid_count/targets.numel()*100:.1f}%)")
+                
+                if valid_count == 0:
+                    memory_logger.debug("Skipping batch due to no valid labels")
                     continue
 
                 # Calculate loss
+                memory_logger.debug(f"Calculating loss with criterion: {type(criterion).__name__}")
+                memory_logger.debug(f"Criterion details: {criterion}")
+                
+                # Log any special criterion properties
+                if hasattr(criterion, 'semantic_weight'):
+                    memory_logger.debug(f"Semantic weight in loss: {criterion.semantic_weight}")
+                
                 loss, nan_share = eval_criterion(
                     criterion, 
                     targets, 
@@ -209,7 +436,11 @@ def train_epoch(
                     n_out=n_out,
                     batch_info=batch_info
                 )
+                
+                # Scale loss for gradient accumulation
+                original_loss = loss.item()
                 loss = loss / aggregate_k_gradients
+                memory_logger.debug(f"Original loss: {original_loss}, scaled for accumulation: {loss.item()}")
 
             # Get current batch loss value and log it
             current_batch_loss = loss.mean().cpu().detach().item() * aggregate_k_gradients

@@ -190,6 +190,7 @@ mlruns
 
 secrets.yml
 **/*.pt.partial*
+models_diff
 
 # drafts
 

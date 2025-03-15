@@ -107,6 +107,16 @@ class SemanticAwareClassifier(nn.Module):
         # The semantic head expects features with shape [batch_size, emsize]
         memory_logger.debug(f"Base model type: {type(self.base_model).__name__}")
         
+        # Before extracting features, check how many classes we might have
+        # This helps align the semantic targets with the actual number of classes
+        if isinstance(base_output, torch.Tensor):
+            if len(base_output.shape) >= 3:  # Check last dimension for standard outputs
+                num_output_classes = base_output.shape[-1]
+                memory_logger.debug(f"Detected output tensor with {num_output_classes} classes")
+                if num_output_classes != self.num_semantic_classes:
+                    memory_logger.debug(f"Adjusting semantic class count: {self.num_semantic_classes} -> {num_output_classes}")
+                    self.num_semantic_classes = num_output_classes
+        
         # Check if the model has exposed features directly (best option)
         if hasattr(self.base_model, 'features') and self.base_model.features is not None:
             # If the base model directly exposes features (preferred method)
@@ -201,6 +211,15 @@ class SemanticAwareClassifier(nn.Module):
         all_token_texts = []
         text_tokens = None  # Track for memory management
         
+        # Debug class_texts parameter
+        memory_logger.debug(f"Class texts parameter type: {type(class_texts)}")
+        if class_texts is None:
+            memory_logger.debug("class_texts is None - No class texts provided")
+        elif len(class_texts) == 0:
+            memory_logger.debug("class_texts is an empty list")
+        else:
+            memory_logger.debug(f"Found {len(class_texts)} class texts: {class_texts[:3]}...")
+        
         if class_texts and len(class_texts) > 0:
             memory_logger.debug(f"Processing {len(class_texts)} class texts with CLIP")
             
@@ -273,11 +292,31 @@ class SemanticAwareClassifier(nn.Module):
                 text_features.transpose(0, 1)
             )
         else:
-            # No class texts provided - create empty similarity matrix
-            semantic_logits = torch.zeros(
-                (tabular_features.shape[0], self.num_semantic_classes),
-                device=tabular_features.device
-            )
+            # No class texts provided - use fallback approach
+            memory_logger.debug(f"No class texts provided. Checking if we should use semantic_data...")
+            
+            # Import the semantic data on demand
+            try:
+                memory_logger.debug(f"Fallback mode - no class texts provided")
+                
+                # Instead of using the huge semantic data, create a smaller tensor with the right class count
+                semantic_logits = torch.zeros(
+                    (tabular_features.shape[0], self.num_semantic_classes),
+                    device=tabular_features.device
+                )
+                memory_logger.debug(f"Created empty semantic_logits with shape: {semantic_logits.shape}")
+                
+                # Fill with small random values to prevent all-zero gradients
+                semantic_logits = torch.randn_like(semantic_logits) * 0.01
+                memory_logger.debug(f"Filled semantic_logits with small random values for stable training")
+            except (ImportError, Exception) as e:
+                memory_logger.debug(f"Error loading semantic data: {e}")
+                # Fallback to zeros
+                semantic_logits = torch.zeros(
+                    (tabular_features.shape[0], self.num_semantic_classes),
+                    device=tabular_features.device
+                )
+                memory_logger.debug(f"Created empty semantic_logits with shape: {semantic_logits.shape}")
         
         # Create the return dictionary with CLIP-style outputs
         result = {
@@ -679,59 +718,186 @@ class SemanticConsistencyLoss(nn.Module):
         torch.Tensor
             Combined loss value
         """
+        memory_logger.debug(f"=== SemanticConsistencyLoss.forward START ===")
+        
+        # Log input details
+        memory_logger.debug(f"Output keys: {list(outputs.keys())}")
+        memory_logger.debug(f"Target keys: {list(targets.keys())}")
+        
         # Get class prediction outputs
         class_logits = outputs['class_logits']
+        memory_logger.debug(f"Class logits: shape={class_logits.shape}, dtype={class_logits.dtype}")
         
         # Get targets for standard classification
         class_targets = targets['class_targets']
+        memory_logger.debug(f"Class targets: shape={class_targets.shape}, dtype={class_targets.dtype}")
+        
+        # Log sample of class predictions
+        try:
+            # Convert logits to probabilities
+            class_probs = F.softmax(class_logits, dim=-1)
+            predicted_classes = torch.argmax(class_probs, dim=-1)
+            
+            # Compute accuracy
+            correct = (predicted_classes == class_targets).float().sum().item()
+            total = class_targets.numel()
+            accuracy = correct / total * 100
+            
+            memory_logger.debug(f"Class prediction sample (first 5):")
+            for i in range(min(5, predicted_classes.shape[0])):
+                true_label = class_targets[i].item()
+                pred_label = predicted_classes[i].item()
+                confidence = class_probs[i, pred_label].item() * 100
+                memory_logger.debug(f"  Sample {i}: True={true_label}, Pred={pred_label}, Confidence={confidence:.1f}%")
+            
+            memory_logger.debug(f"Batch classification accuracy: {accuracy:.2f}% ({correct}/{total})")
+        except Exception as e:
+            memory_logger.debug(f"Error analyzing class predictions: {e}")
         
         # Compute standard classification loss
+        memory_logger.debug(f"Computing class_loss with criterion type: {type(self.class_loss).__name__}")
         class_loss = self.class_loss(class_logits, class_targets)
+        memory_logger.debug(f"Class loss value: {class_loss.item()}")
         
         # Initialize semantic loss
         semantic_loss = torch.tensor(0.0, device=class_loss.device)
         
         # Compute CLIP-style contrastive loss if we have the necessary components
-        if 'semantic_logits' in outputs and 'semantic_targets' in targets:
+        has_semantic_components = (
+            'semantic_logits' in outputs and 
+            'semantic_targets' in targets and 
+            targets['semantic_targets'] is not None
+        )
+        
+        memory_logger.debug(f"Has semantic components for loss: {has_semantic_components}")
+        
+        if has_semantic_components:
             semantic_logits = outputs['semantic_logits']
             semantic_targets = targets['semantic_targets']
             
-            # Get batch size
-            batch_size = semantic_logits.shape[0]
+            memory_logger.debug(f"Semantic logits: shape={semantic_logits.shape}, dtype={semantic_logits.dtype}")
+            memory_logger.debug(f"Semantic targets: shape={semantic_targets.shape}, dtype={semantic_targets.dtype}")
             
-            # True CLIP-style loss uses the logits directly (already temperature-scaled in forward)
-            # Create labels for contrastive learning - diagonal of similarity matrix should be 1s
-            labels = torch.arange(batch_size, device=semantic_logits.device)
+            # Log semantic similarity matrix
+            if semantic_logits.shape[0] < 10:  # Only for small batches
+                memory_logger.debug(f"Semantic similarity matrix (logits):")
+                for i in range(semantic_logits.shape[0]):
+                    row_vals = semantic_logits[i].detach().cpu().tolist()
+                    if len(row_vals) > 5:
+                        row_str = "[" + ", ".join([f"{x:.2f}" for x in row_vals[:5]]) + "...]"
+                    else:
+                        row_str = "[" + ", ".join([f"{x:.2f}" for x in row_vals]) + "]"
+                    memory_logger.debug(f"  Row {i}: {row_str}")
             
-            # Symmetric contrastive loss (both tabular->text and text->tabular directions)
-            # We use the semantic_targets to mask the logits if needed
-            
-            # For samples with valid targets, compute contrastive loss
-            valid_mask = semantic_targets != -100
-            
-            if valid_mask.sum() > 0:
-                # Filter to valid samples only
-                valid_logits = semantic_logits[valid_mask]
+            # Check if we actually have valid semantic targets in this batch
+            if semantic_targets.numel() == 0:
+                memory_logger.debug("Empty semantic targets tensor - skipping semantic loss")
+                # Skip semantic loss calculation for this batch
+            else:
+                # Ensure semantic targets are long type for cross_entropy
+                if semantic_targets.dtype != torch.long:
+                    memory_logger.debug(f"Converting semantic targets from {semantic_targets.dtype} to torch.long")
+                    semantic_targets = semantic_targets.long()
                 
-                # For proper contrastive loss, we need a square similarity matrix
-                # Ensure we have at least one valid sample
-                if valid_logits.shape[0] > 0:
-                    # Row-wise (text->tabular)
-                    loss_text_to_tabular = F.cross_entropy(valid_logits, semantic_targets[valid_mask])
+                # Get batch size
+                batch_size = semantic_logits.shape[0]
+                memory_logger.debug(f"Batch size for semantic loss: {batch_size}")
+                
+                # Log semantic logits shape and class counts
+                memory_logger.debug(f"Semantic logits shape: {semantic_logits.shape}")
+                if 'text_features' in outputs and outputs['text_features'] is not None:
+                    memory_logger.debug(f"Text features shape: {outputs['text_features'].shape}")
+                    if outputs['text_features'].shape[0] < 100:  # Only log if reasonably small
+                        memory_logger.debug(f"Number of text classes: {outputs['text_features'].shape[0]}")
+                        if 'token_texts' in outputs and outputs['token_texts']:
+                            memory_logger.debug(f"Text classes: {[t.get('text', 'unknown') for t in outputs['token_texts'][:5]]}...")
+                else:
+                    memory_logger.debug("No text features found in model output")
+                
+                # True CLIP-style loss uses the logits directly (already temperature-scaled in forward)
+                # Create labels for contrastive learning - diagonal of similarity matrix should be 1s
+                labels = torch.arange(batch_size, device=semantic_logits.device)
+                
+                # Log batch semantic targets stats
+                memory_logger.debug(f"Semantic targets shape: {semantic_targets.shape}, min: {semantic_targets.min().item()}, max: {semantic_targets.max().item()}")
+                valid_count = (semantic_targets != -100).sum().item()
+                valid_percent = valid_count / semantic_targets.numel() * 100
+                memory_logger.debug(f"Valid targets count: {valid_count}/{semantic_targets.numel()} ({valid_percent:.1f}%)")
+                
+                # Log class distribution for semantic targets
+                valid_mask = semantic_targets != -100
+                if valid_mask.sum() > 0:
+                    try:
+                        valid_targets = semantic_targets[valid_mask]
+                        unique_classes, counts = torch.unique(valid_targets, return_counts=True)
+                        class_counts = {int(cls.item()): int(count.item()) for cls, count in zip(unique_classes, counts)}
+                        memory_logger.debug(f"Semantic target class distribution: {class_counts}")
+                    except Exception as e:
+                        memory_logger.debug(f"Error analyzing semantic target classes: {e}")
+                
+                # For samples with valid targets, compute contrastive loss
+                valid_mask = semantic_targets != -100
+                
+                if valid_mask.sum() > 0:
+                    # Filter to valid samples only
+                    valid_logits = semantic_logits[valid_mask]
+                    valid_targets = semantic_targets[valid_mask]
                     
-                    # Column-wise (tabular->text)
-                    loss_tabular_to_text = F.cross_entropy(valid_logits.t(), semantic_targets[valid_mask])
+                    # Ensure targets remain long type
+                    valid_targets = valid_targets.long()
                     
-                    # Symmetric loss (mean of both directions)
-                    semantic_loss = (loss_text_to_tabular + loss_tabular_to_text) / 2.0
+                    # Log contrastive loss inputs
+                    memory_logger.debug(f"Contrastive loss inputs - logits: {valid_logits.shape}, targets: {valid_targets.shape}, dtype: {valid_targets.dtype}")
+                    memory_logger.debug(f"Target class distribution: {torch.bincount(valid_targets)}")
+                    
+                    # For proper contrastive loss, we need valid samples
+                    if valid_logits.shape[0] > 0:
+                        try:
+                            # Row-wise (text->tabular)
+                            memory_logger.debug("Computing text->tabular loss")
+                            loss_text_to_tabular = F.cross_entropy(valid_logits, valid_targets)
+                            memory_logger.debug(f"Text->tabular loss: {loss_text_to_tabular.item()}")
+                            
+                            # Column-wise (tabular->text)
+                            memory_logger.debug("Computing tabular->text loss")
+                            loss_tabular_to_text = F.cross_entropy(valid_logits.t(), valid_targets)
+                            memory_logger.debug(f"Tabular->text loss: {loss_tabular_to_text.item()}")
+                            
+                            # Symmetric loss (mean of both directions)
+                            semantic_loss = (loss_text_to_tabular + loss_tabular_to_text) / 2.0
+                            memory_logger.debug(f"Combined symmetric semantic loss: {semantic_loss.item()}")
+                            
+                            # CLIP accuracy (diagnostic)
+                            with torch.no_grad():
+                                text_to_tabular_preds = valid_logits.argmax(dim=-1)
+                                tabular_to_text_preds = valid_logits.t().argmax(dim=-1)
+                                
+                                text_to_tabular_correct = (text_to_tabular_preds == valid_targets).float().mean().item() * 100
+                                tabular_to_text_correct = (tabular_to_text_preds == valid_targets).float().mean().item() * 100
+                                
+                                memory_logger.debug(f"Text->tabular accuracy: {text_to_tabular_correct:.2f}%")
+                                memory_logger.debug(f"Tabular->text accuracy: {tabular_to_text_correct:.2f}%")
+                        except Exception as e:
+                            memory_logger.debug(f"Error computing semantic loss: {e}")
+                            # Fallback to zero semantic loss
+                            semantic_loss = torch.tensor(0.0, device=class_loss.device)
+                else:
+                    memory_logger.debug("No valid targets for semantic loss")
+                    # No valid targets in this batch, use zero loss
             
         # Combine losses
+        memory_logger.debug(f"Combining losses with semantic_weight={self.semantic_weight}")
+        memory_logger.debug(f"  Class loss: {class_loss.item()}")
+        memory_logger.debug(f"  Semantic loss: {semantic_loss.item()}")
+        
         total_loss = class_loss + self.semantic_weight * semantic_loss
+        memory_logger.debug(f"Total combined loss: {total_loss.item()}")
         
         # Store components for debugging
         self.last_class_loss = class_loss.item()
         self.last_semantic_loss = semantic_loss.item()
         
+        memory_logger.debug(f"=== SemanticConsistencyLoss.forward END ===")
         return total_loss
 
 

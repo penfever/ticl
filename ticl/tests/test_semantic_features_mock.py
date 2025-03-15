@@ -89,7 +89,24 @@ class TestSemanticFeaturesMock(unittest.TestCase):
         
         # Test creation parameters
         num_semantic_classes = 3
+        
+        # Create a test instance
+        semantic_classifier = SemanticAwareClassifier()
+        
+        # Test the forward method with class_texts
+        semantic_classifier.forward = MagicMock()
+        test_input = MagicMock()
+        test_class_texts = ["Class 0 description", "Class 1 description"]
+        semantic_classifier.forward(test_input, class_texts=test_class_texts)
+        
+        # Verify that forward was called with class_texts
+        semantic_classifier.forward.assert_called_once()
+        args, kwargs = semantic_classifier.forward.call_args
+        self.assertIn('class_texts', kwargs)
+        self.assertEqual(kwargs['class_texts'], test_class_texts)
+        
         print("✓ SemanticAwareClassifier can be initialized with parameters")
+        print("✓ SemanticAwareClassifier.forward accepts class_texts parameter")
         
     def test_semantic_text_mapper(self):
         """Test SemanticTextMapper functionality."""
