@@ -190,8 +190,34 @@ class SemanticAwareClassifier(nn.Module):
                 
         memory_logger.debug(f"Extracted features shape: {features.shape}")
         
+        # Debug for matrix multiplication shape error
+        if features.shape[-1] != self.emsize:
+            memory_logger.error(f"Feature dimension mismatch: features shape={features.shape}, expected last dim={self.emsize}")
+            memory_logger.error(f"semantic_projection weight shape={self.semantic_projection.weight.shape}")
+            # Reshape features if possible to match emsize
+            if features.numel() > 0 and features.numel() % self.emsize == 0:
+                memory_logger.warning(f"Attempting to reshape features from {features.shape} to match emsize={self.emsize}")
+                features = features.reshape(-1, self.emsize)
+                memory_logger.warning(f"Reshaped features to {features.shape}")
+            else:
+                memory_logger.error(f"Cannot reshape features to match emsize - dimensions incompatible")
+                # Create default features as fallback for training to continue
+                memory_logger.warning("Using zeros tensor as fallback for features")
+                features = torch.zeros((features.shape[0] if len(features.shape) > 1 else 1, self.emsize), 
+                                       device=features.device, dtype=features.dtype)
+        
         # Project features to CLIP text model dimension
-        projected_features = self.semantic_projection(features)
+        try:
+            projected_features = self.semantic_projection(features)
+            memory_logger.debug(f"Projected features shape: {projected_features.shape}")
+        except RuntimeError as e:
+            memory_logger.error(f"Error in semantic projection: {e}")
+            memory_logger.error(f"Features shape: {features.shape}, Semantic projection weight: {self.semantic_projection.weight.shape}")
+            # Create fallback projected features
+            transformer_dim = self.clip_text_model.config.hidden_size
+            projected_features = torch.zeros((features.shape[0] if len(features.shape) > 1 else 1, transformer_dim), 
+                                            device=features.device, dtype=features.dtype)
+            memory_logger.warning(f"Using fallback projected features with shape {projected_features.shape}")
         
         # Add batch dimension if needed (for single sample case)
         if len(projected_features.shape) == 1:

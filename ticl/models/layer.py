@@ -247,6 +247,7 @@ class TransformerEncoderSimple(Module):
         self.num_layers = num_layers
         self.norm = norm
         self.debug_mode = False  # Set to True to enable debug prints
+        self.features = None  # Store intermediate features for semantic head
 
     def forward(
         self, 
@@ -266,6 +267,10 @@ class TransformerEncoderSimple(Module):
         
         if self.debug_mode:
             print(f"TransformerEncoderSimple input shape: {src.shape}, mask: {mask}")
+            
+        # Check for common shape errors that might indicate semantic feature issues
+        if len(src.shape) != 3:
+            print(f"WARNING: Expected 3D input tensor [batch, seq, features], got shape {src.shape}")
 
         for i, mod in enumerate(self.layers):
             try:
@@ -282,6 +287,10 @@ class TransformerEncoderSimple(Module):
                     
             except RuntimeError as e:
                 print(f"Error in transformer layer {i}, input shape: {output.shape}, mask: {mask}")
+                # Provide more detailed error information
+                if "mat1 and mat2 shapes cannot be multiplied" in str(e):
+                    print(f"Matrix multiplication shape error - this might be related to semantic features")
+                    print(f"Try checking if semantic_feature_p > 0 but the feature dimensions don't match")
                 raise RuntimeError(f"Layer {i} failed: {str(e)}")
 
         if self.norm is not None:
@@ -290,5 +299,23 @@ class TransformerEncoderSimple(Module):
             except RuntimeError as e:
                 print(f"Error in final normalization, input shape: {output.shape}")
                 raise e
+                
+        # Store the output features for semantic head to use
+        self.features = output
+        
+        # Optional: extract only test set features if mask is an integer (single_eval_pos)
+        if isinstance(mask, int) and mask < output.shape[1]:
+            self.test_features = output[:, mask:, :]
 
         return output
+        
+    def get_features(self):
+        """
+        Return the output features for use by the semantic head.
+        
+        Returns:
+        --------
+        torch.Tensor or None
+            The features tensor from the last forward pass, or None if no forward pass has occurred
+        """
+        return self.features

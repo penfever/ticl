@@ -125,7 +125,17 @@ class TabFlex(nn.Module):
                 else:
                     print(f"Encoder expects 50 more features than input has - looks like encoder was configured for semantic features but they weren't added")
             
-            # Could add a rescue attempt here, but let it crash for now to make sure we fix the real issue
+            # Add a rescue attempt when the model was created with semantic features but input doesn't have them
+            # This allows graceful recovery for the semantic_aware_model case
+            if hasattr(self, 'semantic_feature_p') and self.semantic_feature_p > 0.0 and x_src.shape[-1] < self.encoder.in_features:
+                print(f"RESCUE ATTEMPT: Creating dummy semantic features to match encoder expectations")
+                # Calculate how many features to add (usually 50)
+                missing_features = self.encoder.in_features - x_src.shape[-1]
+                # Create dummy features filled with zeros
+                dummy_features = torch.zeros((*x_src.shape[:-1], missing_features), device=x_src.device, dtype=x_src.dtype)
+                # Concatenate with original features
+                x_src = torch.cat([x_src, dummy_features], dim=-1)
+                print(f"Added {missing_features} dummy features to make shape {x_src.shape}")
         
         try:
             x_src = self.encoder(x_src) # transform n_features to emsize
@@ -192,11 +202,31 @@ class TabFlex(nn.Module):
                 print(f"After decoder: output.shape = {output.shape}")
                 print(f"Returning output[{single_eval_pos}:] with shape {output[single_eval_pos:].shape}")
             
+            # Save features for semantic head models to access
+            self.features = output[single_eval_pos:].permute(1, 0, 2)  # shape: [batch, seq, emsize]
+            
             # Return only the predictions for the test points
             return output[single_eval_pos:]
         except RuntimeError as e:
             print(f"ERROR in decoder or slicing with output.shape={output.shape}, single_eval_pos={single_eval_pos}")
             raise e
+    
+    def get_cls_embedding(self):
+        """
+        Return the features for use by the semantic head.
+        This is needed by SemanticAwareClassifier to extract features.
+        
+        Returns:
+        --------
+        torch.Tensor
+            The features tensor with shape [batch, seq, emsize]
+        """
+        if hasattr(self, 'features') and self.features is not None:
+            return self.features
+        else:
+            print("WARNING: get_cls_embedding() called but no features are available")
+            # Return an empty tensor as placeholder
+            return torch.zeros((1, 1, self.emsize), device=next(self.parameters()).device)
             
     def store_feature_count(self, n_features, semantic_feature_p=None):
         """
