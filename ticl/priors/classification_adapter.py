@@ -350,7 +350,7 @@ class ClassificationAdapter:
         """
         Apply semantic prior to the features, ensuring consistent 
         relationships between semantic features and class labels.
-        With a guaranteed minimum of causal features per class.
+        Uses a batched approach to efficiently apply tokens based on class groups.
         
         Parameters:
         -----------
@@ -400,77 +400,172 @@ class ClassificationAdapter:
         # Create semantic targets for training
         semantic_targets = self.create_semantic_targets(y, self.class_token_patterns)
         
-        # Prepare for efficient vectorized operations
+        # Basic dimensions
         batch_size = x.shape[1]
         sample_size = x.shape[0]
         n_semantic_features = len(semantic_features)
-        semantic_features_tensor = torch.tensor(semantic_features, device=device)
         
-        # Vectorize the causal feature selection
-        min_causal_ratio, max_causal_ratio = 0.3, 0.6
+        # Control randomness for reproducibility
+        if seed is not None:
+            torch.manual_seed(seed)
+            random.seed(seed) 
+            np.random.seed(seed)
+        
+        # Convert y to integer class indices for easier processing
+        y_int = y.to(torch.int64)
+        
+        # Dictionary to track causal features for each batch
         causal_features_map = {}
         
-        # Precalculate class indices once - convert to integers to avoid item() calls
-        y_int = y.to(torch.int64)
-        valid_class_mask = (y_int >= 0) & (y_int < num_classes)
+        # Initialize tensor to hold semantic features (zeros by default)
+        semantic_feature_tensor = torch.zeros(
+            sample_size, batch_size, n_semantic_features, device=device)
         
-        # Prepare random numbers for token selection
-        torch.manual_seed(seed if seed is not None else torch.seed())
-        
-        # Process each batch separately to avoid excessive memory usage
-        for b in range(batch_size):
-            # Determine number of causal features
-            num_causal = max(int(n_semantic_features * min_causal_ratio), 
-                            min(int(n_semantic_features * max_causal_ratio), 1))
+        # Pre-compute token pools for all semantic classes - fully vectorized approach
+        token_pools = {}
+        for class_idx in range(num_semantic_classes):
+            tokens = semantic_data[class_idx]
+            # Direct tensor conversion is much faster than list comprehension with .item() calls
+            token_values = tokens.to(dtype=semantic_feature_tensor.dtype, device=device)
+            token_pools[class_idx] = token_values
             
-            # Select causal features randomly
-            causal_indices = torch.randperm(n_semantic_features)[:num_causal]
-            causal_features = [semantic_features[i] for i in causal_indices.tolist()]
+        # Pre-extract tokens for class patterns - fully vectorized approach
+        class_token_pools = {}
+        for class_idx in range(num_classes):
+            if class_idx in self.class_token_patterns:
+                pattern = self.class_token_patterns[class_idx]
+                tokens = pattern['tokens']
+                # Direct tensor conversion without list comprehension
+                token_values = tokens.to(dtype=semantic_feature_tensor.dtype, device=device)
+                class_token_pools[class_idx] = {
+                    'tokens': token_values,
+                    'semantic_class': pattern['semantic_class']
+                }
+        
+        # Process each batch separately
+        for b in range(batch_size):
+            # 1. Determine which features will be causal for this batch
+            min_causal_ratio, max_causal_ratio = 0.3, 0.6
+            num_causal = max(
+                int(n_semantic_features * min_causal_ratio),
+                min(int(n_semantic_features * max_causal_ratio), 1)
+            )
+            
+            # Select random features to be causal (using tensor operations)
+            causal_indices = torch.randperm(n_semantic_features)[:num_causal].tolist()
+            causal_features = [semantic_features[i] for i in causal_indices]
             causal_features_map[b] = causal_features
             
-            # Create tensor indicating for each feature whether it's causal
+            # 2. Create boolean mask for causal features
             is_causal = torch.zeros(n_semantic_features, dtype=torch.bool, device=device)
             is_causal[causal_indices] = True
             
-            # Prepare random zero probabilities - use different probabilities for causal vs non-causal
-            causal_zero_probs = torch.randint(1, 3, (n_semantic_features,), device=device).float() / 10
-            noncausal_zero_probs = torch.randint(2, 7, (n_semantic_features,), device=device).float() / 10
+            # 3. Get class assignments for this batch
+            batch_classes = y_int[:, b].flatten()
             
-            # Combine into one tensor based on causality
-            zero_probs = torch.where(is_causal, causal_zero_probs, noncausal_zero_probs)
+            # 4. Create fill probability constants
+            # Different probabilities for causal vs non-causal features
+            causal_fill_prob = 0.8  # 80% fill rate for causal features
+            noncausal_fill_prob = 0.5  # 50% fill rate for non-causal features
             
-            # For each position in the batch
-            for pos in range(sample_size):
-                # Get the class for this sample
-                class_idx = y_int[pos, b].item()
+            # 5. Process each class group together in a batched manner
+            for class_idx in range(num_classes):
+                # Get mask for all samples of this class in the batch
+                class_mask = (batch_classes == class_idx)
                 
-                # Skip if invalid class
-                if class_idx < 0 or class_idx >= num_classes:
+                # Skip if no samples of this class
+                if not class_mask.any():
                     continue
                 
-                # Process each semantic feature
-                for feat_idx, feat in enumerate(semantic_features):
-                    is_causal_feat = is_causal[feat_idx]
-                    zero_prob = zero_probs[feat_idx].item()
+                # Get indices of samples belonging to this class
+                class_positions = torch.nonzero(class_mask).flatten()
+                
+                # Get token patterns for this class using our precomputed pools
+                if class_idx in class_token_pools:
+                    class_pattern = class_token_pools[class_idx]
+                    class_tokens = class_pattern['tokens']
+                    semantic_class = class_pattern['semantic_class']
+                    token_count = len(class_tokens)
+                else:
+                    # If missing class pattern, use random tokens
+                    class_tokens = token_pools[0]
+                    semantic_class = 0
+                    token_count = len(class_tokens)
+                
+                # 6. Process features for this class (both causal and non-causal)
+                for feat_idx in range(n_semantic_features):
+                    # Determine if this feature is causal
+                    feature_is_causal = is_causal[feat_idx]
                     
-                    # Determine if this position gets a token or stays zero
-                    if random.random() > zero_prob:
-                        if is_causal_feat:
-                            # Get tokens for this class
-                            class_tokens = self.class_token_patterns[class_idx]['tokens']
+                    # Different fill probabilities based on causality
+                    fill_prob = causal_fill_prob if feature_is_causal else noncausal_fill_prob
+                    
+                    # Generate random mask determining which positions to fill
+                    should_fill = torch.rand(len(class_positions), device=device) < fill_prob
+                    
+                    # Skip if no positions to fill for this feature
+                    if not should_fill.any():
+                        continue
+                    
+                    # Get positions to fill
+                    fill_positions = class_positions[should_fill]
+                    
+                    # For causal features, use tokens from this class
+                    if feature_is_causal:
+                        # Generate random token indices for each position
+                        # (One random index per position to fill)
+                        token_indices = torch.randint(0, token_count, (len(fill_positions),), device=device)
+                        
+                        # Extract the tokens directly from our precomputed pool
+                        tokens = class_tokens[token_indices]
+                        
+                        # Fill the selected positions with tokens
+                        semantic_feature_tensor[fill_positions, b, feat_idx] = tokens
+                    else:
+                        # For non-causal features, use fully vectorized batched token assignment
+                        
+                        # Generate random semantic classes for all positions at once
+                        random_classes = torch.randint(0, num_semantic_classes, (len(fill_positions),), device=device)
+                        
+                        # Create a tensor of all possible token pools concatenated
+                        # First, stack all token pools into one tensor
+                        token_pool_sizes = [len(token_pools[c]) for c in range(num_semantic_classes)]
+                        max_pool_size = max(token_pool_sizes)
+                        
+                        # Pre-select random indices for all positions at once
+                        # For each position, generate a random index in the range of its class's token pool
+                        random_indices = torch.zeros(len(fill_positions), dtype=torch.long, device=device)
+                        
+                        # Generate random token indices and gather tokens in a vectorized way
+                        token_values = torch.zeros(len(fill_positions), device=device, dtype=semantic_feature_tensor.dtype)
+                        
+                        # Batch by semantic class for efficiency
+                        for class_idx in range(num_semantic_classes):
+                            # Find positions with this class
+                            class_mask = (random_classes == class_idx)
+                            if not class_mask.any():
+                                continue
+                                
+                            # Get the token pool for this class
+                            class_token_pool = token_pools[class_idx]
+                            pool_size = len(class_token_pool)
                             
-                            # Randomly select a token
-                            token_idx = random.randint(0, len(class_tokens) - 1)
-                            token = class_tokens[token_idx].item()
-                        else:
-                            # Non-causal feature - use random tokens
-                            semantic_class = random.randint(0, num_semantic_classes - 1)
-                            tokens = semantic_data[semantic_class]
-                            token_pos = random.randint(0, len(tokens) - 1)
-                            token = tokens[token_pos].item()
+                            # Get indices of positions with this class
+                            positions_with_class = torch.nonzero(class_mask).squeeze(-1)
                             
-                        # Set the token
-                        x[pos, b, feat] = token
+                            # Generate random token indices for these positions
+                            indices = torch.randint(0, pool_size, (len(positions_with_class),), device=device)
+                            
+                            # Select tokens and assign to token_values
+                            selected_tokens = class_token_pool[indices]
+                            token_values[positions_with_class] = selected_tokens
+                        
+                        # Assign all tokens at once
+                        semantic_feature_tensor[fill_positions, b, feat_idx] = token_values
+        
+        # Transfer the semantic features to the original tensor
+        for i, feat in enumerate(semantic_features):
+            x[:, :, feat] = semantic_feature_tensor[:, :, i]
         
         # Create info dictionary with semantic information
         semantic_info = {
@@ -479,13 +574,13 @@ class ClassificationAdapter:
             'causal_features_map': causal_features_map
         }
         
-        # Only run more detailed diagnostic checks if debug logging is enabled
+        # Only run detailed diagnostic checks if debug logging is enabled
         if memory_logger.isEnabledFor(logging.DEBUG):
             memory_logger.debug(f"=== _apply_semantic_prior ===")
             # Check for zeros and non-zeros in semantic features
-            semantic_feature_tensor = x[:, :, semantic_features]
-            non_zeros = (semantic_feature_tensor != 0).sum().item()
-            total_elements = semantic_feature_tensor.numel()
+            semantic_feature_view = x[:, :, semantic_features]
+            non_zeros = (semantic_feature_view != 0).sum().item()
+            total_elements = semantic_feature_view.numel()
             non_zero_percentage = (non_zeros / total_elements) * 100
             memory_logger.debug(f"Semantic features filled: {non_zeros}/{total_elements} ({non_zero_percentage:.1f}% non-zero)")
             
