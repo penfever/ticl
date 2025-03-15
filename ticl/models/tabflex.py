@@ -66,7 +66,24 @@ class TabFlex(nn.Module):
         print("Number of parameters in backbone: ", backbone_size)
 
         self.emsize = emsize
+        
+        # Make sure to use the correct number of features for the encoder
+        # If semantic features are enabled, we need to explicitly handle their effect
+        if not hasattr(self, 'semantic_feature_p'):
+            self.semantic_feature_p = 0.0
+        
+        # Check if we need to include 50 extra features
+        if self.semantic_feature_p > 0.0:
+            # Save original features count for debugging
+            self.original_feature_count = n_features
+            print(f"TabFlex encoder layer: Using {n_features} features (including 50 semantic features)")
+        else:
+            self.original_feature_count = n_features
+            
+        # Create the encoder with the right feature count
         self.encoder = Linear(n_features, emsize, replace_nan_by_zero=True)
+        print(f"TabFlex encoder created with shape: {n_features} -> {emsize}")
+        
         self.decoder = decoder(emsize, nhid, n_out) if decoder is not None else nn.Sequential(nn.Linear(emsize, nhid), nn.GELU(), nn.Linear(nhid, n_out))
         self.input_ln = SeqBN(emsize) if input_normalization else None
         self.init_method = init_method
@@ -90,8 +107,32 @@ class TabFlex(nn.Module):
         
         if debug_shapes:
             print(f"Input shapes: x_src={x_src.shape}, y_src={y_src.shape}")
+            print(f"Encoder expects input with {self.encoder.in_features} features")
+            print(f"Current input has {x_src.shape[-1]} features")
+        
+        # Check feature count mismatch
+        if x_src.shape[-1] != self.encoder.in_features:
+            print(f"ERROR: Feature count mismatch! Input has {x_src.shape[-1]} features but encoder expects {self.encoder.in_features}")
+            print(f"semantic_feature_p = {getattr(self, 'semantic_feature_p', 'not set')}")
             
-        x_src = self.encoder(x_src) # transform n_features to emsize
+            # To help debugging, check if this is the 50 semantic features issue
+            if abs(x_src.shape[-1] - self.encoder.in_features) == 50:
+                print("This looks like the semantic features issue - input has 50 more/less features than encoder expects")
+                
+                if x_src.shape[-1] > self.encoder.in_features:
+                    print(f"Input has 50 more features than encoder - looks like semantic features were added but encoder wasn't configured for them")
+                    # We could try to fix by slicing, but that might lead to data corruption
+                else:
+                    print(f"Encoder expects 50 more features than input has - looks like encoder was configured for semantic features but they weren't added")
+            
+            # Could add a rescue attempt here, but let it crash for now to make sure we fix the real issue
+        
+        try:
+            x_src = self.encoder(x_src) # transform n_features to emsize
+        except RuntimeError as e:
+            print(f"ERROR in encoder: {e}")
+            print(f"Input shape: {x_src.shape}, Encoder weight shape: {self.encoder.weight.shape}")
+            raise
         
         # transform y as one-hot encoding into emsize
         y_src = self.y_encoder(y_src.unsqueeze(-1) if len(y_src.shape) < len(x_src.shape) else y_src)

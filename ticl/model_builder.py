@@ -256,6 +256,13 @@ def get_model(
         print(f"Semantic features enabled (p={semantic_feature_p}).")
         print(f"Note: Classification adapter will add 50 extra semantic features at runtime.")
         
+        # Update the feature count to include 50 semantic features
+        n_features_with_semantic = n_features + 50
+        print(f"Adjusting feature count: {n_features} base features + 50 semantic features = {n_features_with_semantic} total features")
+        
+        # We'll use this adjusted count for all models
+        config['prior']['num_features_with_semantic'] = n_features_with_semantic
+        
         # Enable semantic prediction head if using semantic features
         config['semantic_prediction'] = True
         
@@ -276,10 +283,13 @@ def get_model(
             n_out=n_out, n_features=n_features,
             y_encoder_layer=y_encoder, **config['transformer'], **config['mothernet'], **config['additive'])
     elif model_type == "tabpfn":
-        # For TabPFN, we need to include the semantic features in the feature count
-        total_features = n_features
-        if semantic_feature_p > 0.0:
-            total_features += 50  # Add 50 features for semantic data
+        # Use the feature count that includes semantic features if enabled
+        if semantic_feature_p > 0.0 and 'num_features_with_semantic' in config['prior']:
+            total_features = config['prior']['num_features_with_semantic']
+            print(f"TabPFN using adjusted feature count: {total_features} (including 50 semantic features)")
+        else:
+            total_features = n_features
+            print(f"TabPFN using original feature count: {total_features}")
             
         # Create TabPFN with the total feature count
         model = TabPFN(
@@ -304,19 +314,25 @@ def get_model(
         from ticl.models.tabflex import TabFlex
         config['linear_attention'].pop('causal_mask', None)
         
-        # For TabFlex, we need to include the semantic features in the feature count
-        total_features = n_features
-        if semantic_feature_p > 0.0:
-            total_features += 50  # Add 50 features for semantic data
-            print(f"TabFlex: Including 50 semantic features in feature count ({n_features} + 50 = {total_features})")
+        # Use the feature count that includes semantic features if enabled
+        if semantic_feature_p > 0.0 and 'num_features_with_semantic' in config['prior']:
+            total_features = config['prior']['num_features_with_semantic']
+            print(f"TabFlex using adjusted feature count: {total_features} (including 50 semantic features)")
+        else:
+            total_features = n_features
+            print(f"TabFlex using original feature count: {total_features}")
             
+        # Important: Ensure TabFlex uses exactly the same feature count as what's coming in
         model = TabFlex(
             n_out=n_out, 
-            n_features=total_features,  # Include semantic features
+            n_features=total_features,  # Use the adjusted feature count
             y_encoder_layer=y_encoder,
             semantic_feature_p=semantic_feature_p,  # Pass the semantic feature probability
             **config['linear_attention']
         )
+        
+        # Store feature configuration for debugging and verification
+        model.store_feature_count(total_features, semantic_feature_p)
     elif model_type == 'la_mothernet':
         from ticl.models.la_mothernet import SSMMotherNet
         model = SSMMotherNet(
