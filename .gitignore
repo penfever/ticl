@@ -83,10 +83,18 @@ logs/*
 !logs/.gitignore
 !logs/training/
 !logs/visualizations/
+!logs/profiling/
 logs/training/*
 !logs/training/.gitkeep
 logs/visualizations/*
 !logs/visualizations/.gitkeep
+logs/profiling/*
+!logs/profiling/.gitkeep
+
+# Old output directories (replaced by logs/)
+contrastive_test_output/
+contrastive_test_output_filtered/
+semantic_analysis_output/
 
 # IPython
 profile_default/
