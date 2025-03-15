@@ -39,18 +39,10 @@ def is_numeric_column(column_name: str) -> bool:
     """
     numeric_indicators = [
         'count', 'amount', 'price', 'rate', 'age', 'year', 'month', 'day',
-        'weight', 'height', 'size', 'length', 'width', 'depth', 'date',
-        'time', 'duration', 'percentage', 'percent', 'ratio', 'number',
-        'score', 'rating', 'rank', 'id', 'index', 'code', 'zip', 'postal',
-        'population', 'frequency', 'temperature', 'distance', 'velocity',
-        'speed', 'acceleration', 'volume', 'area', 'density', 'mass',
-        'pressure', 'energy', 'power', 'force', 'charge', 'voltage',
-        'current', 'resistance', 'conductance', 'capacitance', 'inductance',
-        'flux', 'intensity', 'luminance', 'exposure', 'dose', 'concentration',
-        'ph', 'humidity', 'elevation', 'altitude', 'latitude', 'longitude',
-        'grade', 'gpa', 'salary', 'income', 'revenue', 'cost', 'expense',
-        'profit', 'loss', 'debt', 'asset', 'liability', 'equity', 'margin',
-        'timestamp', 'epoch'
+        'weight', 'height', 'size', 'length', 'width', 'depth', 'date', 'time',
+        'score', 'rating', 'rank', 'id', 'index', 'percentage', 'number',
+        'temperature', 'distance', 'volume', 'area', 'salary', 'income',
+        'cost', 'profit', 'loss', 'debt'
     ]
     
     # Convert column name to lowercase for case-insensitive matching
@@ -67,9 +59,6 @@ def extract_numeric_values(tokens_data: List[Any]) -> List[float]:
     """
     Extract numeric values from tokenized column data.
     
-    This function attempts to find and extract numeric values from the tokenized
-    data, typically from the CLIP tokenizer output.
-    
     Parameters:
     -----------
     tokens_data : List[Any]
@@ -85,11 +74,7 @@ def extract_numeric_values(tokens_data: List[Any]) -> List[float]:
     # Convert tokens to string to search for patterns
     tokens_str = str(tokens_data)
     
-    # Use regex to find numeric patterns
-    # Look for various numeric formats:
-    # - Integers: 123, -456
-    # - Decimals: 123.45, -67.89
-    # - Scientific notation: 1.23e5, -4.56e-7
+    # Use regex to find numeric patterns (integers, decimals, scientific notation)
     pattern = r'-?\d+\.?\d*(?:[eE][-+]?\d+)?'
     
     matches = re.findall(pattern, tokens_str)
@@ -98,7 +83,6 @@ def extract_numeric_values(tokens_data: List[Any]) -> List[float]:
         try:
             numeric_values.append(float(match))
         except (ValueError, TypeError):
-            # Skip values that can't be converted to float
             continue
     
     return numeric_values

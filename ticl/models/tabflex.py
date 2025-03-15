@@ -93,8 +93,8 @@ class TabFlex(nn.Module):
         self.nhid = nhid
 
     def forward(self, src, src_mask=None, single_eval_pos=None):
-        # Enable debug mode for troubleshooting shape issues
-        debug_shapes = True
+        # Disable debug mode for performance
+        debug_shapes = False
         
         assert isinstance(src, tuple), 'inputs (src) have to be given as (x,y) or (style,x,y) tuple'
         if single_eval_pos is None: 
@@ -105,111 +105,51 @@ class TabFlex(nn.Module):
         else:
             x_src, y_src = src
         
-        if debug_shapes:
-            print(f"Input shapes: x_src={x_src.shape}, y_src={y_src.shape}")
-            print(f"Encoder expects input with {self.encoder.in_features} features")
-            print(f"Current input has {x_src.shape[-1]} features")
-        
-        # Check feature count mismatch
+        # Check feature count mismatch and apply rescue if needed
         if x_src.shape[-1] != self.encoder.in_features:
-            print(f"ERROR: Feature count mismatch! Input has {x_src.shape[-1]} features but encoder expects {self.encoder.in_features}")
-            print(f"semantic_feature_p = {getattr(self, 'semantic_feature_p', 'not set')}")
-            
-            # To help debugging, check if this is the 50 semantic features issue
-            if abs(x_src.shape[-1] - self.encoder.in_features) == 50:
-                print("This looks like the semantic features issue - input has 50 more/less features than encoder expects")
-                
-                if x_src.shape[-1] > self.encoder.in_features:
-                    print(f"Input has 50 more features than encoder - looks like semantic features were added but encoder wasn't configured for them")
-                    # We could try to fix by slicing, but that might lead to data corruption
-                else:
-                    print(f"Encoder expects 50 more features than input has - looks like encoder was configured for semantic features but they weren't added")
-            
             # Add a rescue attempt when the model was created with semantic features but input doesn't have them
-            # This allows graceful recovery for the semantic_aware_model case
             if hasattr(self, 'semantic_feature_p') and self.semantic_feature_p > 0.0 and x_src.shape[-1] < self.encoder.in_features:
-                print(f"RESCUE ATTEMPT: Creating dummy semantic features to match encoder expectations")
                 # Calculate how many features to add (usually 50)
                 missing_features = self.encoder.in_features - x_src.shape[-1]
                 # Create dummy features filled with zeros
                 dummy_features = torch.zeros((*x_src.shape[:-1], missing_features), device=x_src.device, dtype=x_src.dtype)
                 # Concatenate with original features
                 x_src = torch.cat([x_src, dummy_features], dim=-1)
-                print(f"Added {missing_features} dummy features to make shape {x_src.shape}")
         
-        try:
-            x_src = self.encoder(x_src) # transform n_features to emsize
-        except RuntimeError as e:
-            print(f"ERROR in encoder: {e}")
-            print(f"Input shape: {x_src.shape}, Encoder weight shape: {self.encoder.weight.shape}")
-            raise
+        # Transform n_features to emsize
+        x_src = self.encoder(x_src)
         
-        # transform y as one-hot encoding into emsize
+        # Transform y as one-hot encoding into emsize
         y_src = self.y_encoder(y_src.unsqueeze(-1) if len(y_src.shape) < len(x_src.shape) else y_src)
 
-        if debug_shapes:
-            print(f"After encoding: x_src={x_src.shape}, y_src={y_src.shape}")
-            print(f"single_eval_pos={single_eval_pos}")
-
-        assert src_mask is None
-        assert self.efficient_eval_masking
-        
         # Follow the same pattern as TabPFN for consistency
         train_x = x_src[:single_eval_pos] + y_src[:single_eval_pos]
         src = torch.cat([train_x, x_src[single_eval_pos:]], 0) # concatenate the training sequence and the test point
-
-        if debug_shapes:
-            print(f"After cat: src.shape={src.shape}")
 
         if self.input_ln is not None:
             src = self.input_ln(src)
             
         if self.model in ['linear_attention']:
-            # Shape debugging and checking
-            if debug_shapes:
-                print(f"Before permute: src.shape = {src.shape}")
-            
             # Convert from (seq_len, batch_size, emsize) to (batch_size, seq_len, emsize)
             # for the linear attention which expects batch_first=True
             src = src.permute(1, 0, 2)
             
-            if debug_shapes:
-                print(f"After permute: src.shape = {src.shape}")
+            # Pass single_eval_pos as src_mask to match TabPFN's pattern
+            output = self.linear_attention(src, single_eval_pos)
             
-            try:
-                # Pass single_eval_pos as src_mask to match TabPFN's pattern
-                output = self.linear_attention(src, single_eval_pos)
-                
-                if debug_shapes:
-                    print(f"After linear_attention: output.shape = {output.shape}")
-                
-                # Convert back to (seq_len, batch_size, emsize) for the decoder
-                output = output.permute(1, 0, 2)
-                
-                if debug_shapes:
-                    print(f"After re-permute: output.shape = {output.shape}")
-            except RuntimeError as e:
-                print(f"ERROR in linear_attention with src.shape={src.shape}, single_eval_pos={single_eval_pos}")
-                raise e
+            # Convert back to (seq_len, batch_size, emsize) for the decoder
+            output = output.permute(1, 0, 2)
         else:
             raise NotImplementedError(f"Model {self.model} is not implemented yet.")
         
-        try:
-            # Apply the decoder
-            output = self.decoder(output)
-            
-            if debug_shapes:
-                print(f"After decoder: output.shape = {output.shape}")
-                print(f"Returning output[{single_eval_pos}:] with shape {output[single_eval_pos:].shape}")
-            
-            # Save features for semantic head models to access
-            self.features = output[single_eval_pos:].permute(1, 0, 2)  # shape: [batch, seq, emsize]
-            
-            # Return only the predictions for the test points
-            return output[single_eval_pos:]
-        except RuntimeError as e:
-            print(f"ERROR in decoder or slicing with output.shape={output.shape}, single_eval_pos={single_eval_pos}")
-            raise e
+        # Apply the decoder
+        output = self.decoder(output)
+        
+        # Save features for semantic head models to access
+        self.features = output[single_eval_pos:].permute(1, 0, 2)  # shape: [batch, seq, emsize]
+        
+        # Return only the predictions for the test points
+        return output[single_eval_pos:]
     
     def get_cls_embedding(self):
         """

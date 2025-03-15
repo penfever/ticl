@@ -95,41 +95,24 @@ class SemanticAwareClassifier(nn.Module):
         dict
             Dictionary containing class_logits and semantic_logits
         """
-        # Profiling: Log initial memory state
-        log_gpu_memory("Start of SemanticAwareClassifier.forward")
-        memory_logger.debug("Running CLIP-style contrastive matching")
-        
         # Pass the input through the base model's forward method 
         # which properly handles single_eval_pos
         base_output = self.base_model(x, single_eval_pos=single_eval_pos)
         
-        # Extract the transformer's encoded features for semantic processing
-        # The semantic head expects features with shape [batch_size, emsize]
-        memory_logger.debug(f"Base model type: {type(self.base_model).__name__}")
+        # Update semantic classes count if needed
+        if isinstance(base_output, torch.Tensor) and len(base_output.shape) >= 3:
+            num_output_classes = base_output.shape[-1]
+            if num_output_classes != self.num_semantic_classes:
+                self.num_semantic_classes = num_output_classes
         
-        # Before extracting features, check how many classes we might have
-        # This helps align the semantic targets with the actual number of classes
-        if isinstance(base_output, torch.Tensor):
-            if len(base_output.shape) >= 3:  # Check last dimension for standard outputs
-                num_output_classes = base_output.shape[-1]
-                memory_logger.debug(f"Detected output tensor with {num_output_classes} classes")
-                if num_output_classes != self.num_semantic_classes:
-                    memory_logger.debug(f"Adjusting semantic class count: {self.num_semantic_classes} -> {num_output_classes}")
-                    self.num_semantic_classes = num_output_classes
-        
-        # This will prioritize the class logits shape from base_output for class count
-        memory_logger.debug(f"Using {self.num_semantic_classes} semantic classes to match output dimensions")
-        
-        # Check if the model has exposed features directly (best option)
+        # Extract features based on model type
         if hasattr(self.base_model, 'features') and self.base_model.features is not None:
             # If the base model directly exposes features (preferred method)
             features = self.base_model.features
-            memory_logger.debug(f"Using directly exposed features: {features.shape}")
         
         # Check for TabFlex model
         elif hasattr(self.base_model, 'get_cls_embedding'):
             # TabFlex models have a get_cls_embedding method for classification token
-            memory_logger.debug("Detected TabFlex model, using CLS embedding")
             features = self.base_model.get_cls_embedding()
             
             # Handle test set specific features for TabFlex
@@ -143,9 +126,6 @@ class SemanticAwareClassifier(nn.Module):
         
         # Check for TabPFN model with encoder + transformer structure
         elif hasattr(self.base_model, 'transformer_encoder') and hasattr(self.base_model, 'encoder'):
-            # For TabPFN, we need to reconstruct the encoder features
-            memory_logger.debug("Detected TabPFN model, reconstructing encoder features")
-            
             if len(x) == 3:  # style is given
                 style_src, x_src, y_src = x
             else:
@@ -166,8 +146,6 @@ class SemanticAwareClassifier(nn.Module):
                 
         # Check for MotherNet or other models with hidden states
         elif hasattr(self.base_model, 'hidden_states') and self.base_model.hidden_states is not None:
-            # For MotherNet or similar models that store hidden states
-            memory_logger.debug("Using model's hidden states")
             features = self.base_model.hidden_states[-1]  # Use last layer's hidden states
             
             # Extract test set features if applicable
@@ -180,44 +158,31 @@ class SemanticAwareClassifier(nn.Module):
                 
         else:
             # Last resort fallback - try to extract from the output
-            memory_logger.debug(f"Using fallback feature extraction, base_output shape: {base_output.shape}")
             if len(base_output.shape) == 3:
                 # Average over samples to get [batch_size, output_dim]
                 features = base_output.mean(dim=0)
             else:
                 # Otherwise use as is
                 features = base_output
-                
-        memory_logger.debug(f"Extracted features shape: {features.shape}")
         
-        # Debug for matrix multiplication shape error
+        # Handle feature dimension mismatch
         if features.shape[-1] != self.emsize:
-            memory_logger.error(f"Feature dimension mismatch: features shape={features.shape}, expected last dim={self.emsize}")
-            memory_logger.error(f"semantic_projection weight shape={self.semantic_projection.weight.shape}")
             # Reshape features if possible to match emsize
             if features.numel() > 0 and features.numel() % self.emsize == 0:
-                memory_logger.warning(f"Attempting to reshape features from {features.shape} to match emsize={self.emsize}")
                 features = features.reshape(-1, self.emsize)
-                memory_logger.warning(f"Reshaped features to {features.shape}")
             else:
-                memory_logger.error(f"Cannot reshape features to match emsize - dimensions incompatible")
                 # Create default features as fallback for training to continue
-                memory_logger.warning("Using zeros tensor as fallback for features")
                 features = torch.zeros((features.shape[0] if len(features.shape) > 1 else 1, self.emsize), 
                                        device=features.device, dtype=features.dtype)
         
         # Project features to CLIP text model dimension
         try:
             projected_features = self.semantic_projection(features)
-            memory_logger.debug(f"Projected features shape: {projected_features.shape}")
-        except RuntimeError as e:
-            memory_logger.error(f"Error in semantic projection: {e}")
-            memory_logger.error(f"Features shape: {features.shape}, Semantic projection weight: {self.semantic_projection.weight.shape}")
+        except RuntimeError:
             # Create fallback projected features
             transformer_dim = self.clip_text_model.config.hidden_size
             projected_features = torch.zeros((features.shape[0] if len(features.shape) > 1 else 1, transformer_dim), 
                                             device=features.device, dtype=features.dtype)
-            memory_logger.warning(f"Using fallback projected features with shape {projected_features.shape}")
         
         # Add batch dimension if needed (for single sample case)
         if len(projected_features.shape) == 1:

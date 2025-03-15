@@ -264,41 +264,14 @@ class TransformerEncoderSimple(Module):
             see the docs in Transformer class.
         """
         output = src
-        
-        if self.debug_mode:
-            print(f"TransformerEncoderSimple input shape: {src.shape}, mask: {mask}")
-            
-        # Check for common shape errors that might indicate semantic feature issues
-        if len(src.shape) != 3:
-            print(f"WARNING: Expected 3D input tensor [batch, seq, features], got shape {src.shape}")
 
+        # Process through all layers
         for i, mod in enumerate(self.layers):
-            try:
-                if self.debug_mode:
-                    print(f"  Layer {i} input shape: {output.shape}")
-                
-                output = mod(
-                    output, 
-                    src_mask=mask,
-                )
-                
-                if self.debug_mode:
-                    print(f"  Layer {i} output shape: {output.shape}")
-                    
-            except RuntimeError as e:
-                print(f"Error in transformer layer {i}, input shape: {output.shape}, mask: {mask}")
-                # Provide more detailed error information
-                if "mat1 and mat2 shapes cannot be multiplied" in str(e):
-                    print(f"Matrix multiplication shape error - this might be related to semantic features")
-                    print(f"Try checking if semantic_feature_p > 0 but the feature dimensions don't match")
-                raise RuntimeError(f"Layer {i} failed: {str(e)}")
+            output = mod(output, src_mask=mask)
 
+        # Apply final normalization if present
         if self.norm is not None:
-            try:
-                output = self.norm(output)
-            except RuntimeError as e:
-                print(f"Error in final normalization, input shape: {output.shape}")
-                raise e
+            output = self.norm(output)
                 
         # Store the output features for semantic head to use
         self.features = output
