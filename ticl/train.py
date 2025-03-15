@@ -224,14 +224,34 @@ def train_epoch(
             memory_logger.debug(f"Extended batch format with semantic info: {list(batch_info.keys() if batch_info else [])}")
         else:
             raise ValueError(f"Unexpected batch format with {len(batch_data)} elements")
-            
-        # Log data shapes and types
-        if isinstance(data, tuple):
+        
+        # For semantic models, the data may be a tuple containing (info, x, y)
+        # Let's check and extract the correct components
+        if isinstance(data, tuple) and len(data) == 3:
             memory_logger.debug(f"Data is tuple with {len(data)} elements")
+            
+            # Check if the first element is a dictionary (info)
+            if isinstance(data[0], dict):
+                memory_logger.debug("Found nested batch_info in data tuple")
+                # The nested info may have the class token patterns
+                nested_info, x, y = data
+                
+                # Merge nested_info into batch_info (prioritize nested_info)
+                if batch_info is None:
+                    batch_info = nested_info
+                elif nested_info is not None:
+                    # Create a new dict to avoid modifying the original
+                    batch_info = {**batch_info, **nested_info}
+                    memory_logger.debug(f"Merged batch_info, now contains: {list(batch_info.keys())}")
+                
+                # Set data to just the tensor part
+                data = (x, y)
+            
+            # Log each tensor component
             for i, item in enumerate(data):
                 if torch.is_tensor(item):
                     memory_logger.debug(f"  data[{i}]: shape={item.shape}, dtype={item.dtype}")
-        else:
+        elif isinstance(data, torch.Tensor):
             memory_logger.debug(f"Data shape: {data.shape}, dtype: {data.dtype}")
             
         memory_logger.debug(f"Raw targets shape: {targets.shape}, dtype: {targets.dtype}")
@@ -302,10 +322,13 @@ def train_epoch(
                 
             with autocast_context:
                 # Move data to the appropriate device
+                # At this point, we should have a clean data tuple or tensor
                 if isinstance(data, tuple):
                     device_data = tuple(e.to(device) if torch.is_tensor(e) else e for e in data)
+                    memory_logger.debug(f"Moved tuple data to device: {device}")
                 else:
                     device_data = data.to(device)
+                    memory_logger.debug(f"Moved tensor data to device: {device}")
                 
                 # Forward pass
                 memory_logger.debug(f"Running model forward pass with single_eval_pos={single_eval_pos}")
@@ -353,8 +376,14 @@ def train_epoch(
                         pattern = class_token_patterns[class_idx]
                         semantic_class = pattern.get('semantic_class', 0)
                         
-                        # First try to use the class_name if available (from our enhanced token patterns)
-                        if 'class_name' in pattern:
+                        # First try to use the actual column_name from semantic data if available
+                        if 'column_name' in pattern and pattern['column_name'] is not None:
+                            # Format it more nicely by removing underscores and adding spaces
+                            col_name = pattern['column_name'].replace('_', ' ').title()
+                            text = f"Data with {col_name}"
+                            memory_logger.debug(f"Using real column name: {text}")
+                        # Fall back to class_name if available
+                        elif 'class_name' in pattern:
                             text = pattern['class_name']
                             memory_logger.debug(f"Using class_name from pattern: {text}")
                         # Otherwise, try to create a more descriptive text if we have token information and tokenizer

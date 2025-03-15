@@ -11,6 +11,8 @@ from typing import Dict, Tuple, Optional, List
 import logging
 import sys
 import time
+import random
+import numpy as np
 from transformers import CLIPTokenizerFast
 
 # Use the memory profiling logger from utils
@@ -34,6 +36,15 @@ if not memory_logger.handlers:
         memory_logger.warning("Could not create log file for semantic data loading")
 
 logger = logging.getLogger(__name__)
+
+# Global cache for loaded data to avoid repeated JSON loading
+_SEMANTIC_DATA_CACHE = {
+    "column_name_tokens": None,
+    "column_value_tokens": None,
+    "is_loaded": False,
+    "log_file_path": None,
+    "max_columns": None
+}
 
 def is_float(value: str) -> bool:
     """Check if a string can be converted to a float."""
@@ -144,7 +155,9 @@ def load_semantic_prior_data(
     clip_tokenizer_name: str = "openai/clip-vit-base-patch32",
     target_tensor_size: Optional[int] = None,
     force_non_numeric: bool = True,
-    max_columns: Optional[int] = None
+    max_columns: Optional[int] = None,
+    use_cache: bool = True,
+    force_reload: bool = False
 ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
     """
     Load semantic column data from completed_columns.json.
@@ -166,14 +179,35 @@ def load_semantic_prior_data(
         If True, only include columns that don't appear to be numeric
     max_columns : int, optional
         If set, limit the number of columns to load to save memory
+    use_cache : bool
+        Whether to use the global cache to avoid reloading data
+    force_reload : bool
+        Whether to force reload data even if it's in the cache
         
     Returns:
     --------
     Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]
         Tuple of (column_name_tokens, column_value_tokens)
     """
+    global _SEMANTIC_DATA_CACHE
+    
+    # Check if data is already in cache and we can use it
+    cache_valid = (
+        use_cache and 
+        _SEMANTIC_DATA_CACHE["is_loaded"] and
+        not force_reload and
+        _SEMANTIC_DATA_CACHE["log_file_path"] == log_file_path and
+        (max_columns is None or _SEMANTIC_DATA_CACHE["max_columns"] is None or 
+         max_columns >= _SEMANTIC_DATA_CACHE["max_columns"])
+    )
+    
+    if cache_valid:
+        memory_logger.debug(f"Using cached semantic data from {log_file_path}")
+        return _SEMANTIC_DATA_CACHE["column_name_tokens"], _SEMANTIC_DATA_CACHE["column_value_tokens"]
+    
     memory_logger.debug(f"=== STARTING SEMANTIC DATA LOADING ===")
     memory_logger.debug(f"Parameters: log_file_path={log_file_path}, target_size={target_tensor_size}, max_columns={max_columns}")
+    memory_logger.debug(f"Cache status: use_cache={use_cache}, force_reload={force_reload}, cache_valid={cache_valid}")
     
     if not os.path.exists(log_file_path):
         memory_logger.error(f"File not found: {log_file_path}")
@@ -243,7 +277,8 @@ def load_semantic_prior_data(
     # If max_columns is set, limit the number of columns to process
     if max_columns is not None and max_columns < len(filtered_columns):
         memory_logger.debug(f"Limiting to {max_columns} columns (out of {len(filtered_columns)} filtered columns)")
-        # Sort by column name for deterministic behavior
+        # Sort by column name for deterministic behavior when loading all data
+        # But we'll randomly select during sampling
         sorted_cols = sorted(filtered_columns.keys())
         # Take the first max_columns
         selected_cols = sorted_cols[:max_columns]
@@ -350,6 +385,15 @@ def load_semantic_prior_data(
     except Exception as e:
         memory_logger.debug(f"Error analyzing token distribution: {e}")
     
+    # Update the global cache
+    if use_cache:
+        _SEMANTIC_DATA_CACHE["column_name_tokens"] = column_name_tokens
+        _SEMANTIC_DATA_CACHE["column_value_tokens"] = column_value_tokens
+        _SEMANTIC_DATA_CACHE["is_loaded"] = True
+        _SEMANTIC_DATA_CACHE["log_file_path"] = log_file_path
+        _SEMANTIC_DATA_CACHE["max_columns"] = max_columns
+        memory_logger.debug(f"Updated semantic data cache with {len(column_name_tokens)} columns")
+    
     memory_logger.debug(f"=== COMPLETED SEMANTIC DATA LOADING ===")
     
     return column_name_tokens, column_value_tokens
@@ -359,8 +403,11 @@ def get_random_semantic_data(
     num_tokens: int = 50,
     tensor_size: int = 200,
     log_file_path: str = "ticl/datasets/completed_columns.json",
-    max_tensor_size_mb: int = 10  # Limit tensor size to 10MB by default
-) -> torch.Tensor:
+    max_tensor_size_mb: int = 10,  # Limit tensor size to 10MB by default
+    return_column_names: bool = True,
+    seed: Optional[int] = None,  # Random seed for reproducibility
+    use_cache: bool = True  # Whether to use cached data
+) -> tuple:
     """
     Get random semantic data either from real columns or generate synthetic data.
     
@@ -378,15 +425,35 @@ def get_random_semantic_data(
         Path to the completed_columns.json file
     max_tensor_size_mb : int
         Maximum size of the returned tensor in MB to avoid OOM issues
+    return_column_names : bool
+        Whether to return column names along with the tensor
+    seed : int, optional
+        Random seed for column selection and shuffling
+    use_cache : bool
+        Whether to use cached data or reload from file
         
     Returns:
     --------
-    torch.Tensor
-        Tensor of shape [num_classes, tensor_size] containing semantic data
+    tuple
+        If return_column_names is True:
+          (semantic_data, column_names) where:
+            - semantic_data: Tensor of shape [num_classes, tensor_size]
+            - column_names: List of column names corresponding to each row in the tensor
+        If return_column_names is False:
+          just the semantic_data tensor
     """
+    global _SEMANTIC_DATA_CACHE
+    
     memory_logger.debug(f"=== get_random_semantic_data called ===")
     memory_logger.debug(f"Called with: num_classes={num_classes}, num_tokens={num_tokens}, tensor_size={tensor_size}")
-    memory_logger.debug(f"File path: {log_file_path}, max_size: {max_tensor_size_mb}MB")
+    memory_logger.debug(f"File path: {log_file_path}, max_size: {max_tensor_size_mb}MB, seed={seed}, use_cache={use_cache}")
+    
+    # Set random seed if provided
+    if seed is not None:
+        memory_logger.debug(f"Setting random seed: {seed}")
+        torch.manual_seed(seed)
+        random.seed(seed)
+        np.random.seed(seed)
     
     # Calculate max size that would keep the whole tensor < max_tensor_size_mb
     max_allowed_size = int((max_tensor_size_mb * 1024 * 1024) / (num_classes * 4))  # 4 bytes per int32
@@ -412,23 +479,43 @@ def get_random_semantic_data(
         file_size_mb = os.path.getsize(log_file_path) / (1024 * 1024)
         memory_logger.debug(f"Semantic data file size: {file_size_mb:.2f}MB")
         
-        # Load real data
-        memory_logger.debug(f"Loading semantic data with target_tensor_size={tensor_size}, max_columns={num_classes}")
-        _, column_values = load_semantic_prior_data(
-            log_file_path=log_file_path,
-            target_tensor_size=tensor_size,
-            force_non_numeric=True,
-            max_columns=num_classes * 2  # Load 2x columns to ensure we have enough to sample from
-        )
+        # Check if we have cached data that we can use
+        if _SEMANTIC_DATA_CACHE["is_loaded"] and use_cache and _SEMANTIC_DATA_CACHE["log_file_path"] == log_file_path:
+            memory_logger.debug(f"Using cached semantic data ({len(_SEMANTIC_DATA_CACHE['column_value_tokens'])} columns)")
+            column_name_tokens = _SEMANTIC_DATA_CACHE["column_name_tokens"]
+            column_values = _SEMANTIC_DATA_CACHE["column_value_tokens"]
+        else:
+            # Load real data
+            memory_logger.debug(f"Loading semantic data with target_tensor_size={tensor_size}")
+            # We don't limit columns here - we want to load all available columns for proper randomization
+            column_name_tokens, column_values = load_semantic_prior_data(
+                log_file_path=log_file_path,
+                target_tensor_size=tensor_size,
+                force_non_numeric=True,
+                max_columns=None,  # Load all columns for better randomization
+                use_cache=use_cache
+            )
         
         # If we have enough columns, sample from them
         if len(column_values) >= num_classes:
             memory_logger.debug(f"Successfully loaded {len(column_values)} columns, selecting {num_classes}")
             method_used = "real_data"
             
-            # Select random columns
+            # Select random columns with proper shuffling
             columns = list(column_values.keys())
-            selected_indices = torch.randperm(len(columns))[:num_classes].tolist()
+            memory_logger.debug(f"Shuffling selection from {len(columns)} available columns")
+            
+            # Create truly randomized indices for column selection
+            if seed is not None:
+                # For reproducible selection
+                generator = torch.Generator()
+                generator.manual_seed(seed)
+                selected_indices = torch.randperm(len(columns), generator=generator)[:num_classes].tolist()
+            else:
+                # Fresh random selection each time
+                selected_indices = torch.randperm(len(columns))[:num_classes].tolist()
+                
+            memory_logger.debug(f"Selected column indices: {selected_indices[:5]}...")
             selected_columns = [columns[i] for i in selected_indices]
             
             memory_logger.debug(f"Selected columns: {selected_columns}")
@@ -479,7 +566,13 @@ def get_random_semantic_data(
             
             processing_time = time.time() - start_time
             memory_logger.debug(f"Semantic data processing took {processing_time:.2f}s (method: {method_used})")
-            return semantic_tensor
+            
+            # Return both the tensor and column names
+            if return_column_names:
+                memory_logger.debug(f"Returning semantic tensor with {len(selected_columns)} column names")
+                return semantic_tensor, selected_columns
+            else:
+                return semantic_tensor
     except (FileNotFoundError, ValueError, Exception) as e:
         memory_logger.error(f"Could not load semantic data from file: {e}")
         logger.warning(f"Could not load semantic data from file: {e}")
@@ -489,9 +582,17 @@ def get_random_semantic_data(
     memory_logger.debug("Generating synthetic semantic data")
     logger.info("Generating synthetic semantic data")
     
-    # Create random tensor with controlled size
+    # Create random tensor with controlled size and randomness
     memory_logger.debug(f"Creating random tensor with shape [{num_classes}, {tensor_size}]")
-    random_tensor = torch.rand(num_classes, tensor_size)
+    
+    if seed is not None:
+        # Use generator for reproducible randomness
+        generator = torch.Generator()
+        generator.manual_seed(seed)
+        random_tensor = torch.rand(num_classes, tensor_size, generator=generator)
+    else:
+        # Standard randomness
+        random_tensor = torch.rand(num_classes, tensor_size)
     
     # Scale to the range [1, 49404] (CLIP vocabulary size range)
     memory_logger.debug(f"Scaling random values to token ID range [1, 49404]")
@@ -505,15 +606,55 @@ def get_random_semantic_data(
     memory_logger.debug(f"Created synthetic tensor with shape {random_tensor.shape}, "
                       f"size={tensor_size_mb:.2f}MB, dtype={random_tensor.dtype}")
     
+    # Generate synthetic column names with more variety
+    synthetic_column_types = [
+        "customer", "product", "sales", "review", "location", 
+        "order", "time", "website", "device", "user",
+        "employee", "price", "category", "shipment", "supplier",
+        "department", "inventory", "marketing", "feedback", "transaction"
+    ]
+    synthetic_attributes = [
+        "id", "name", "type", "status", "count", 
+        "total", "category", "score", "rating", "date",
+        "region", "value", "description", "level", "group",
+        "age", "source", "target", "quality", "amount"
+    ]
+    
+    # Generate diverse column names
+    synthetic_columns = []
+    if seed is not None:
+        # Set Python's random seed for reproducible name selection
+        random.seed(seed)
+        
+    for i in range(num_classes):
+        if len(synthetic_column_types) > 0 and len(synthetic_attributes) > 0:
+            # Create a business-like column name with actual meaning
+            col_type = random.choice(synthetic_column_types)
+            attribute = random.choice(synthetic_attributes)
+            column_name = f"{col_type}_{attribute}"
+        else:
+            # Fallback if we run out of combinations
+            column_name = f"synthetic_feature_{i}"
+        synthetic_columns.append(column_name)
+        
+    memory_logger.debug(f"Generated synthetic column names: {synthetic_columns[:5]}...")
+    
     # Log sample of synthetic data
     memory_logger.debug(f"Synthetic data sample (first 3 classes, first 10 tokens):")
     for i in range(min(3, num_classes)):
-        memory_logger.debug(f"Class {i}: {random_tensor[i, :10].tolist()}")
+        memory_logger.debug(f"Class {i} ({synthetic_columns[i]}): {random_tensor[i, :10].tolist()}")
     
     processing_time = time.time() - start_time
     memory_logger.debug(f"Semantic data processing took {processing_time:.2f}s (method: {method_used})")
     
-    return random_tensor
+    # Return both the tensor and column names if requested
+    if return_column_names:
+        return random_tensor, synthetic_columns
+    else:
+        return random_tensor
 
 # For backwards compatibility
-random_tensor = get_random_semantic_data()
+random_tensor, column_names = get_random_semantic_data()
+
+# Export the column names for global access
+semantic_data_column_names = column_names

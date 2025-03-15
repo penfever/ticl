@@ -14,7 +14,8 @@ from .utils import CategoricalActivation, randomize_classes
 memory_logger = logging.getLogger("memory_profiling")
 
 # For backward compatibility, using the same variable name
-semantic_data = get_random_semantic_data()
+from ticl.datasets.semantic_prior_data_loader import random_tensor, semantic_data_column_names
+semantic_data = random_tensor
 
 
 class BalancedBinarize:
@@ -214,9 +215,19 @@ class ClassificationAdapter:
         num_semantic_classes = semantic_data.shape[0]
         memory_logger.debug(f"create_semantic_class_mapping - Creating patterns for {num_classes} classes using {num_semantic_classes} semantic classes")
         
+        # Get a seed for reproducibility if configured
+        seed = None
+        if hasattr(self, 'h') and 'random_seed' in self.h:
+            seed = self.h['random_seed']
+            memory_logger.debug(f"Using random_seed={seed} from hyperparameters for class mapping")
+            # Set the random seed for consistent selection
+            if seed is not None:
+                random.seed(seed)
+                
         # Ensure each class gets a different semantic class if possible
         available_semantic_classes = list(range(num_semantic_classes))
         if num_classes <= num_semantic_classes:
+            # Sample without replacement when we have enough classes
             selected_semantic_classes = random.sample(available_semantic_classes, num_classes)
         else:
             # If more classes than semantic classes, we'll have some duplicates
@@ -229,6 +240,7 @@ class ClassificationAdapter:
             semantic_class = selected_semantic_classes[class_idx]
             
             # Select a subset of tokens to represent this class (5-10 tokens)
+            # We use the same random seed sequence to ensure consistent selection
             num_signature_tokens = random.randint(5, min(10, semantic_data.shape[1]))
             token_indices = random.sample(range(semantic_data.shape[1]), num_signature_tokens)
             signature_tokens = semantic_data[semantic_class, token_indices].to(device)
@@ -236,11 +248,20 @@ class ClassificationAdapter:
             # Create descriptive name for class
             class_name = f"Class_{class_idx}_Type_{semantic_class}"
             
+            # Get the actual column name if available
+            global semantic_data_column_names
+            column_name = None
+            if 'semantic_data_column_names' in globals() and semantic_data_column_names is not None:
+                if len(semantic_data_column_names) > semantic_class:
+                    column_name = semantic_data_column_names[semantic_class]
+                    memory_logger.debug(f"Using real column name for class {class_idx}: {column_name}")
+            
             class_token_patterns[class_idx] = {
                 'tokens': signature_tokens,
                 'semantic_class': semantic_class,
                 'token_indices': token_indices,
-                'class_name': class_name
+                'class_name': class_name,
+                'column_name': column_name
             }
             
             if class_idx < 3:  # Log a few for debugging
@@ -379,35 +400,49 @@ class ClassificationAdapter:
         memory_logger.debug(f"Semantic features: {len(semantic_features)} features, first few: {semantic_features[:5]}")
         memory_logger.debug(f"Device: {device}")
         
-        # Get the number of classes from the configuration or y tensor
-        if y is not None:
-            memory_logger.debug(f"Target tensor y: shape={y.shape}, device={y.device}, dtype={y.dtype}")
-            # Log class distribution
-            try:
-                classes, counts = torch.unique(y, return_counts=True)
-                class_dist = {int(cls.item()): int(count.item()) for cls, count in zip(classes, counts)}
-                memory_logger.debug(f"Class distribution: {class_dist}")
-                
-                # Get number of unique classes from y
-                num_classes = len(classes)
-                memory_logger.debug(f"Detected {num_classes} classes from target tensor")
-            except Exception as e:
-                memory_logger.debug(f"Could not compute class distribution: {e}")
-                num_classes = max(2, self.h['num_classes'])
-        else:
-            memory_logger.debug(f"No target tensor provided, will generate proxy targets")
-            num_classes = max(2, self.h['num_classes'])
+        memory_logger.debug(f"Target tensor y: shape={y.shape if y is not None else 'None'}, device={y.device if y is not None else 'None'}")
         
-        # Ensure we have at least 2 classes (binary classification minimum)
-        num_classes = max(2, num_classes)
-        memory_logger.debug(f"Using {num_classes} classes for semantic features")
+        # Get the number of classes from config - this is the correct way since 
+        # y values are still real-valued at this point and will be binned later
+        num_classes = max(2, self.h['num_classes'])
+        
+        memory_logger.debug(f"Using {num_classes} classes from self.h['num_classes'] for semantic features")
+        
+        # If y is present, just log it for debugging
+        if y is not None:
+            try:
+                if y.numel() > 0:
+                    # Just log a few sample values from y to understand its distribution
+                    sample_values = y.flatten()[:10].cpu().tolist() if y.numel() >= 10 else y.flatten().cpu().tolist()
+                    memory_logger.debug(f"Sample y values (still real-valued): {sample_values}")
+                    memory_logger.debug(f"Min/max y: {y.min().item():.4f}, {y.max().item():.4f}")
+            except Exception as e:
+                memory_logger.debug(f"Could not analyze target tensor: {e}")
         
         # Load new semantic data if needed (with the correct number of classes)
         from ticl.datasets.semantic_prior_data_loader import get_random_semantic_data
-        if semantic_data.shape[0] != num_classes:
+        
+        # Track column names
+        global semantic_data_column_names
+        
+        # Get a seed for reproducibility if configured
+        seed = None
+        if 'random_seed' in self.h:
+            seed = self.h['random_seed']
+            memory_logger.debug(f"Using random_seed={seed} from hyperparameters for semantic data")
+        
+        # Check if we need to reload the semantic data
+        if semantic_data.shape[0] != num_classes or not hasattr(globals(), 'semantic_data_column_names'):
             memory_logger.debug(f"Existing semantic data has {semantic_data.shape[0]} classes, but we need {num_classes} classes")
-            memory_logger.debug(f"Loading new semantic data with {num_classes} classes")
-            semantic_data = get_random_semantic_data(num_classes=num_classes)
+            memory_logger.debug(f"Loading new semantic data with {num_classes} classes using seed={seed}")
+            
+            # Get random semantic data with proper randomization and caching
+            semantic_data, semantic_data_column_names = get_random_semantic_data(
+                num_classes=num_classes,
+                seed=seed,
+                use_cache=True  # Use the cache to avoid reloading the JSON file every time
+            )
+            memory_logger.debug(f"Loaded column names: {semantic_data_column_names}")
         
         # Get semantic data info
         memory_logger.debug(f"Semantic data tensor: shape={semantic_data.shape}, device={semantic_data.device}, dtype={semantic_data.dtype}")

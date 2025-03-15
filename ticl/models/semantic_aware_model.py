@@ -117,6 +117,9 @@ class SemanticAwareClassifier(nn.Module):
                     memory_logger.debug(f"Adjusting semantic class count: {self.num_semantic_classes} -> {num_output_classes}")
                     self.num_semantic_classes = num_output_classes
         
+        # This will prioritize the class logits shape from base_output for class count
+        memory_logger.debug(f"Using {self.num_semantic_classes} semantic classes to match output dimensions")
+        
         # Check if the model has exposed features directly (best option)
         if hasattr(self.base_model, 'features') and self.base_model.features is not None:
             # If the base model directly exposes features (preferred method)
@@ -223,14 +226,26 @@ class SemanticAwareClassifier(nn.Module):
         if class_texts and len(class_texts) > 0:
             memory_logger.debug(f"Processing {len(class_texts)} class texts with CLIP")
             
-            # Create CLIP embeddings for class texts (execute on CPU to save GPU memory)
+            # Create CLIP embeddings for class texts
+            # Using a balanced approach for different devices
             with torch.no_grad():
-                # Process batches of text to save memory
-                clip_device = "cpu"  # Process text on CPU first
+                # Determine the best device for running CLIP
+                # For MPS (Apple Silicon), need to use the same device as model
+                if tabular_features.device.type == 'mps':
+                    # For MPS, it's safer to run on the same device
+                    clip_device = tabular_features.device
+                    memory_logger.debug(f"Using MPS device for CLIP processing")
+                else:
+                    # For CUDA or CPU, we can use CPU to save GPU memory
+                    clip_device = "cpu"
+                    memory_logger.debug(f"Using CPU for CLIP text processing to save GPU memory")
+                
                 text_features_list = []
                 
                 # Process in batches to control memory usage
                 batch_size = min(16, len(class_texts))
+                memory_logger.debug(f"Processing {len(class_texts)} texts in batches of {batch_size}")
+                
                 for i in range(0, len(class_texts), batch_size):
                     batch_texts = class_texts[i:i+batch_size]
                     
@@ -241,41 +256,88 @@ class SemanticAwareClassifier(nn.Module):
                         truncation=True,
                         max_length=77,
                         return_tensors="pt"
-                    ).to(clip_device)
+                    )
                     
-                    # Extract text features with CLIP text encoder
-                    batch_outputs = self.clip_text_model(**text_tokens)
-                    batch_text_features = batch_outputs.pooler_output
-                    text_features_list.append(batch_text_features)
+                    # Move tokens to the appropriate device
+                    text_tokens = {k: v.to(clip_device) for k, v in text_tokens.items()}
+                    
+                    try:
+                        # Extract text features with CLIP text encoder
+                        batch_outputs = self.clip_text_model(**text_tokens)
+                        batch_text_features = batch_outputs.pooler_output
+                        text_features_list.append(batch_text_features)
+                        memory_logger.debug(f"Successfully processed batch {i//batch_size + 1}/{(len(class_texts) + batch_size - 1)//batch_size}")
+                    except Exception as e:
+                        memory_logger.error(f"Error processing text batch: {e}")
+                        # Try again with CPU as fallback for any device-specific error
+                        if clip_device.type != 'cpu':
+                            memory_logger.debug(f"Retrying with CPU as fallback")
+                            # Move tokens to CPU
+                            cpu_tokens = {k: v.to('cpu') for k, v in text_tokens.items()}
+                            try:
+                                # Process on CPU
+                                batch_outputs = self.clip_text_model.to('cpu')(**cpu_tokens)
+                                batch_text_features = batch_outputs.pooler_output
+                                text_features_list.append(batch_text_features)
+                                # Move model back to original device
+                                self.clip_text_model.to(clip_device)
+                                memory_logger.debug(f"Fallback to CPU succeeded")
+                            except Exception as e2:
+                                memory_logger.error(f"CPU fallback also failed: {e2}")
+                                # Return empty features as ultimate fallback
+                                memory_logger.warning(f"Skipping CLIP processing for this batch")
+                                continue
                     
                     # Store token information for interpretability
                     for j, text in enumerate(batch_texts):
-                        token_ids = text_tokens.input_ids[j].tolist()
-                        token_texts = self.tokenizer.convert_ids_to_tokens(token_ids)
-                        # Filter out special tokens
-                        token_texts = [t for t in token_texts if t not in ['<pad>', '<|startoftext|>', '<|endoftext|>']]
+                        # Access tokens through the dictionary (we converted text_tokens to a dict earlier)
+                        token_ids = text_tokens['input_ids'][j].tolist()
                         
-                        class_tokens = {
-                            'text': text,
-                            'tokens': token_texts[:self.num_tokens_per_class],
-                            'class_idx': i + j,
-                        }
-                        all_token_texts.append(class_tokens)
+                        try:
+                            # Convert token IDs to actual token texts
+                            token_texts = self.tokenizer.convert_ids_to_tokens(token_ids)
+                            # Filter out special tokens
+                            token_texts = [t for t in token_texts if t not in ['<pad>', '<|startoftext|>', '<|endoftext|>']]
+                            
+                            # Create token info dictionary
+                            class_tokens = {
+                                'text': text,
+                                'tokens': token_texts[:self.num_tokens_per_class],
+                                'class_idx': i + j,
+                            }
+                            all_token_texts.append(class_tokens)
+                        except Exception as e:
+                            memory_logger.debug(f"Error processing token texts: {e}")
+                            # Add a simpler version without tokenization
+                            class_tokens = {
+                                'text': text,
+                                'tokens': ['<token_error>'],
+                                'class_idx': i + j,
+                            }
+                            all_token_texts.append(class_tokens)
                     
                     # Clean up batch tensors
                     del text_tokens
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
                 
-                # Concatenate all text features
-                text_features = torch.cat(text_features_list, dim=0)
-                
-                # Move to same device as tabular features if needed for computation
-                if tabular_features.device.type != text_features.device.type:
-                    text_features = text_features.to(tabular_features.device)
-                
-                # Normalize text features for cosine similarity
-                text_features = F.normalize(text_features, dim=1)
+                # If we have any features, concatenate them
+                if len(text_features_list) > 0:
+                    memory_logger.debug(f"Concatenating {len(text_features_list)} text feature batches")
+                    text_features = torch.cat(text_features_list, dim=0)
+                    
+                    # Move to same device as tabular features if needed for computation
+                    if tabular_features.device.type != text_features.device.type:
+                        memory_logger.debug(f"Moving text features from {text_features.device} to {tabular_features.device}")
+                        text_features = text_features.to(tabular_features.device)
+                    
+                    # Normalize text features for cosine similarity
+                    text_features = F.normalize(text_features, dim=1)
+                    memory_logger.debug(f"Normalized {len(text_features)} text features for cosine similarity")
+                else:
+                    # Handle the case where all batches failed
+                    memory_logger.warning(f"No text features were successfully processed")
+                    text_features = None
                 
                 # Clean up intermediates
                 del text_features_list
@@ -445,8 +507,18 @@ class SemanticAwareClassifier(nn.Module):
         else:
             outputs = self.forward(x)
         
-        # Process text description with CLIP (on CPU to save GPU memory)
+        # Process text description with CLIP
         with torch.no_grad():
+            # Determine device
+            if torch.cuda.is_available():
+                process_device = "cuda"
+            elif hasattr(torch, 'mps') and torch.backends.mps.is_available():
+                process_device = "mps"
+            else:
+                process_device = "cpu"
+                
+            memory_logger.debug(f"Processing text on {process_device} device")
+            
             # Tokenize the input text with the CLIP tokenizer
             text_tokens = self.tokenizer(
                 text_description,
@@ -454,18 +526,40 @@ class SemanticAwareClassifier(nn.Module):
                 truncation=True,
                 max_length=77,
                 return_tensors="pt"
-            ).to("cpu")
+            )
             
-            # Get text embeddings from CLIP text encoder
-            text_features = self.clip_text_model(**text_tokens).pooler_output  # [1, hidden_size]
+            # Move to appropriate device
+            text_tokens = {k: v.to(process_device) for k, v in text_tokens.items()}
+            
+            try:
+                # Get text embeddings from CLIP text encoder
+                text_features = self.clip_text_model(**text_tokens).pooler_output  # [1, hidden_size]
+                memory_logger.debug(f"Successfully processed text description with shape {text_features.shape}")
+            except Exception as e:
+                memory_logger.error(f"Error processing text: {e}")
+                # Try with CPU as fallback
+                if process_device != 'cpu':
+                    memory_logger.debug(f"Falling back to CPU processing")
+                    cpu_tokens = {k: v.to('cpu') for k, v in text_tokens.items()}
+                    model_device = next(self.clip_text_model.parameters()).device
+                    self.clip_text_model = self.clip_text_model.to('cpu')
+                    text_features = self.clip_text_model(**cpu_tokens).pooler_output
+                    self.clip_text_model = self.clip_text_model.to(model_device)
+                    memory_logger.debug(f"CPU fallback successful")
             
             # Extract the tokenized text for interpretability
-            token_ids = text_tokens.input_ids[0].tolist()
-            # Filter out special tokens and get the actual tokens
-            token_texts = self.tokenizer.convert_ids_to_tokens(token_ids)
-            # Remove padding, BOS, EOS tokens
-            token_texts = [t for t in token_texts if t not in ['<pad>', '<|startoftext|>', '<|endoftext|>']]
-            query_token_texts = token_texts[:self.num_tokens_per_class]  # Keep just the first few tokens
+            try:
+                # Access tokens through dictionary
+                token_ids = text_tokens['input_ids'][0].tolist()
+                # Filter out special tokens and get the actual tokens
+                token_texts = self.tokenizer.convert_ids_to_tokens(token_ids)
+                # Remove padding, BOS, EOS tokens
+                token_texts = [t for t in token_texts if t not in ['<pad>', '<|startoftext|>', '<|endoftext|>']]
+                query_token_texts = token_texts[:self.num_tokens_per_class]  # Keep just the first few tokens
+            except Exception as e:
+                memory_logger.debug(f"Error extracting token texts: {e}")
+                # Fallback to a default value
+                query_token_texts = ["<token_error>"]
             
         # Move text features to same device as model outputs if needed
         if outputs.get('semantic_logits', None) is not None:
@@ -607,9 +701,14 @@ class SemanticAwareClassifier(nn.Module):
                     class_name = list(class_descriptions.keys())[class_idx] if class_idx < len(class_descriptions) else f"unknown_{class_idx}"
                     
                     # Get tokens for this text
-                    token_ids = text_tokens.input_ids[j].tolist()
-                    token_texts = self.tokenizer.convert_ids_to_tokens(token_ids)
-                    token_texts = [t for t in token_texts if t not in ['<pad>', '<|startoftext|>', '<|endoftext|>']]
+                    try:
+                        # Access tokens through dictionary
+                        token_ids = text_tokens['input_ids'][j].tolist()
+                        token_texts = self.tokenizer.convert_ids_to_tokens(token_ids)
+                        token_texts = [t for t in token_texts if t not in ['<pad>', '<|startoftext|>', '<|endoftext|>']]
+                    except Exception as e:
+                        memory_logger.debug(f"Error extracting token texts: {e}")
+                        token_texts = ["<token_error>"]
                     
                     # Store token mapping
                     class_token_mappings[class_name] = {
@@ -924,10 +1023,11 @@ def get_semantic_class_count():
         return 3
 
 
-def get_clip_text_embeddings(texts, clip_model, tokenizer, batch_size=5, device="cpu"):
+def get_clip_text_embeddings(texts, clip_model, tokenizer, batch_size=5, device=None):
     """
     Process texts using a CLIP text encoder to get their embeddings.
-    Memory-optimized version that processes texts in batches on CPU.
+    Memory-optimized version that processes texts in batches.
+    Works with CPU, CUDA, and MPS devices.
     
     Parameters:
     -----------
@@ -939,16 +1039,37 @@ def get_clip_text_embeddings(texts, clip_model, tokenizer, batch_size=5, device=
         The CLIP tokenizer to use
     batch_size : int
         Maximum batch size for processing texts
-    device : str
-        Device to use for processing (CPU recommended for memory efficiency)
+    device : str, optional
+        Device to use for processing. If None, will auto-detect.
         
     Returns:
     --------
     torch.Tensor
         Text embeddings with shape [len(texts), hidden_size]
     """
-    # Ensure we're using CPU for memory efficiency
-    processing_device = device
+    # Setup logging
+    memory_logger = logging.getLogger("memory_profiling")
+    
+    # Auto-detect device if not specified
+    if device is None:
+        if torch.cuda.is_available():
+            processing_device = "cuda"
+        elif hasattr(torch, 'mps') and torch.backends.mps.is_available():
+            processing_device = "mps"
+        else:
+            processing_device = "cpu"
+    else:
+        processing_device = device
+        
+    memory_logger.debug(f"Processing text embeddings on {processing_device} device")
+    
+    # Get model's current device for restoration later
+    model_device = next(clip_model.parameters()).device
+    
+    # Move model to processing device if needed
+    if model_device != processing_device:
+        memory_logger.debug(f"Moving CLIP model from {model_device} to {processing_device}")
+        clip_model = clip_model.to(processing_device)
     
     # Tokenize and encode texts in batches to save memory
     all_embeddings = []
@@ -957,34 +1078,74 @@ def get_clip_text_embeddings(texts, clip_model, tokenizer, batch_size=5, device=
         for i in range(0, len(texts), batch_size):
             # Extract batch
             batch_texts = texts[i:i+batch_size]
+            memory_logger.debug(f"Processing batch {i//batch_size + 1}/{(len(texts) + batch_size - 1)//batch_size}")
             
-            # Tokenize with CLIP tokenizer
-            tokens = tokenizer(
-                batch_texts, 
-                return_tensors="pt",
-                padding="max_length",
-                truncation=True,
-                max_length=77  # CLIP's standard context length
-            ).to(processing_device)
-            
-            # Get embeddings from CLIP model
-            outputs = clip_model(**tokens)
-            embeddings = outputs.pooler_output
-            
-            # Store batch results
-            all_embeddings.append(embeddings)
-            
-            # Clean up this batch's tensors
-            del tokens
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            try:
+                # Tokenize with CLIP tokenizer and move to device
+                tokens = tokenizer(
+                    batch_texts, 
+                    return_tensors="pt",
+                    padding="max_length",
+                    truncation=True,
+                    max_length=77  # CLIP's standard context length
+                )
+                tokens = {k: v.to(processing_device) for k, v in tokens.items()}
+                
+                # Get embeddings from CLIP model
+                outputs = clip_model(**tokens)
+                embeddings = outputs.pooler_output
+                
+                # Store batch results
+                all_embeddings.append(embeddings)
+                
+                # Clean up this batch's tensors
+                del tokens
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    
+            except Exception as e:
+                memory_logger.error(f"Error processing batch of texts: {e}")
+                if processing_device != 'cpu':
+                    memory_logger.debug(f"Trying CPU fallback for problematic batch")
+                    try:
+                        # Get tokens on CPU
+                        cpu_tokens = tokenizer(
+                            batch_texts, 
+                            return_tensors="pt",
+                            padding="max_length",
+                            truncation=True,
+                            max_length=77
+                        )
+                        
+                        # Process on CPU
+                        cpu_model = clip_model.to('cpu')
+                        outputs = cpu_model(**cpu_tokens)
+                        embeddings = outputs.pooler_output
+                        
+                        # Move embeddings to original device
+                        embeddings = embeddings.to(processing_device)
+                        all_embeddings.append(embeddings)
+                        
+                        # Move model back
+                        clip_model = clip_model.to(processing_device)
+                        memory_logger.debug(f"CPU fallback succeeded")
+                    except Exception as e2:
+                        memory_logger.error(f"CPU fallback also failed: {e2}")
+                        # Continue with next batch
+    
+    # Move model back to original device if needed
+    if model_device != processing_device:
+        memory_logger.debug(f"Moving CLIP model back from {processing_device} to {model_device}")
+        clip_model = clip_model.to(model_device)
     
     # Concatenate all batches
     if all_embeddings:
+        memory_logger.debug(f"Concatenating {len(all_embeddings)} batches of embeddings")
         text_embeddings = torch.cat(all_embeddings, dim=0)
         return text_embeddings
     else:
-        # Return empty tensor if no texts were provided
+        # Return empty tensor if no texts were provided or all batches failed
+        memory_logger.warning(f"No embeddings were generated - returning empty tensor")
         return torch.zeros((0, clip_model.config.hidden_size), device=processing_device)
 
 
