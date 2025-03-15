@@ -282,7 +282,7 @@ class ClassificationAdapter:
         Parameters:
         -----------
         y : torch.Tensor
-            Class labels tensor of shape [samples, batch_size]
+            Class labels tensor of shape [samples, batch_size] or [samples, batch_size, 1]
         class_token_patterns : dict
             Mapping from class indices to token patterns
             
@@ -291,9 +291,19 @@ class ClassificationAdapter:
         torch.Tensor
             Semantic target tensor of shape [samples, batch_size] containing integer target indices
         """
-        # Initialize targets with ignore index (-100)
-        semantic_targets = torch.full_like(y, -100, dtype=torch.long)  # Explicitly use long type
+        # First, log the input shape to understand exactly what's coming in
+        if memory_logger.isEnabledFor(logging.DEBUG):
+            memory_logger.debug(f"y tensor shape in create_semantic_targets: {y.shape}, dtype: {y.dtype}")
         
+        # Handle 3D input by squeezing the last dimension if needed
+        if y.dim() == 3 and y.shape[2] == 1:
+            y = y.squeeze(-1)
+            if memory_logger.isEnabledFor(logging.DEBUG):
+                memory_logger.debug(f"Squeezed y tensor to shape: {y.shape}")
+            
+        # Initialize targets with ignore index (-100) with the same shape as y
+        semantic_targets = torch.full_like(y, -100, dtype=torch.long)  # Explicitly use long type
+            
         # Vectorized operations for processing
         # Get all the class indices once by converting to integer tensor
         class_indices = y.to(torch.int64)
@@ -308,20 +318,34 @@ class ClassificationAdapter:
         valid_y_indices = torch.nonzero(valid_indices_mask)
         valid_class_indices = class_indices[valid_indices_mask]
         
-        # Process each valid index
-        for idx, class_idx in zip(valid_y_indices, valid_class_indices):
-            i, b = idx[0].item(), idx[1].item()
-            class_idx = class_idx.item()
-            
-            # Get the semantic class for this class
+        # Process all valid indices in a vectorized way
+        # Log shapes in debug mode for understanding the structure
+        if memory_logger.isEnabledFor(logging.DEBUG):
+            memory_logger.debug(f"Shape of valid_y_indices: {valid_y_indices.shape}")
+            memory_logger.debug(f"Shape of valid_class_indices: {valid_class_indices.shape}")
+        
+        # Create a lookup tensor mapping class_idx to semantic_class 
+        lookup_size = max(valid_class_indices.max().item() + 1, len(class_token_patterns))
+        class_to_semantic_lookup = torch.full((lookup_size,), -1, device=y.device, dtype=torch.long)
+        
+        # Fill the lookup table with semantic classes from class_token_patterns
+        for class_idx in range(len(class_token_patterns)):
             semantic_class = class_token_patterns[class_idx]['semantic_class']
+            class_to_semantic_lookup[class_idx] = semantic_class
+            # Track in mapping for logging
+            class_to_semantic_map[class_idx] = semantic_class
             
-            # Track in mapping
-            if class_idx not in class_to_semantic_map:
-                class_to_semantic_map[class_idx] = semantic_class
-            
-            # Set the semantic target
-            semantic_targets[i, b] = semantic_class
+        # Get semantic classes for all valid class indices at once
+        semantic_classes = class_to_semantic_lookup[valid_class_indices]
+        
+        # Use direct advanced indexing to set all values at once
+        # valid_y_indices has shape [N, 3] where the first two dimensions are what we need
+        # (Each entry has 3 coords because y is a 3D tensor, but we only need i,b coordinates)
+        row_indices = valid_y_indices[:, 0]  
+        col_indices = valid_y_indices[:, 1]
+        
+        # Apply all updates at once using advanced indexing
+        semantic_targets[row_indices, col_indices] = semantic_classes
             
         # For debug/logging purposes only if memory_logger.isEnabledFor(logging.DEBUG)
         if memory_logger.isEnabledFor(logging.DEBUG):
@@ -539,26 +563,58 @@ class ClassificationAdapter:
                         # Generate random token indices and gather tokens in a vectorized way
                         token_values = torch.zeros(len(fill_positions), device=device, dtype=semantic_feature_tensor.dtype)
                         
-                        # Batch by semantic class for efficiency
+                        # Create one-hot encoding of random classes for vectorized indexing
+                        # Each row is a one-hot vector for a class, size [num_positions, num_classes]
+                        one_hot = torch.zeros(len(random_classes), num_semantic_classes, device=device)
+                        one_hot.scatter_(1, random_classes.unsqueeze(1), 1)
+                        
+                        # Create a tensor with token pool sizes for each class
+                        pool_sizes = torch.tensor([len(token_pools[c]) for c in range(num_semantic_classes)], 
+                                                device=device)
+                        
+                        # Generate a tensor of random indices for all positions at once
+                        # For each position, we need a random index within its class's pool size
+                        # First, create a mask capping the maximum random value by class
+                        max_indices = torch.matmul(one_hot, pool_sizes.float()).to(torch.long)
+                        
+                        # Generate random numbers for all positions at once, between 0 and the corresponding pool size
+                        rand_values = torch.rand(len(random_classes), device=device)
+                        # Scale the random values to the appropriate range for each class
+                        rand_indices = (rand_values * max_indices).to(torch.long)
+                        
+                        # Now use these indices to efficiently select tokens from each pool
+                        # We'll create a tensor that holds all class tokens in order
+                        # and use advanced indexing to select the right tokens for each position
+                        
+                        # Create offsets tensor to adjust indices for each class's starting position in the flattened array
+                        offsets = torch.zeros(num_semantic_classes, device=device, dtype=torch.long)
+                        cumulative_size = 0
+                        
+                        # Vector to hold all tokens from all pools
+                        all_tokens = []
+                        
+                        # Fill the all_tokens list and calculate offsets
                         for class_idx in range(num_semantic_classes):
-                            # Find positions with this class
-                            class_mask = (random_classes == class_idx)
-                            if not class_mask.any():
-                                continue
-                                
-                            # Get the token pool for this class
-                            class_token_pool = token_pools[class_idx]
-                            pool_size = len(class_token_pool)
+                            # Track offset for this class
+                            offsets[class_idx] = cumulative_size
                             
-                            # Get indices of positions with this class
-                            positions_with_class = torch.nonzero(class_mask).squeeze(-1)
+                            # Add all tokens from this pool to the flattened vector
+                            class_tokens = token_pools[class_idx]
+                            all_tokens.append(class_tokens)
                             
-                            # Generate random token indices for these positions
-                            indices = torch.randint(0, pool_size, (len(positions_with_class),), device=device)
+                            # Update cumulative size
+                            cumulative_size += len(class_tokens)
                             
-                            # Select tokens and assign to token_values
-                            selected_tokens = class_token_pool[indices]
-                            token_values[positions_with_class] = selected_tokens
+                        # Concatenate all tokens into one tensor
+                        all_tokens_tensor = torch.cat(all_tokens)
+                        
+                        # Calculate the actual indices into the flattened token array
+                        # For each position, add its class offset to its random index
+                        class_offsets = torch.matmul(one_hot, offsets.float()).to(torch.long)
+                        final_indices = rand_indices + class_offsets
+                        
+                        # Select all tokens at once from the flattened array
+                        token_values = all_tokens_tensor[final_indices]
                         
                         # Assign all tokens at once
                         semantic_feature_tensor[fill_positions, b, feat_idx] = token_values
