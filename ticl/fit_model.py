@@ -14,7 +14,7 @@ root_dir = os.path.dirname(os.path.abspath(__file__))
 from git import Repo
 
 from ticl.model_builder import get_model
-from ticl.utils import init_device, get_model_string, synetune_handle_checkpoint, make_training_callback
+from ticl.utils import init_device, get_model_string, synetune_handle_checkpoint, make_training_callback, set_log_level
 from ticl.config_utils import compare_dicts, flatten_dict, update_config
 from ticl.cli_parsing import make_model_level_argparser
 from ticl.model_configs import get_model_default_config
@@ -31,6 +31,10 @@ def main(argv, extra_config=None):
     model = args.linear_attention.model if 'linear_attention' in args.model_type else None
     config = get_model_default_config(args.model_type, model)
 
+    # Set logging level from command line argument
+    if hasattr(args.general, 'log_level'):
+        set_log_level(args.general.log_level)
+    
     device, rank, num_gpus = init_device(args.general.gpu_id, args.general.use_cpu)
     # handle syne-tune restarts
     orchestration = args.orchestration

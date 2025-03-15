@@ -77,6 +77,8 @@ def argparser_from_config(parser, description="Train Mothernet"):
     general = parser.add_argument_group('general')
     general.add_argument('-g', '--gpu-id', type=int, help='GPU id')
     general.add_argument('-C', '--use-cpu', help='whether to use cpu', action='store_true')
+    general.add_argument('--log-level', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], 
+                       default='INFO', help='Set the logging level for console output')
 
     optimizer = parser.add_argument_group('optimizer')
     optimizer.add_argument('-E', '--epochs', type=int, help='number of epochs')

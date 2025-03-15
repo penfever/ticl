@@ -15,24 +15,36 @@ import psutil
 import gc
 import logging
 
-# Configure memory profiling logging - using DEBUG level by default
+# Configure memory profiling logging
 memory_logger = logging.getLogger("memory_profiling")
-memory_logger.setLevel(logging.DEBUG)  # Change to INFO or DEBUG to see memory logs
-# Add console handler if not already present
-if not memory_logger.handlers:
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-    # Only show INFO and higher to console by default
-    console_handler.setLevel(logging.INFO)
-    memory_logger.addHandler(console_handler)
-    # Also add file handler for persistent logging - include DEBUG messages
-    try:
-        file_handler = logging.FileHandler("memory_profile.log")
-        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-        file_handler.setLevel(logging.DEBUG)
-        memory_logger.addHandler(file_handler)
-    except:
-        memory_logger.warning("Could not create log file for memory profiling")
+memory_logger.setLevel(logging.DEBUG)  # Logger itself always captures DEBUG level
+
+# Console handler with configurable level (will be set by CLI arg)
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+# Default to INFO, will be updated from command line
+console_handler.setLevel(logging.INFO)
+memory_logger.addHandler(console_handler)
+
+# File handler for persistent logging - always include DEBUG messages
+try:
+    file_handler = logging.FileHandler("memory_profile.log")
+    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    file_handler.setLevel(logging.DEBUG)
+    memory_logger.addHandler(file_handler)
+except Exception as e:
+    print(f"Could not create log file for memory profiling: {e}")
+
+# Function to set log level from command line
+def set_log_level(level_name):
+    """Set the console log level based on command line argument"""
+    level = getattr(logging, level_name.upper(), logging.INFO)
+    # Update console handler level
+    for handler in memory_logger.handlers:
+        if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+            handler.setLevel(level)
+    memory_logger.info(f"Log level set to {level_name}")
+    return level
 
 from pathlib import Path
 from torch import nn
