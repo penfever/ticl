@@ -270,7 +270,11 @@ class SemanticAwareClassifier(nn.Module):
                     except Exception as e:
                         memory_logger.error(f"Error processing text batch: {e}")
                         # Try again with CPU as fallback for any device-specific error
-                        if clip_device.type != 'cpu':
+                        try:
+                            check = clip_device.type != 'cpu'
+                        except:
+                            check = clip_device != 'cpu'
+                        if check:
                             memory_logger.debug(f"Retrying with CPU as fallback")
                             # Move tokens to CPU
                             cpu_tokens = {k: v.to('cpu') for k, v in text_tokens.items()}

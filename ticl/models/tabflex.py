@@ -66,35 +66,83 @@ class TabFlex(nn.Module):
         self.nhid = nhid
 
     def forward(self, src, src_mask=None, single_eval_pos=None):
+        # Enable debug mode for troubleshooting shape issues
+        debug_shapes = True
+        
         assert isinstance(src, tuple), 'inputs (src) have to be given as (x,y) or (style,x,y) tuple'
+        if single_eval_pos is None: 
+            raise ValueError('single_eval_pos has to be given, instead of None.')
 
         if len(src) == 3:  # style is given
             style_src, x_src, y_src = src
         else:
             x_src, y_src = src
         
+        if debug_shapes:
+            print(f"Input shapes: x_src={x_src.shape}, y_src={y_src.shape}")
+            
         x_src = self.encoder(x_src) # transform n_features to emsize
+        
         # transform y as one-hot encoding into emsize
         y_src = self.y_encoder(y_src.unsqueeze(-1) if len(y_src.shape) < len(x_src.shape) else y_src)
+
+        if debug_shapes:
+            print(f"After encoding: x_src={x_src.shape}, y_src={y_src.shape}")
+            print(f"single_eval_pos={single_eval_pos}")
 
         assert src_mask is None
         assert self.efficient_eval_masking
         
+        # Follow the same pattern as TabPFN for consistency
         train_x = x_src[:single_eval_pos] + y_src[:single_eval_pos]
         src = torch.cat([train_x, x_src[single_eval_pos:]], 0) # concatenate the training sequence and the test point
-        # we have many testing point...
+
+        if debug_shapes:
+            print(f"After cat: src.shape={src.shape}")
 
         if self.input_ln is not None:
             src = self.input_ln(src)
             
-        # output = self.linear_attention(src, src_mask)
         if self.model in ['linear_attention']:
-            src = src.permute(1, 0, 2) # (seq_len, batch_size, emsize) -> (batch_size, seq_len, emsize)
-            # the linear attention layers is written for batch_first = True
-            output = self.linear_attention(src, single_eval_pos)
-            output = output.permute(1, 0, 2)
+            # Shape debugging and checking
+            if debug_shapes:
+                print(f"Before permute: src.shape = {src.shape}")
+            
+            # Convert from (seq_len, batch_size, emsize) to (batch_size, seq_len, emsize)
+            # for the linear attention which expects batch_first=True
+            src = src.permute(1, 0, 2)
+            
+            if debug_shapes:
+                print(f"After permute: src.shape = {src.shape}")
+            
+            try:
+                # Pass single_eval_pos as src_mask to match TabPFN's pattern
+                output = self.linear_attention(src, single_eval_pos)
+                
+                if debug_shapes:
+                    print(f"After linear_attention: output.shape = {output.shape}")
+                
+                # Convert back to (seq_len, batch_size, emsize) for the decoder
+                output = output.permute(1, 0, 2)
+                
+                if debug_shapes:
+                    print(f"After re-permute: output.shape = {output.shape}")
+            except RuntimeError as e:
+                print(f"ERROR in linear_attention with src.shape={src.shape}, single_eval_pos={single_eval_pos}")
+                raise e
         else:
             raise NotImplementedError(f"Model {self.model} is not implemented yet.")
         
-        output = self.decoder(output) 
-        return output[single_eval_pos:]
+        try:
+            # Apply the decoder
+            output = self.decoder(output)
+            
+            if debug_shapes:
+                print(f"After decoder: output.shape = {output.shape}")
+                print(f"Returning output[{single_eval_pos}:] with shape {output[single_eval_pos:].shape}")
+            
+            # Return only the predictions for the test points
+            return output[single_eval_pos:]
+        except RuntimeError as e:
+            print(f"ERROR in decoder or slicing with output.shape={output.shape}, single_eval_pos={single_eval_pos}")
+            raise e

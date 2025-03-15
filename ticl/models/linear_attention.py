@@ -44,6 +44,10 @@ class AttentionLayer(Module):
         self.value_projection = Linear(d_model_keys, d_values * n_heads)
         self.out_projection = Linear(d_values * n_heads, d_model)
         self.n_heads = n_heads
+        self.d_keys = d_keys
+        self.d_values = d_values
+        self.d_model = d_model
+        self.d_model_keys = d_model_keys
 
     def forward(self, queries, keys, values, attn_mask, query_lengths,
                 key_lengths):
@@ -75,31 +79,66 @@ class AttentionLayer(Module):
         -------
             The new value for each query as a tensor of shape (N, L, D).
         """
+        # Debug input shapes
+        # print(f"AttentionLayer input shapes:")
+        # print(f"  queries: {queries.shape}")
+        # print(f"  keys: {keys.shape}")
+        # print(f"  values: {values.shape}")
         
         # Extract the dimensions into local variables
-        N, L, _ = queries.shape
-        _, S, _ = keys.shape
+        N, L, D = queries.shape
+        _, S, D_keys = keys.shape
+        
+        # Verify shapes match expected dimensions
+        if D != self.d_model:
+            raise ValueError(f"Query feature dimension {D} doesn't match d_model {self.d_model}")
+        if D_keys != self.d_model_keys:
+            raise ValueError(f"Key feature dimension {D_keys} doesn't match d_model_keys {self.d_model_keys}")
+            
         H = self.n_heads
 
-        # Project the queries/keys/values
-        queries = self.query_projection(queries).view(N, L, H, -1)
-        keys = self.key_projection(keys).view(N, S, H, -1)
-        values = self.value_projection(values).view(N, S, H, -1)
+        try:
+            # Project the queries/keys/values
+            queries = self.query_projection(queries).view(N, L, H, -1)
+            keys = self.key_projection(keys).view(N, S, H, -1)
+            values = self.value_projection(values).view(N, S, H, -1)
+        except RuntimeError as e:
+            print(f"Error in projection. Shapes: queries={queries.shape}, keys={keys.shape}, values={values.shape}")
+            print(f"Expected dimensions: d_model={self.d_model}, d_model_keys={self.d_model_keys}, n_heads={H}")
+            raise e
+            
+        # Debug projected shapes
+        # print(f"  After projection:")
+        # print(f"  queries: {queries.shape}")
+        # print(f"  keys: {keys.shape}")
+        # print(f"  values: {values.shape}")
 
+        try:
+            # Compute the attention
+            new_values = self.inner_attention(
+                queries,
+                keys,
+                values,
+                attn_mask,
+                query_lengths,
+                key_lengths
+            ).view(N, L, -1)
+        except RuntimeError as e:
+            print(f"Error in inner_attention. Shapes: queries={queries.shape}, keys={keys.shape}, values={values.shape}")
+            raise e
+            
+        # Debug attention output shape
+        # print(f"  new_values before projection: {new_values.shape}")
 
-        # Compute the attention
-        new_values = self.inner_attention(
-            queries,
-            keys,
-            values,
-            attn_mask,
-            query_lengths,
-            key_lengths
-        ).view(N, L, -1)
-        
-
-        # Project the output and return
-        return self.out_projection(new_values)
+        try:
+            # Project the output and return
+            result = self.out_projection(new_values)
+            # print(f"  Final output: {result.shape}")
+            return result
+        except RuntimeError as e:
+            print(f"Error in out_projection. Shape: new_values={new_values.shape}")
+            print(f"Expected output projection: {self.d_values * self.n_heads} -> {self.d_model}")
+            raise e
 
 
 
@@ -153,6 +192,17 @@ class ActivationFunctionFeatureMap(FeatureMap):
         return
 
     def forward(self, x):
+        # Check if input shape matches expectations
+        if x.dim() != 4:
+            print(f"WARNING: ActivationFunctionFeatureMap expected 4D input [batch, seq, heads, dim], got shape {x.shape}")
+            # Handle the case where dimensions might be different
+            if x.dim() == 3:
+                # Try to infer head dimension and reshape
+                batch, seq, features = x.shape
+                if features % self.query_dims == 0:
+                    heads = features // self.query_dims
+                    x = x.view(batch, seq, heads, self.query_dims)
+                    print(f"  Reshaped to {x.shape}")
         return self.activation_function(x)
 
 
@@ -221,15 +271,35 @@ class LinearAttention(Module):
             elu_feature_map(query_dimensions)
         )
         self.eps = eps
+        self.query_dimensions = query_dimensions
 
     def forward(self, queries, keys, values, attn_mask, query_lengths,
                 key_lengths):
-        # Apply the feature map to the queries and keys
+        # Debug input shapes
+        # print(f"LinearAttention input shapes:")
+        # print(f"  queries: {queries.shape}")
+        # print(f"  keys: {keys.shape}")
+        # print(f"  values: {values.shape}")
         
+        # Check input dimensions
+        batch_size, n_queries, n_heads, d_queries = queries.shape
+        _, n_keys, _, d_keys = keys.shape
+        
+        # Check that dimensions are compatible
+        if d_queries != self.query_dimensions:
+            raise ValueError(f"Query dimension mismatch: got {d_queries}, expected {self.query_dimensions}")
+        if d_keys != self.query_dimensions:
+            raise ValueError(f"Key dimension mismatch: got {d_keys}, expected {self.query_dimensions}")
+        
+        # Apply the feature map to the queries and keys
         self.feature_map.new_feature_map(queries.device)
         Q = self.feature_map.forward_queries(queries)
         K = self.feature_map.forward_keys(keys)
         
+        # Debug mapped shapes
+        # print(f"  After feature mapping:")
+        # print(f"  Q: {Q.shape}")
+        # print(f"  K: {K.shape}")
 
         # Apply the key padding mask and make sure that the attn_mask is
         # all_ones
@@ -243,13 +313,35 @@ class LinearAttention(Module):
         # Compute the KV matrix, namely the dot product of keys and values so
         # that we never explicitly compute the attention matrix and thus
         # decrease the complexity
-        KV = torch.einsum("nshd,nshm->nhmd", K, values)
+        try:
+            KV = torch.einsum("nshd,nshm->nhmd", K, values)
+        except RuntimeError as e:
+            # If error occurs, provide detailed shape information
+            print(f"Error in KV einsum. Shapes: K={K.shape}, values={values.shape}")
+            raise e
+
+        # Debug KV matrix shape
+        # print(f"  KV: {KV.shape}")
 
         # Compute the normalizer
-        Z = 1/(torch.einsum("nlhd,nhd->nlh", Q, K.sum(dim=1))+self.eps)
+        try:
+            Z = 1/(torch.einsum("nlhd,nhd->nlh", Q, K.sum(dim=1))+self.eps)
+        except RuntimeError as e:
+            print(f"Error in Z einsum. Shapes: Q={Q.shape}, K.sum(dim=1)={K.sum(dim=1).shape}")
+            raise e
+
+        # Debug normalizer shape
+        # print(f"  Z: {Z.shape}")
 
         # Finally compute and return the new values
-        V = torch.einsum("nlhd,nhmd,nlh->nlhm", Q, KV, Z)
+        try:
+            V = torch.einsum("nlhd,nhmd,nlh->nlhm", Q, KV, Z)
+        except RuntimeError as e:
+            print(f"Error in V einsum. Shapes: Q={Q.shape}, KV={KV.shape}, Z={Z.shape}")
+            raise e
+
+        # Debug output shape
+        # print(f"  V: {V.shape}")
 
         return V.contiguous()
     
@@ -299,13 +391,26 @@ class LinearAttentionTransformerEncoderLayer(Module):
                 Split the input into two parts. The first part is the training
                 samples and the second part is the testing samples.
         """
+        # Debug dimensions coming in
+        # print(f"LinearAttentionTransformerEncoderLayer input shape: {x.shape}")
 
         if isinstance(src_mask, int):
-            # tabpfn
+            # tabpfn pattern - split into train and test samples
             single_eval_position = src_mask
+            
+            # Check dimensions before splitting
+            if x.dim() != 3:
+                raise ValueError(f"Expected 3D tensor input, got shape {x.shape}")
+                
+            # Split along sequence dimension (dim=1 for batch_first=True)
             train_samples = x[:,:single_eval_position,:]
             test_samples = x[:,single_eval_position:,:]
+            
+            # Debug split dimensions
+            # print(f"  Train samples shape: {train_samples.shape}")
+            # print(f"  Test samples shape: {test_samples.shape}")
 
+            # No attention mask for linear attention
             src_mask = None
 
             # Run self attention and add it to the input
@@ -318,6 +423,7 @@ class LinearAttentionTransformerEncoderLayer(Module):
                 query_lengths=None,
                 key_lengths=None,
             )
+            # print(f"  attn_left shape: {attn_left.shape}")
 
             # the testing samples attend to training samples
             attn_right = self.attention(
@@ -328,21 +434,15 @@ class LinearAttentionTransformerEncoderLayer(Module):
                 query_lengths=None,
                 key_lengths=None,
             )
+            # print(f"  attn_right shape: {attn_right.shape}")
 
+            # Concatenate results back together
             attn_output = torch.cat([attn_left, attn_right], dim=1)
+            # print(f"  attn_output shape: {attn_output.shape}")
         else:
-            raise ValueError("Not implemented")
-            # mothernet
-            # attn_mask = FullMask(num_samples, device=x.device)
-            # length_mask = length_mask or \
-            # LengthMask(x.new_full((batch_size,), num_samples, dtype=torch.int64))
-            # attn_output = self.attention(
-            #     x, x, x,
-            #     attn_mask=src_mask,
-            #     query_lengths=length_mask,
-            #     key_lengths=length_mask
-            # )
+            raise ValueError("LinearAttentionTransformerEncoderLayer only supports integer src_mask")
 
+        # Add residual connection and apply normalization
         x = x + self.dropout(attn_output)
 
         # Run the fully connected part of the layer
@@ -351,6 +451,7 @@ class LinearAttentionTransformerEncoderLayer(Module):
         y = self.dropout(self.linear2(y))
 
         output = self.norm2(x+y)
+        # print(f"LinearAttentionTransformerEncoderLayer output shape: {output.shape}")
 
         return output
 
@@ -423,8 +524,17 @@ def get_linear_attention_layers(
                 )
         # TODO is norm good here?
         linear_model = TransformerEncoderSimple(encoder_layer_creator=encoder_layer_creator, num_layers=n_layer, norm=LayerNorm(d_model))
-
-
+        
+        # Enable debugging mode to help identify shape issues
+        linear_model.debug_mode = True
+        
+        # Print model configuration for debugging
+        print(f"Created linear attention model:")
+        print(f"  - d_model: {d_model}")
+        print(f"  - n_layers: {n_layer}")
+        print(f"  - d_intermediate: {d_intermediate}")
+        print(f"  - n_heads: {nheads}")
+        print(f"  - feature_map: {feature_map}")
 
         return linear_model
     

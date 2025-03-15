@@ -246,6 +246,7 @@ class TransformerEncoderSimple(Module):
         self.layers = nn.ModuleList([encoder_layer_creator() for _ in range(num_layers)])
         self.num_layers = num_layers
         self.norm = norm
+        self.debug_mode = False  # Set to True to enable debug prints
 
     def forward(
         self, 
@@ -262,14 +263,32 @@ class TransformerEncoderSimple(Module):
             see the docs in Transformer class.
         """
         output = src
+        
+        if self.debug_mode:
+            print(f"TransformerEncoderSimple input shape: {src.shape}, mask: {mask}")
 
-        for mod in self.layers:
-            output = mod(
-                output, 
-                src_mask=mask,
-            )
+        for i, mod in enumerate(self.layers):
+            try:
+                if self.debug_mode:
+                    print(f"  Layer {i} input shape: {output.shape}")
+                
+                output = mod(
+                    output, 
+                    src_mask=mask,
+                )
+                
+                if self.debug_mode:
+                    print(f"  Layer {i} output shape: {output.shape}")
+                    
+            except RuntimeError as e:
+                print(f"Error in transformer layer {i}, input shape: {output.shape}, mask: {mask}")
+                raise RuntimeError(f"Layer {i} failed: {str(e)}")
 
         if self.norm is not None:
-            output = self.norm(output)
+            try:
+                output = self.norm(output)
+            except RuntimeError as e:
+                print(f"Error in final normalization, input shape: {output.shape}")
+                raise e
 
         return output
