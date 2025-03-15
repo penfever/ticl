@@ -7,10 +7,11 @@ This module loads and processes non-numeric semantic column data from tokenized 
 import torch
 import os
 import json
-from typing import Dict, Tuple, Optional, List
+from typing import Dict, Tuple, Optional, List, Set
 import logging
 import random
 import numpy as np
+import string
 from transformers import CLIPTokenizerFast
 
 logger = logging.getLogger(__name__)
@@ -21,7 +22,9 @@ _SEMANTIC_DATA_CACHE = {
     "column_value_tokens": None,
     "is_loaded": False,
     "log_file_path": None,
-    "max_columns": None
+    "max_columns": None,
+    "unwanted_token_ids": None,
+    "tokenizer": None
 }
 
 def is_float(value: str) -> bool:
@@ -39,6 +42,73 @@ def is_int(value: str) -> bool:
         return True
     except (ValueError, TypeError):
         return False
+
+def get_unwanted_token_ids(tokenizer: CLIPTokenizerFast) -> torch.Tensor:
+    """
+    Get or create a list of token IDs for tokens we want to filter out.
+    This includes punctuation, numbers, and special tokens.
+    
+    Uses the global cache to avoid recomputing the list on every call.
+    
+    Parameters:
+    -----------
+    tokenizer : CLIPTokenizerFast
+        The CLIP tokenizer
+        
+    Returns:
+    --------
+    torch.Tensor
+        Tensor of token IDs to filter out (replace with -100)
+    """
+    global _SEMANTIC_DATA_CACHE
+    
+    # Check if we've already cached the unwanted token IDs
+    if (_SEMANTIC_DATA_CACHE["unwanted_token_ids"] is not None and 
+        _SEMANTIC_DATA_CACHE["tokenizer"] == tokenizer.name_or_path):
+        return _SEMANTIC_DATA_CACHE["unwanted_token_ids"]
+    
+    # Define unwanted token categories
+    
+    # 1. Punctuation
+    punctuation_tokens = []
+    for p in string.punctuation:
+        # Tokenize each punctuation character
+        token_ids = tokenizer.encode(p, add_special_tokens=False)
+        punctuation_tokens.extend(token_ids)
+    
+    # 2. Numbers
+    number_tokens = []
+    for i in range(10):
+        # Tokenize digits 0-9
+        token_ids = tokenizer.encode(str(i), add_special_tokens=False)
+        number_tokens.extend(token_ids)
+    
+    # 3. Special characters and whitespace
+    special_tokens = []
+    for s in [' ', '\n', '\t', '\r', '<', '>', '/']:
+        token_ids = tokenizer.encode(s, add_special_tokens=False)
+        special_tokens.extend(token_ids)
+    
+    # 4. CLIP special tokens
+    clip_special = []
+    for token in ['<|startoftext|>', '<|endoftext|>', '<|pad|>']:
+        if token in tokenizer.vocab:
+            clip_special.append(tokenizer.vocab[token])
+    
+    # Combine all unwanted tokens
+    all_unwanted = set(punctuation_tokens + number_tokens + special_tokens + clip_special)
+    
+    # Convert to tensor
+    unwanted_tensor = torch.tensor(list(all_unwanted), dtype=torch.int32)
+    
+    # Add to cache
+    _SEMANTIC_DATA_CACHE["unwanted_token_ids"] = unwanted_tensor
+    _SEMANTIC_DATA_CACHE["tokenizer"] = tokenizer.name_or_path
+    
+    logger.info(f"Created unwanted token list with {len(unwanted_tensor)} tokens")
+    
+    return unwanted_tensor
+
 
 def is_numeric_column(column_name: str) -> bool:
     """
@@ -127,6 +197,7 @@ def is_numeric_column(column_name: str) -> bool:
                 return True
     
     return False
+
 
 def load_semantic_prior_data(
     log_file_path: str = "ticl/datasets/completed_columns.json",
@@ -222,10 +293,39 @@ def load_semantic_prior_data(
         filtered_columns = {col: filtered_columns[col] for col in selected_cols}
         logger.info(f"Limited to {len(filtered_columns)} columns due to max_columns={max_columns}")
     
+    # Get or create the set of unwanted token IDs
+    unwanted_token_ids = get_unwanted_token_ids(tokenizer)
+    
     # Process each column
     for col_name, tensor_data in filtered_columns.items():
         # Convert tensor data to tensor
         col_tensor = torch.tensor(tensor_data, dtype=torch.int32)  # Use int32 to save memory
+        
+        # Filter out unwanted tokens with highly optimized vectorized approach
+        # First create a boolean tensor to mark which tokens should be kept
+        # This avoids the slow loop over all unwanted tokens
+        
+        # We'll create a lookup table where indices are token IDs and values are 1 for keep or 0 for filter
+        # Find the maximum token ID to determine lookup table size
+        max_token_id = max(col_tensor.max().item(), unwanted_token_ids.max().item()) + 1
+        
+        # Create lookup tensor (1 = keep, 0 = filter)
+        # Default is to keep all tokens (1)
+        token_filter = torch.ones(max_token_id, dtype=torch.int8)
+        
+        # Mark unwanted tokens as 0 (filter)
+        token_filter[unwanted_token_ids] = 0
+        
+        # Use this lookup to create a mask where 0 = replace with -100, 1 = keep original
+        # We handle negative indices separately since they can't be used in lookup table
+        valid_indices = (col_tensor >= 0)
+        mask = torch.ones_like(col_tensor, dtype=torch.int8)
+        
+        # Only apply lookup to non-negative indices
+        mask[valid_indices] = token_filter[col_tensor[valid_indices]]
+        
+        # Apply the filter: where mask is 0, use -100, otherwise use original value
+        col_tensor = torch.where(mask.bool(), col_tensor, torch.tensor(-100, dtype=col_tensor.dtype))
         
         # Ensure consistent tensor size
         if col_tensor.size(0) < target_tensor_size:
@@ -278,7 +378,8 @@ def get_random_semantic_data(
     max_tensor_size_mb: int = 10,  # Limit tensor size to 10MB by default
     return_column_names: bool = True,
     seed: Optional[int] = None,  # Random seed for reproducibility
-    use_cache: bool = True  # Whether to use cached data
+    use_cache: bool = True,  # Whether to use cached data
+    filter_tokens: bool = True  # Whether to filter unwanted tokens
 ) -> tuple:
     """
     Get random semantic data either from real columns or generate synthetic data.
@@ -420,6 +521,33 @@ def get_random_semantic_data(
         random_tensor = torch.randint(1, 49405, (num_classes, tensor_size), 
                                      dtype=torch.int32)
     
+    # Filter unwanted tokens if requested
+    if filter_tokens:
+        # Initialize tokenizer if needed
+        if _SEMANTIC_DATA_CACHE["tokenizer"] is None:
+            tokenizer = CLIPTokenizerFast.from_pretrained("openai/clip-vit-base-patch32")
+            _SEMANTIC_DATA_CACHE["tokenizer"] = tokenizer.name_or_path
+        else:
+            tokenizer = CLIPTokenizerFast.from_pretrained(_SEMANTIC_DATA_CACHE["tokenizer"])
+        
+        # Get unwanted token IDs (cached)
+        unwanted_token_ids = get_unwanted_token_ids(tokenizer)
+        
+        # Apply efficient filtering with lookup table
+        max_token_id = max(random_tensor.max().item(), unwanted_token_ids.max().item()) + 1
+        token_filter = torch.ones(max_token_id, dtype=torch.int8)
+        token_filter[unwanted_token_ids] = 0
+        
+        # Apply the filter using vectorized operations
+        valid_indices = (random_tensor >= 0)
+        mask = torch.ones_like(random_tensor, dtype=torch.int8)
+        mask[valid_indices] = token_filter[random_tensor[valid_indices]]
+        
+        # Replace unwanted tokens with -100 (ignore index)
+        random_tensor = torch.where(mask.bool(), random_tensor, torch.tensor(-100, dtype=random_tensor.dtype))
+        
+        logger.info(f"Filtered {(~mask.bool()).sum().item()} unwanted tokens from synthetic data")
+    
     # Generate synthetic column names using minimal computation
     synthetic_columns = [f"synthetic_feature_{i}" for i in range(num_classes)]
     
@@ -450,8 +578,8 @@ def get_random_semantic_data(
     else:
         return random_tensor
 
-# For backwards compatibility
-random_tensor, column_names = get_random_semantic_data()
+# For backwards compatibility - generate with filtered tokens
+random_tensor, column_names = get_random_semantic_data(filter_tokens=True)
 
 # Export the column names for global access
 semantic_data_column_names = column_names

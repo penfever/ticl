@@ -232,8 +232,14 @@ class ClassificationAdapter:
         global semantic_data_column_names
         
         # Prepare token counts and indices in advance
-        max_tokens = min(10, semantic_data.shape[1])
-        num_signature_tokens = torch.randint(5, max_tokens + 1, (num_classes,)).tolist()
+        # Use more tokens per class to maximize information utilization
+        # We'll use between 25% and 50% of all available tokens per class
+        min_ratio, max_ratio = 0.25, 0.5
+        min_tokens = max(5, int(semantic_data.shape[1] * min_ratio))  # At least 5 tokens
+        max_tokens = min(int(semantic_data.shape[1] * max_ratio), semantic_data.shape[1])
+        num_signature_tokens = torch.randint(min_tokens, max_tokens + 1, (num_classes,)).tolist()
+        
+        memory_logger.debug(f"Using {min_tokens}-{max_tokens} tokens per class out of {semantic_data.shape[1]} total tokens")
         
         # Create all token patterns in one batch
         for class_idx in range(num_classes):
@@ -469,7 +475,8 @@ class ClassificationAdapter:
         # Process each batch separately
         for b in range(batch_size):
             # 1. Determine which features will be causal for this batch
-            min_causal_ratio, max_causal_ratio = 0.3, 0.6
+            # Increase causal feature ratios to use more semantic features effectively
+            min_causal_ratio, max_causal_ratio = 0.4, 0.7  # Increased from 0.3-0.6
             num_causal = max(
                 int(n_semantic_features * min_causal_ratio),
                 min(int(n_semantic_features * max_causal_ratio), 1)
@@ -489,8 +496,9 @@ class ClassificationAdapter:
             
             # 4. Create fill probability constants
             # Different probabilities for causal vs non-causal features
-            causal_fill_prob = 0.8  # 80% fill rate for causal features
-            noncausal_fill_prob = 0.5  # 50% fill rate for non-causal features
+            # Higher fill rates to maximize information usage
+            causal_fill_prob = 0.95  # 95% fill rate for causal features (increased from 80%)
+            noncausal_fill_prob = 0.7  # 70% fill rate for non-causal features (increased from 50%)
             
             # 5. Process each class group together in a batched manner
             for class_idx in range(num_classes):
