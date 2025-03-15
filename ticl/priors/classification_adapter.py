@@ -213,49 +213,49 @@ class ClassificationAdapter:
         class_token_patterns = {}
         
         num_semantic_classes = semantic_data.shape[0]
-        memory_logger.debug(f"create_semantic_class_mapping - Creating patterns for {num_classes} classes using {num_semantic_classes} semantic classes")
         
         # Get a seed for reproducibility if configured
-        seed = None
-        if hasattr(self, 'h') and 'random_seed' in self.h:
-            seed = self.h['random_seed']
-            memory_logger.debug(f"Using random_seed={seed} from hyperparameters for class mapping")
-            # Set the random seed for consistent selection
-            if seed is not None:
-                random.seed(seed)
-                
-        # Ensure each class gets a different semantic class if possible
-        available_semantic_classes = list(range(num_semantic_classes))
+        seed = self.h.get('random_seed', None)
+        if seed is not None:
+            random.seed(seed)
+            torch.manual_seed(seed)
+        
+        # Vectorized selection of semantic classes for each class
         if num_classes <= num_semantic_classes:
             # Sample without replacement when we have enough classes
-            selected_semantic_classes = random.sample(available_semantic_classes, num_classes)
+            selected_indices = torch.randperm(num_semantic_classes)[:num_classes].tolist()
         else:
             # If more classes than semantic classes, we'll have some duplicates
-            selected_semantic_classes = [random.choice(available_semantic_classes) for _ in range(num_classes)]
+            selected_indices = torch.randint(0, num_semantic_classes, (num_classes,)).tolist()
+                
+        # Get the actual column names if available
+        global semantic_data_column_names
         
-        memory_logger.debug(f"Selected semantic classes: {selected_semantic_classes[:5]}...")
+        # Prepare token counts and indices in advance
+        max_tokens = min(10, semantic_data.shape[1])
+        num_signature_tokens = torch.randint(5, max_tokens + 1, (num_classes,)).tolist()
         
+        # Create all token patterns in one batch
         for class_idx in range(num_classes):
-            # Select a semantic class (row) from our semantic data
-            semantic_class = selected_semantic_classes[class_idx]
+            # Get the semantic class for this class
+            semantic_class = selected_indices[class_idx]
             
-            # Select a subset of tokens to represent this class (5-10 tokens)
-            # We use the same random seed sequence to ensure consistent selection
-            num_signature_tokens = random.randint(5, min(10, semantic_data.shape[1]))
-            token_indices = random.sample(range(semantic_data.shape[1]), num_signature_tokens)
+            # Generate token indices
+            token_indices = random.sample(range(semantic_data.shape[1]), num_signature_tokens[class_idx])
+            
+            # Extract the tokens for this class
             signature_tokens = semantic_data[semantic_class, token_indices].to(device)
             
             # Create descriptive name for class
             class_name = f"Class_{class_idx}_Type_{semantic_class}"
             
-            # Get the actual column name if available
-            global semantic_data_column_names
+            # Get column name if available
             column_name = None
             if 'semantic_data_column_names' in globals() and semantic_data_column_names is not None:
                 if len(semantic_data_column_names) > semantic_class:
                     column_name = semantic_data_column_names[semantic_class]
-                    memory_logger.debug(f"Using real column name for class {class_idx}: {column_name}")
             
+            # Store the class token pattern
             class_token_patterns[class_idx] = {
                 'tokens': signature_tokens,
                 'semantic_class': semantic_class,
@@ -263,13 +263,15 @@ class ClassificationAdapter:
                 'class_name': class_name,
                 'column_name': column_name
             }
-            
-            if class_idx < 3:  # Log a few for debugging
-                memory_logger.debug(f"Class {class_idx} mapped to semantic class {semantic_class} with {num_signature_tokens} tokens")
-                memory_logger.debug(f"  Token indices: {token_indices[:5]}...")
-                memory_logger.debug(f"  Token values: {signature_tokens[:5].cpu().tolist()}...")
         
-        memory_logger.debug(f"Created class token patterns for {len(class_token_patterns)} classes")
+        # Only log details if debug is enabled
+        if memory_logger.isEnabledFor(logging.DEBUG):
+            memory_logger.debug(f"Created patterns for {num_classes} classes using {num_semantic_classes} semantic classes")
+            # Log a few samples for debugging
+            for class_idx in range(min(3, num_classes)):
+                pattern = class_token_patterns[class_idx]
+                memory_logger.debug(f"Class {class_idx} mapped to semantic class {pattern['semantic_class']}")
+                
         return class_token_patterns
     
     def create_semantic_targets(self, y, class_token_patterns):
@@ -289,84 +291,59 @@ class ClassificationAdapter:
         torch.Tensor
             Semantic target tensor of shape [samples, batch_size] containing integer target indices
         """
-        memory_logger.debug(f"=== create_semantic_targets START ===")
-        memory_logger.debug(f"Input y shape: {y.shape}, dtype: {y.dtype}, device: {y.device}")
-        memory_logger.debug(f"Class token patterns: {len(class_token_patterns)} classes")
-        
-        # Sample values from y for debugging
-        memory_logger.debug(f"Y sample values (first few positions):")
-        for i in range(min(3, y.shape[0])):
-            for b in range(min(3, y.shape[1])):
-                memory_logger.debug(f"  y[{i},{b}] = {y[i, b].item()}")
-        
-        # Log class distribution
-        try:
-            unique_classes, counts = torch.unique(y, return_counts=True)
-            class_dist = {int(cls.item()): int(count.item()) for cls, count in zip(unique_classes, counts)}
-            memory_logger.debug(f"Class distribution in y: {class_dist}")
-        except Exception as e:
-            memory_logger.debug(f"Could not compute class distribution: {e}")
-        
         # Initialize targets with ignore index (-100)
         semantic_targets = torch.full_like(y, -100, dtype=torch.long)  # Explicitly use long type
-        memory_logger.debug(f"Created semantic_targets tensor with shape {semantic_targets.shape}, dtype {semantic_targets.dtype}")
         
-        # Track class-to-semantic mapping
+        # Vectorized operations for processing
+        # Get all the class indices once by converting to integer tensor
+        class_indices = y.to(torch.int64)
+        
+        # Create a validity mask for indices within valid range
+        valid_indices_mask = (class_indices >= 0) & (class_indices < len(class_token_patterns))
+        
+        # Track class-to-semantic mapping for logging
         class_to_semantic_map = {}
-        invalid_count = 0
-        valid_count = 0
         
-        # For each sample, set the target based on the class
-        for i in range(y.shape[0]):
-            for b in range(y.shape[1]):
-                class_idx = int(y[i, b].item())
+        # Get the flattened valid indices for faster processing
+        valid_y_indices = torch.nonzero(valid_indices_mask)
+        valid_class_indices = class_indices[valid_indices_mask]
+        
+        # Process each valid index
+        for idx, class_idx in zip(valid_y_indices, valid_class_indices):
+            i, b = idx[0].item(), idx[1].item()
+            class_idx = class_idx.item()
+            
+            # Get the semantic class for this class
+            semantic_class = class_token_patterns[class_idx]['semantic_class']
+            
+            # Track in mapping
+            if class_idx not in class_to_semantic_map:
+                class_to_semantic_map[class_idx] = semantic_class
+            
+            # Set the semantic target
+            semantic_targets[i, b] = semantic_class
+            
+        # For debug/logging purposes only if memory_logger.isEnabledFor(logging.DEBUG)
+        if memory_logger.isEnabledFor(logging.DEBUG):
+            memory_logger.debug(f"=== create_semantic_targets ===")
+            memory_logger.debug(f"Input y shape: {y.shape}, dtype: {y.dtype}, device: {y.device}")
+            memory_logger.debug(f"Class token patterns: {len(class_token_patterns)} classes")
+            
+            # Log class distribution
+            try:
+                # Get valid counts more efficiently
+                valid_count = valid_indices_mask.sum().item()
+                invalid_count = y.numel() - valid_count
+                memory_logger.debug(f"Class to semantic class mapping: {class_to_semantic_map}")
+                memory_logger.debug(f"Set {valid_count} valid semantic targets, skipped {invalid_count} invalid positions")
                 
-                # Skip if invalid class
-                if class_idx < 0 or class_idx >= len(class_token_patterns):
-                    invalid_count += 1
-                    # Only log some instances to avoid spam
-                    if invalid_count < 10:
-                        memory_logger.debug(f"  Skipping invalid class_idx {class_idx} at position [{i},{b}]")
-                    continue
-                
-                # Get the semantic class for this class
-                semantic_class = class_token_patterns[class_idx]['semantic_class']
-                
-                # Track in mapping
-                if class_idx not in class_to_semantic_map:
-                    class_to_semantic_map[class_idx] = semantic_class
-                
-                # Set the semantic target to the semantic class (ensure integer)
-                semantic_targets[i, b] = int(semantic_class)
-                valid_count += 1
-                
-                # Log samples for debugging
-                if i < 3 and b < 3:
-                    memory_logger.debug(f"  Mapping class {class_idx} → semantic class {semantic_class} at position [{i},{b}]")
+                # Check for unassigned positions
+                ignored_count = (semantic_targets == -100).sum().item()
+                ignored_percentage = (ignored_count / semantic_targets.numel()) * 100
+                memory_logger.debug(f"Ignored positions (-100): {ignored_count}/{semantic_targets.numel()} ({ignored_percentage:.1f}%)")
+            except Exception as e:
+                memory_logger.debug(f"Error in semantic targets logging: {e}")
         
-        memory_logger.debug(f"Class to semantic class mapping: {class_to_semantic_map}")
-        memory_logger.debug(f"Set {valid_count} valid semantic targets, skipped {invalid_count} invalid positions")
-        
-        # Double-check that we're returning integer tensor
-        if not semantic_targets.dtype == torch.long:
-            memory_logger.warning(f"Semantic targets have incorrect dtype: {semantic_targets.dtype}. Converting to long.")
-            semantic_targets = semantic_targets.long()
-        
-        # Log distribution of semantic targets
-        try:
-            valid_mask = semantic_targets != -100
-            semantic_classes, counts = torch.unique(semantic_targets[valid_mask], return_counts=True)
-            sem_dist = {int(cls.item()): int(count.item()) for cls, count in zip(semantic_classes, counts)}
-            memory_logger.debug(f"Semantic target class distribution: {sem_dist}")
-        except Exception as e:
-            memory_logger.debug(f"Could not compute semantic target distribution: {e}")
-        
-        # Check for unassigned positions
-        ignored_count = (semantic_targets == -100).sum().item()
-        ignored_percentage = (ignored_count / semantic_targets.numel()) * 100
-        memory_logger.debug(f"Ignored positions (-100): {ignored_count}/{semantic_targets.numel()} ({ignored_percentage:.1f}%)")
-        
-        memory_logger.debug(f"=== create_semantic_targets END ===")
         return semantic_targets
     
     def _apply_semantic_prior(self, x, semantic_features, device, y=None):
@@ -391,209 +368,109 @@ class ClassificationAdapter:
         tuple
             (Updated feature tensor, Semantic info dictionary)
         """
-        # Use the semantic prior data from the top of the file
-        # which is loaded from semantic_prior_data_loader
-        global semantic_data
+        global semantic_data, semantic_data_column_names
         
-        memory_logger.debug(f"=== _apply_semantic_prior START ===")
-        memory_logger.debug(f"Input tensor x: shape={x.shape}, device={x.device}, dtype={x.dtype}")
-        memory_logger.debug(f"Semantic features: {len(semantic_features)} features, first few: {semantic_features[:5]}")
-        memory_logger.debug(f"Device: {device}")
-        
-        memory_logger.debug(f"Target tensor y: shape={y.shape if y is not None else 'None'}, device={y.device if y is not None else 'None'}")
-        
-        # Get the number of classes from config - this is the correct way since 
-        # y values are still real-valued at this point and will be binned later
+        # Get the number of classes from config
         num_classes = max(2, self.h['num_classes'])
-        
-        memory_logger.debug(f"Using {num_classes} classes from self.h['num_classes'] for semantic features")
-        
-        # If y is present, just log it for debugging
-        if y is not None:
-            try:
-                if y.numel() > 0:
-                    # Just log a few sample values from y to understand its distribution
-                    sample_values = y.flatten()[:10].cpu().tolist() if y.numel() >= 10 else y.flatten().cpu().tolist()
-                    memory_logger.debug(f"Sample y values (still real-valued): {sample_values}")
-                    memory_logger.debug(f"Min/max y: {y.min().item():.4f}, {y.max().item():.4f}")
-            except Exception as e:
-                memory_logger.debug(f"Could not analyze target tensor: {e}")
-        
-        # Load new semantic data if needed (with the correct number of classes)
-        from ticl.datasets.semantic_prior_data_loader import get_random_semantic_data
-        
-        # Track column names
-        global semantic_data_column_names
-        
-        # Get a seed for reproducibility if configured
-        seed = None
-        if 'random_seed' in self.h:
-            seed = self.h['random_seed']
-            memory_logger.debug(f"Using random_seed={seed} from hyperparameters for semantic data")
-        
-        # Check if we need to reload the semantic data
-        if semantic_data.shape[0] != num_classes or not hasattr(globals(), 'semantic_data_column_names'):
-            memory_logger.debug(f"Existing semantic data has {semantic_data.shape[0]} classes, but we need {num_classes} classes")
-            memory_logger.debug(f"Loading new semantic data with {num_classes} classes using seed={seed}")
-            
-            # Get random semantic data with proper randomization and caching
-            semantic_data, semantic_data_column_names = get_random_semantic_data(
-                num_classes=num_classes,
-                seed=seed,
-                use_cache=True  # Use the cache to avoid reloading the JSON file every time
-            )
-            memory_logger.debug(f"Loaded column names: {semantic_data_column_names}")
-        
-        # Get semantic data info
-        memory_logger.debug(f"Semantic data tensor: shape={semantic_data.shape}, device={semantic_data.device}, dtype={semantic_data.dtype}")
-        
-        # Make sure semantic_data is on the correct device
-        semantic_data = semantic_data.to(device)
-        memory_logger.debug(f"Moved semantic data to {device}")
-        
-        # Number of semantic classes (first dimension of semantic_data)
-        num_semantic_classes = semantic_data.shape[0]
-        memory_logger.debug(f"Number of semantic classes: {num_semantic_classes}")
-        
-        # Sample and log a few semantic data points
-        memory_logger.debug(f"Semantic data samples:")
-        for i in range(min(3, num_semantic_classes)):
-            memory_logger.debug(f"  Class {i} sample: {semantic_data[i, :10]}")
         
         # If y is not provided (initial call), generate proxy targets
         if y is None:
             # Create a temporary random target for initial feature generation
-            memory_logger.debug(f"Generating proxy targets with {num_classes} classes")
-            y = torch.randint(0, num_classes, 
-                             (x.shape[0], x.shape[1]), device=device).float()
-            memory_logger.debug(f"Generated proxy targets: shape={y.shape}, min={y.min().item()}, max={y.max().item()}")
+            y = torch.randint(0, num_classes, (x.shape[0], x.shape[1]), device=device).float()
+        
+        # Load new semantic data if needed with proper number of classes
+        seed = self.h.get('random_seed', None)
+        if semantic_data.shape[0] != num_classes or not hasattr(globals(), 'semantic_data_column_names'):
+            # Get random semantic data with proper randomization and caching
+            from ticl.datasets.semantic_prior_data_loader import get_random_semantic_data
+            semantic_data, semantic_data_column_names = get_random_semantic_data(
+                num_classes=num_classes,
+                seed=seed,
+                use_cache=True
+            )
+            
+        # Make sure semantic_data is on the correct device
+        semantic_data = semantic_data.to(device)
+        num_semantic_classes = semantic_data.shape[0]
         
         # Create class-token mapping if not already created
         if not hasattr(self, 'class_token_patterns') or len(self.class_token_patterns) != num_classes:
-            memory_logger.debug(f"Creating class-token mapping for {num_classes} classes")
             self.class_token_patterns = self.create_semantic_class_mapping(num_classes, semantic_data, device)
-            memory_logger.debug(f"Class token patterns created for {len(self.class_token_patterns)} classes")
-            
-            # Log a sample of the class-token patterns
-            sample_class = 0
-            if sample_class in self.class_token_patterns:
-                pattern = self.class_token_patterns[sample_class]
-                memory_logger.debug(f"Sample class {sample_class} token pattern:")
-                memory_logger.debug(f"  Semantic class: {pattern['semantic_class']}")
-                memory_logger.debug(f"  Token indices: {pattern['token_indices'][:5]}...")
-                memory_logger.debug(f"  Tokens sample: {pattern['tokens'][:5]}...")
-        else:
-            memory_logger.debug(f"Using existing class-token patterns for {len(self.class_token_patterns)} classes")
         
         # Create semantic targets for training
-        memory_logger.debug(f"Creating semantic targets from class labels")
         semantic_targets = self.create_semantic_targets(y, self.class_token_patterns)
-        memory_logger.debug(f"Semantic targets: shape={semantic_targets.shape}, dtype={semantic_targets.dtype}")
         
-        # Log distribution of semantic targets
-        valid_targets = (semantic_targets != -100)
-        valid_count = valid_targets.sum().item()
-        valid_ratio = valid_count / semantic_targets.numel() * 100
-        memory_logger.debug(f"Valid semantic targets: {valid_count}/{semantic_targets.numel()} ({valid_ratio:.1f}%)")
+        # Prepare for efficient vectorized operations
+        batch_size = x.shape[1]
+        sample_size = x.shape[0]
+        n_semantic_features = len(semantic_features)
+        semantic_features_tensor = torch.tensor(semantic_features, device=device)
         
-        # Check distribution of semantic target values
-        if valid_count > 0:
-            valid_values = semantic_targets[valid_targets]
-            try:
-                classes, counts = torch.unique(valid_values, return_counts=True)
-                semantic_dist = {int(cls.item()): int(count.item()) for cls, count in zip(classes, counts)}
-                memory_logger.debug(f"Semantic target distribution: {semantic_dist}")
-            except Exception as e:
-                memory_logger.debug(f"Could not compute semantic target distribution: {e}")
+        # Vectorize the causal feature selection
+        min_causal_ratio, max_causal_ratio = 0.3, 0.6
+        causal_features_map = {}
         
-        # Track which features are causal for each batch item
-        causal_features_map = {b: [] for b in range(x.shape[1])}
+        # Precalculate class indices once - convert to integers to avoid item() calls
+        y_int = y.to(torch.int64)
+        valid_class_mask = (y_int >= 0) & (y_int < num_classes)
         
-        # Minimum proportion of semantic features that should be causal
-        min_causal_ratio = 0.3
-        max_causal_ratio = 0.6
-        memory_logger.debug(f"Causal feature ratio range: {min_causal_ratio} to {max_causal_ratio}")
+        # Prepare random numbers for token selection
+        torch.manual_seed(seed if seed is not None else torch.seed())
         
-        # For each batch item
-        for b in range(x.shape[1]):
-            # Determine how many features should be causal (at least 30%, at most 60%)
-            num_causal = max(
-                int(len(semantic_features) * min_causal_ratio),
-                min(int(len(semantic_features) * max_causal_ratio), 1)
-            )
+        # Process each batch separately to avoid excessive memory usage
+        for b in range(batch_size):
+            # Determine number of causal features
+            num_causal = max(int(n_semantic_features * min_causal_ratio), 
+                            min(int(n_semantic_features * max_causal_ratio), 1))
             
-            # Randomly select causal features
-            causal_indices = random.sample(range(len(semantic_features)), num_causal)
-            causal_features = [semantic_features[i] for i in causal_indices]
+            # Select causal features randomly
+            causal_indices = torch.randperm(n_semantic_features)[:num_causal]
+            causal_features = [semantic_features[i] for i in causal_indices.tolist()]
             causal_features_map[b] = causal_features
             
-            if b < 2:  # Only log for first few batch items to avoid too much output
-                memory_logger.debug(f"Batch item {b}: {num_causal}/{len(semantic_features)} causal features")
-                memory_logger.debug(f"  Causal feature indices: {causal_features[:5]}...")
+            # Create tensor indicating for each feature whether it's causal
+            is_causal = torch.zeros(n_semantic_features, dtype=torch.bool, device=device)
+            is_causal[causal_indices] = True
             
-            # For all semantic features
-            for feat_idx, feat in enumerate(semantic_features):
-                is_causal = feat in causal_features
+            # Prepare random zero probabilities - use different probabilities for causal vs non-causal
+            causal_zero_probs = torch.randint(1, 3, (n_semantic_features,), device=device).float() / 10
+            noncausal_zero_probs = torch.randint(2, 7, (n_semantic_features,), device=device).float() / 10
+            
+            # Combine into one tensor based on causality
+            zero_probs = torch.where(is_causal, causal_zero_probs, noncausal_zero_probs)
+            
+            # For each position in the batch
+            for pos in range(sample_size):
+                # Get the class for this sample
+                class_idx = y_int[pos, b].item()
                 
-                if is_causal:
-                    # This feature will be causally related to the class
+                # Skip if invalid class
+                if class_idx < 0 or class_idx >= num_classes:
+                    continue
+                
+                # Process each semantic feature
+                for feat_idx, feat in enumerate(semantic_features):
+                    is_causal_feat = is_causal[feat_idx]
+                    zero_prob = zero_probs[feat_idx].item()
                     
-                    # Set zero probability (between 0.1 and 0.3 for causal features)
-                    # Less zeros for causal features to ensure stronger signal
-                    zero_prob = random.randrange(1, 3) / 10
-                    
-                    if b < 2 and feat_idx < 5:  # Log only for first few features of first few batches
-                        memory_logger.debug(f"  Causal feature {feat}: zero_prob={zero_prob}")
-                    
-                    # For each sample position
-                    for pos in range(x.shape[0]):
-                        # Get the class for this sample
-                        class_idx = int(y[pos, b].item())
-                        
-                        # Skip if invalid class
-                        if class_idx < 0 or class_idx >= len(self.class_token_patterns):
-                            continue
-                        
-                        # Get tokens specific to this class
-                        class_tokens = self.class_token_patterns[class_idx]['tokens']
-                        
-                        # Randomly decide whether to use a class-specific token or zero
-                        if random.random() > zero_prob:
-                            # Use a token from the class pattern
+                    # Determine if this position gets a token or stays zero
+                    if random.random() > zero_prob:
+                        if is_causal_feat:
+                            # Get tokens for this class
+                            class_tokens = self.class_token_patterns[class_idx]['tokens']
+                            
+                            # Randomly select a token
                             token_idx = random.randint(0, len(class_tokens) - 1)
-                            token_value = class_tokens[token_idx].item()
-                            x[pos, b, feat] = token_value
-                            
-                            # Log sample token assignments for debugging
-                            if b < 2 and feat_idx < 5 and pos < 3:  # Only log few samples
-                                memory_logger.debug(f"    Sample {pos}, class {class_idx}, assigned token: {token_value}")
-                else:
-                    # Non-causal feature - just random tokens with zeros
-                    # Set zero probability (between 0.2 and 0.7)
-                    zero_prob = random.randrange(2, 7) / 10
-                    
-                    # Get random semantic class
-                    semantic_class = random.randint(0, num_semantic_classes - 1)
-                    tokens = semantic_data[semantic_class]
-                    
-                    if b < 2 and feat_idx < 5:  # Log only for first few features of first few batches
-                        memory_logger.debug(f"  Non-causal feature {feat}: zero_prob={zero_prob}, random semantic class={semantic_class}")
-                    
-                    # For each sample position
-                    for pos in range(x.shape[0]):
-                        # Randomly decide whether to use a token or zero
-                        if random.random() < zero_prob:
-                            # Keep as zero (already initialized to zero)
-                            pass
+                            token = class_tokens[token_idx].item()
                         else:
-                            # Randomly select a token from the available tokens
+                            # Non-causal feature - use random tokens
+                            semantic_class = random.randint(0, num_semantic_classes - 1)
+                            tokens = semantic_data[semantic_class]
                             token_pos = random.randint(0, len(tokens) - 1)
-                            token_value = tokens[token_pos].item()
-                            x[pos, b, feat] = token_value
+                            token = tokens[token_pos].item()
                             
-                            # Log sample token assignments for debugging
-                            if b < 2 and feat_idx < 5 and pos < 3:  # Only log few samples
-                                memory_logger.debug(f"    Sample {pos}, random token: {token_value}")
+                        # Set the token
+                        x[pos, b, feat] = token
         
         # Create info dictionary with semantic information
         semantic_info = {
@@ -602,27 +479,21 @@ class ClassificationAdapter:
             'causal_features_map': causal_features_map
         }
         
-        # Log final tensor stats
-        memory_logger.debug(f"Final tensor x after semantic feature injection:")
-        memory_logger.debug(f"  Shape: {x.shape}, device: {x.device}, dtype: {x.dtype}")
-        
-        # Check for zeros and non-zeros in semantic features
-        semantic_feature_tensor = x[:, :, semantic_features]
-        non_zeros = (semantic_feature_tensor != 0).sum().item()
-        total_elements = semantic_feature_tensor.numel()
-        non_zero_percentage = (non_zeros / total_elements) * 100
-        memory_logger.debug(f"  Semantic features filled: {non_zeros}/{total_elements} ({non_zero_percentage:.1f}% non-zero)")
-        
-        # Check how many tokens were actually used
-        try:
-            unique_tokens = torch.unique(semantic_feature_tensor)
-            memory_logger.debug(f"  Unique tokens used: {len(unique_tokens)}")
-            if len(unique_tokens) < 20:  # If few enough to list
-                memory_logger.debug(f"  Token values: {unique_tokens.tolist()}")
-        except Exception as e:
-            memory_logger.debug(f"Error analyzing unique tokens: {e}")
-        
-        memory_logger.debug(f"=== _apply_semantic_prior END ===")
+        # Only run more detailed diagnostic checks if debug logging is enabled
+        if memory_logger.isEnabledFor(logging.DEBUG):
+            memory_logger.debug(f"=== _apply_semantic_prior ===")
+            # Check for zeros and non-zeros in semantic features
+            semantic_feature_tensor = x[:, :, semantic_features]
+            non_zeros = (semantic_feature_tensor != 0).sum().item()
+            total_elements = semantic_feature_tensor.numel()
+            non_zero_percentage = (non_zeros / total_elements) * 100
+            memory_logger.debug(f"Semantic features filled: {non_zeros}/{total_elements} ({non_zero_percentage:.1f}% non-zero)")
+            
+            # Get information about valid targets
+            valid_targets = (semantic_targets != -100)
+            valid_count = valid_targets.sum().item()
+            valid_ratio = valid_count / semantic_targets.numel() * 100
+            memory_logger.debug(f"Valid semantic targets: {valid_count}/{semantic_targets.numel()} ({valid_ratio:.1f}%)")
         
         return x, semantic_info
 

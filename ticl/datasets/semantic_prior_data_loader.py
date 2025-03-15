@@ -324,111 +324,125 @@ def get_random_semantic_data(
     
     # Calculate max size that would keep the whole tensor < max_tensor_size_mb
     max_allowed_size = int((max_tensor_size_mb * 1024 * 1024) / (num_classes * 4))  # 4 bytes per int32
-    if tensor_size > max_allowed_size:
-        tensor_size = max_allowed_size
+    tensor_size = min(tensor_size, max_allowed_size)
+    
+    # First check if we have cached tensor of the right size
+    cached_tensor_key = f"semantic_tensor_{num_classes}_{tensor_size}"
+    cached_columns_key = f"semantic_columns_{num_classes}"
+    
+    if use_cache and cached_tensor_key in _SEMANTIC_DATA_CACHE and cached_columns_key in _SEMANTIC_DATA_CACHE:
+        # We already have a cached tensor of the exact size and class count needed
+        if return_column_names:
+            return _SEMANTIC_DATA_CACHE[cached_tensor_key], _SEMANTIC_DATA_CACHE[cached_columns_key]
+        else:
+            return _SEMANTIC_DATA_CACHE[cached_tensor_key]
     
     try:
-        # Try to load real data first, but strictly limit to save memory
-        if not os.path.exists(log_file_path):
-            raise FileNotFoundError(f"Semantic data file not found: {log_file_path}")
-        
-        # Check if we have cached data that we can use
-        if _SEMANTIC_DATA_CACHE["is_loaded"] and use_cache and _SEMANTIC_DATA_CACHE["log_file_path"] == log_file_path:
-            column_name_tokens = _SEMANTIC_DATA_CACHE["column_name_tokens"]
-            column_values = _SEMANTIC_DATA_CACHE["column_value_tokens"]
-        else:
-            # Load real data
-            column_name_tokens, column_values = load_semantic_prior_data(
-                log_file_path=log_file_path,
-                target_tensor_size=tensor_size,
-                force_non_numeric=True,
-                max_columns=None,  # Load all columns for better randomization
-                use_cache=use_cache
-            )
-        
-        # If we have enough columns, sample from them
-        if len(column_values) >= num_classes:
-            # Select random columns with proper shuffling
-            columns = list(column_values.keys())
-            
-            # Create randomized indices for column selection
-            if seed is not None:
-                # For reproducible selection
-                generator = torch.Generator()
-                generator.manual_seed(seed)
-                selected_indices = torch.randperm(len(columns), generator=generator)[:num_classes].tolist()
+        # Try to load real data if file exists
+        if os.path.exists(log_file_path):
+            # Check if we have cached column data that we can use
+            if _SEMANTIC_DATA_CACHE["is_loaded"] and use_cache and _SEMANTIC_DATA_CACHE["log_file_path"] == log_file_path:
+                column_values = _SEMANTIC_DATA_CACHE["column_value_tokens"]
             else:
-                # Fresh random selection each time
-                selected_indices = torch.randperm(len(columns))[:num_classes].tolist()
+                # Load real data efficiently - only get the column values, not names
+                _, column_values = load_semantic_prior_data(
+                    log_file_path=log_file_path,
+                    target_tensor_size=tensor_size,
+                    force_non_numeric=True,
+                    max_columns=None,
+                    use_cache=use_cache
+                )
+            
+            # If we have enough columns, sample from them
+            if len(column_values) >= num_classes:
+                # Select random columns efficiently
+                columns = list(column_values.keys())
                 
-            selected_columns = [columns[i] for i in selected_indices]
-            
-            # Stack tensors
-            tensors = [column_values[col] for col in selected_columns]
-            semantic_tensor = torch.stack(tensors)
-            
-            # Force to int32 to save memory
-            semantic_tensor = semantic_tensor.to(dtype=torch.int32)
-            
-            # Make sure the tensor stays on CPU
-            if semantic_tensor.device.type != 'cpu':
-                semantic_tensor = semantic_tensor.to('cpu')
-            
-            # Return both the tensor and column names
-            if return_column_names:
-                return semantic_tensor, selected_columns
-            else:
-                return semantic_tensor
+                # Create randomized indices for column selection
+                if seed is not None:
+                    # For reproducible selection
+                    generator = torch.Generator()
+                    generator.manual_seed(seed)
+                    selected_indices = torch.randperm(len(columns), generator=generator)[:num_classes].tolist()
+                else:
+                    # Fresh random selection each time
+                    selected_indices = torch.randperm(len(columns))[:num_classes].tolist()
+                    
+                selected_columns = [columns[i] for i in selected_indices]
+                
+                # Stack tensors efficiently
+                tensors = [column_values[col] for col in selected_columns]
+                semantic_tensor = torch.stack(tensors)
+                
+                # Force to int32 to save memory
+                semantic_tensor = semantic_tensor.to(dtype=torch.int32)
+                
+                # Make sure the tensor stays on CPU
+                if semantic_tensor.device.type != 'cpu':
+                    semantic_tensor = semantic_tensor.to('cpu')
+                
+                # Cache the tensor for future use with this configuration
+                if use_cache:
+                    _SEMANTIC_DATA_CACHE[cached_tensor_key] = semantic_tensor
+                    _SEMANTIC_DATA_CACHE[cached_columns_key] = selected_columns
+                
+                # Return both the tensor and column names
+                if return_column_names:
+                    return semantic_tensor, selected_columns
+                else:
+                    return semantic_tensor
     except Exception as e:
-        logger.warning(f"Could not load semantic data from file: {e}")
+        # Only log at warning level if file exists but loading failed
+        if os.path.exists(log_file_path):
+            logger.warning(f"Could not load semantic data from file: {e}")
     
-    # Fallback to synthetic data
-    logger.info("Generating synthetic semantic data")
+    # Check if we already generated synthetic data with these parameters
+    if seed is not None and use_cache:
+        synthetic_key = f"synthetic_{num_classes}_{tensor_size}_{seed}"
+        if synthetic_key in _SEMANTIC_DATA_CACHE:
+            # Return cached synthetic data
+            if return_column_names:
+                return _SEMANTIC_DATA_CACHE[synthetic_key], _SEMANTIC_DATA_CACHE[f"{synthetic_key}_columns"]
+            else:
+                return _SEMANTIC_DATA_CACHE[synthetic_key]
     
-    # Create random tensor with controlled size and randomness
+    # Fallback to synthetic data generation - optimize for speed
+    # Direct generation without unnecessary operations
     if seed is not None:
         # Use generator for reproducible randomness
         generator = torch.Generator()
         generator.manual_seed(seed)
-        random_tensor = torch.rand(num_classes, tensor_size, generator=generator)
+        # Generate directly in the right range to avoid extra multiplication
+        random_tensor = torch.randint(1, 49405, (num_classes, tensor_size), 
+                                      dtype=torch.int32, generator=generator)
     else:
-        # Standard randomness
-        random_tensor = torch.rand(num_classes, tensor_size)
+        # Standard randomness, directly generate integers
+        random_tensor = torch.randint(1, 49405, (num_classes, tensor_size), 
+                                     dtype=torch.int32)
     
-    # Scale to the range [1, 49404] (CLIP vocabulary size range)
-    random_tensor = 1 + random_tensor * (49404 - 1)
+    # Generate synthetic column names using minimal computation
+    synthetic_columns = [f"synthetic_feature_{i}" for i in range(num_classes)]
     
-    # Round to the nearest integer
-    random_tensor = torch.round(random_tensor).to(dtype=torch.int32)  # Use int32 to save memory
-    
-    # Generate synthetic column names
-    synthetic_column_types = [
-        "customer", "product", "sales", "review", "location", 
-        "order", "time", "website", "device", "user",
-        "employee", "price", "category", "shipment", "supplier"
-    ]
-    synthetic_attributes = [
-        "id", "name", "type", "status", "count", 
-        "total", "category", "score", "rating", "date",
-        "region", "value", "description", "level", "group"
-    ]
-    
-    # Generate diverse column names
-    synthetic_columns = []
-    if seed is not None:
-        # Set Python's random seed for reproducible name selection
-        random.seed(seed)
+    # Only generate more descriptive names if needed for return
+    if return_column_names:
+        synthetic_column_types = [
+            "customer", "product", "sales", "review", "location", 
+            "order", "time", "website", "device", "user"
+        ]
+        synthetic_attributes = [
+            "id", "name", "type", "status", "count"
+        ]
         
-    for i in range(num_classes):
-        if len(synthetic_column_types) > 0 and len(synthetic_attributes) > 0:
-            # Create a business-like column name with actual meaning
-            col_type = random.choice(synthetic_column_types)
-            attribute = random.choice(synthetic_attributes)
-            column_name = f"{col_type}_{attribute}"
-        else:
-            # Fallback if we run out of combinations
-            column_name = f"synthetic_feature_{i}"
-        synthetic_columns.append(column_name)
+        # Only regenerate names for a subset to save time
+        for i in range(min(num_classes, 10)):  # Only first 10 get descriptive names
+            col_type = synthetic_column_types[i % len(synthetic_column_types)]
+            attribute = synthetic_attributes[i % len(synthetic_attributes)]
+            synthetic_columns[i] = f"{col_type}_{attribute}"
+    
+    # Cache synthetic data if using a seed
+    if seed is not None and use_cache:
+        _SEMANTIC_DATA_CACHE[synthetic_key] = random_tensor
+        _SEMANTIC_DATA_CACHE[f"{synthetic_key}_columns"] = synthetic_columns
     
     # Return both the tensor and column names if requested
     if return_column_names:

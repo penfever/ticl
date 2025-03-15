@@ -630,8 +630,11 @@ def train(dl, model, criterion, optimizer_state=None, scheduler=None,
     # Initialize schedulers
     spike_scheduler = None
     if scheduler is None:
+        # Ensure the cosine annealing period is at least 1 epoch to avoid division by zero
+        cosine_period = max(1, epochs - warmup_epochs)
+        
         if learning_rate_schedule == 'cosine':
-            base_scheduler = CosineAnnealingLR(optimizer, T_max=epochs - warmup_epochs, eta_min=min_lr)
+            base_scheduler = CosineAnnealingLR(optimizer, T_max=cosine_period, eta_min=min_lr)
         elif learning_rate_schedule == 'exponential':
             base_scheduler = ExponentialLR(optimizer, gamma=lr_decay, min_lr=min_lr)
         elif learning_rate_schedule == 'constant':
