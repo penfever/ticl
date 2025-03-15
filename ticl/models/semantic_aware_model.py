@@ -230,15 +230,16 @@ class SemanticAwareClassifier(nn.Module):
             # Using a balanced approach for different devices
             with torch.no_grad():
                 # Determine the best device for running CLIP
-                # For MPS (Apple Silicon), need to use the same device as model
-                if tabular_features.device.type == 'mps':
-                    # For MPS, it's safer to run on the same device
+                # For MPS (Apple Silicon) and CUDA, use the same device as model
+                # This prevents "Expected all tensors to be on the same device" errors
+                if tabular_features.device.type in ['mps', 'cuda']:
+                    # For MPS and CUDA, it's safer to run on the same device
                     clip_device = tabular_features.device
-                    memory_logger.debug(f"Using MPS device for CLIP processing")
+                    memory_logger.debug(f"Using {clip_device} for CLIP processing")
                 else:
-                    # For CUDA or CPU, we can use CPU to save GPU memory
+                    # For CPU, continue using CPU
                     clip_device = "cpu"
-                    memory_logger.debug(f"Using CPU for CLIP text processing to save GPU memory")
+                    memory_logger.debug(f"Using CPU for CLIP text processing")
                 
                 text_features_list = []
                 
@@ -333,7 +334,14 @@ class SemanticAwareClassifier(nn.Module):
                     # Move to same device as tabular features if needed for computation
                     if tabular_features.device.type != text_features.device.type:
                         memory_logger.debug(f"Moving text features from {text_features.device} to {tabular_features.device}")
-                        text_features = text_features.to(tabular_features.device)
+                        try:
+                            # Try to move text features to match tabular features
+                            text_features = text_features.to(tabular_features.device)
+                        except RuntimeError as e:
+                            memory_logger.error(f"Failed to move text features to {tabular_features.device}: {e}")
+                            # Fall back to moving tabular features to text device as a last resort
+                            memory_logger.debug(f"Falling back: Moving tabular features from {tabular_features.device} to {text_features.device}")
+                            tabular_features = tabular_features.to(text_features.device)
                     
                     # Normalize text features for cosine similarity
                     text_features = F.normalize(text_features, dim=1)
@@ -1064,6 +1072,15 @@ def get_clip_text_embeddings(texts, clip_model, tokenizer, batch_size=5, device=
             processing_device = "cpu"
     else:
         processing_device = device
+        
+    # Get the device of the first input tensor if applicable
+    # This helps ensure we process on the same device as our data
+    if isinstance(clip_model, torch.nn.Module):
+        model_device = next(clip_model.parameters()).device
+        # If the model is on CUDA or MPS, prefer that device
+        if model_device.type in ['cuda', 'mps']:
+            processing_device = model_device
+            memory_logger.debug(f"Using model's device {processing_device} for CLIP processing")
         
     memory_logger.debug(f"Processing text embeddings on {processing_device} device")
     
