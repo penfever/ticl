@@ -299,7 +299,7 @@ def main():
     parser.add_argument('--num-classes', type=int, default=5, help='Number of classes')
     parser.add_argument('--device', type=str, default='cpu', choices=['cpu', 'cuda', 'mps'], 
                        help='Device to use')
-    parser.add_argument('--output-dir', type=str, default=None, help='Directory to save outputs')
+    parser.add_argument('--output-dir', type=str, default='logs/visualizations', help='Directory to save outputs')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--no-plots', action='store_true', help='Disable showing matplotlib plots')
     

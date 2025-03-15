@@ -5,11 +5,21 @@ import argparse
 import numpy as np
 import cProfile
 import pstats
+import os
 from ticl.priors.classification_adapter import ClassificationAdapter
 from ticl.distributions import sample_distributions, parse_distributions
 
-# Setup basic logging
-logging.basicConfig(level=logging.INFO)
+# Setup logging to file and console
+log_dir = "logs"
+os.makedirs(log_dir, exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler(os.path.join(log_dir, "semantic_performance.log")),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
 
 class DummyPrior:
@@ -83,8 +93,9 @@ def test_semantic_prior_performance(batch_size=16,
         stats.print_stats(20)
         
         # Save profile results to file
-        stats.dump_stats('semantic_prior_profile.prof')
-        logger.info("Profile saved to 'semantic_prior_profile.prof'")
+        profile_path = os.path.join(log_dir, 'semantic_prior_profile.prof')
+        stats.dump_stats(profile_path)
+        logger.info(f"Profile saved to '{profile_path}'")
         
         return
     

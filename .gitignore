@@ -78,6 +78,16 @@ target/
 # Jupyter Notebook
 .ipynb_checkpoints
 
+# Logs and outputs
+logs/*
+!logs/.gitignore
+!logs/training/
+!logs/visualizations/
+logs/training/*
+!logs/training/.gitkeep
+logs/visualizations/*
+!logs/visualizations/.gitkeep
+
 # IPython
 profile_default/
 ipython_config.py
