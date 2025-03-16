@@ -14,10 +14,10 @@ class TestSemanticFilesExist(unittest.TestCase):
         root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         
         expected_files = [
-            os.path.join(root_dir, 'models', 'semantic_aware_model.py'),
-            os.path.join(root_dir, 'semantic_text_mapper.py'),
-            os.path.join(root_dir, 'text_classifier.py'),
-            os.path.join(root_dir, 'priors', 'boundaries.py')
+            os.path.join(root_dir, '..', 'models', 'semantic_aware_model.py'),
+            os.path.join(root_dir, '..', 'semantic_text_mapper.py'),
+            os.path.join(root_dir, '..', 'text_classifier.py'),
+            os.path.join(root_dir, '..', 'priors', 'boundaries.py')
         ]
         
         for file_path in expected_files:

@@ -319,14 +319,12 @@ def load_trained_model(model_path: str, device: str = 'cpu', use_mock: bool = US
         
         return create_mock_model()
 
-@pytest.mark.xfail(reason="Test may fail if model checkpoint structure has changed")
 def test_load_semantic_model():
     """Test that we can load the trained semantic model."""
     model = load_trained_model(TRAINED_MODEL_PATH)
     assert model is not None
     logger.info(f"Model loaded successfully: {type(model)}")
 
-@pytest.mark.xfail(reason="Test may fail if semantic data format has changed")
 def test_load_semantic_data():
     """Test that we can load the semantic data."""
     try:
