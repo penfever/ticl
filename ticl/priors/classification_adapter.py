@@ -669,7 +669,20 @@ class ClassificationAdapter:
             raise ValueError(f"Unknown num_features_sampler: {self.h['num_features_sampler']}")
         args = {'device': device, 'n_samples': n_samples, 'num_features': num_features_used,
                 'batch_size': batch_size, 'epoch': epoch, 'single_eval_pos': single_eval_pos}
-        x, y, y_ = self.base_prior.get_batch(**args)
+        
+        # Get batch from base prior - handles both old and new interfaces
+        try:
+            # Try the new interface with causality info
+            result = self.base_prior.get_batch(**args)
+            if len(result) == 4:  # New interface with info dictionary
+                x, y, y_, prior_info = result
+                if 'causality_info' in prior_info:
+                    info['causality_info'] = prior_info['causality_info']
+            else:  # Old interface
+                x, y, y_ = result
+        except Exception:
+            # Fall back to old interface
+            x, y, y_ = self.base_prior.get_batch(**args)
         # x is of shape (n_samples, batch_size, num_features_used)
         assert x.shape[2] == num_features_used
 
@@ -751,6 +764,38 @@ class ClassificationAdapter:
             fill_percentage = (non_zeros / total) * 100
             memory_logger.debug(f"Semantic features filled: {non_zeros}/{total} elements ({fill_percentage:.1f}% non-zero)")
             
+            # Enhance class token patterns with statistical terms if available
+            if 'statistical_class_terms' in info:
+                # Check if we have statistical terms for any of the batches
+                for b in range(x.shape[1]):
+                    if b in info['statistical_class_terms']:
+                        class_terms = info['statistical_class_terms'][b]
+                        
+                        # Extend class token patterns with statistical terms
+                        for class_id, terms in class_terms.items():
+                            if class_id < len(self.class_token_patterns):
+                                # Get the original class name and column name
+                                pattern = self.class_token_patterns[class_id]
+                                class_name = pattern.get('class_name', f"Class_{class_id}")
+                                column_name = pattern.get('column_name')
+                                
+                                # Create enhanced class description with statistical terms
+                                enhanced_description = f"{class_name}"
+                                if column_name:
+                                    enhanced_description += f" ({column_name})"
+                                
+                                # Add statistical terms (up to 5 to avoid overwhelming)
+                                if terms:
+                                    selected_terms = terms[:min(5, len(terms))]
+                                    stats_desc = ", ".join(selected_terms)
+                                    enhanced_description += f": {stats_desc}"
+                                    
+                                    # Update class name with statistical information
+                                    pattern['enhanced_class_name'] = enhanced_description
+                                    
+                                    # Store the statistical terms separately
+                                    pattern['statistical_terms'] = selected_terms
+            
             # Store semantic information in the info dictionary
             memory_logger.debug(f"Updating info dictionary with semantic info: {list(semantic_info.keys())}")
             info.update(semantic_info)
@@ -786,6 +831,90 @@ class ClassificationAdapter:
         if self.h['max_num_classes'] == 0:
             # Inpute potential nan values after normalization
             y[y.isnan()] = 0
+            
+        # Perform statistical analysis on features
+        if 'causality_info' in info:
+            try:
+                # Import statistical analysis tools
+                from ticl.priors.feature_statistical_analyzer import (
+                    analyze_numerical_feature, 
+                    analyze_categorical_feature,
+                    get_class_description_from_stats
+                )
+                
+                # Analyze features batch by batch
+                feature_stats = {}
+                statistical_class_terms = {}
+                
+                for b in range(x.shape[1]):  # For each batch
+                    batch_stats = {}
+                    batch_causality = info['causality_info'][b]
+                    
+                    # Note: We'll only analyze potentially causal features for efficiency
+                    causal_features = batch_causality.get('causal_features', [])
+                    
+                    # Add statistics for all features (we analyze both causal and some non-causal)
+                    for feature_idx in range(x.shape[2]):
+                        # Determine if this feature is causal
+                        is_causal = feature_idx in causal_features
+                        
+                        # Only analyze a small random sample of non-causal features to save compute
+                        if not is_causal and random.random() > 0.2:
+                            continue
+                            
+                        # Determine if this is a categorical feature
+                        is_categorical = feature_idx in categorical_features
+                        
+                        # Extract feature values
+                        feature_values = x[:, b, feature_idx]
+                        
+                        # Extract class labels for this batch
+                        batch_labels = y[:, b]
+                        
+                        # Skip if all values are the same
+                        if torch.all(feature_values == feature_values[0]):
+                            continue
+                        
+                        # Analyze based on feature type
+                        if is_categorical:
+                            stats = analyze_categorical_feature(
+                                feature_values, 
+                                batch_labels,
+                                feature_name=f"feature_{feature_idx}",
+                                is_causal=is_causal
+                            )
+                            stats['type'] = 'categorical'
+                        else:
+                            stats = analyze_numerical_feature(
+                                feature_values, 
+                                batch_labels,
+                                feature_name=f"feature_{feature_idx}",
+                                is_causal=is_causal
+                            )
+                            stats['type'] = 'numerical'
+                        
+                        # Store statistics
+                        batch_stats[feature_idx] = stats
+                    
+                    # Get unique classes in this batch
+                    batch_unique_classes = torch.unique(batch_labels[batch_labels != -100]).tolist()
+                    
+                    # Generate class descriptions based on statistical properties
+                    for class_id in batch_unique_classes:
+                        terms = get_class_description_from_stats(batch_stats, int(class_id))
+                        if b not in statistical_class_terms:
+                            statistical_class_terms[b] = {}
+                        statistical_class_terms[b][int(class_id)] = terms
+                    
+                    # Store feature statistics for this batch
+                    feature_stats[b] = batch_stats
+                
+                # Add statistical information to info dictionary
+                info['feature_stats'] = feature_stats
+                info['statistical_class_terms'] = statistical_class_terms
+                
+            except Exception as e:
+                memory_logger.warning(f"Error during statistical analysis: {e}")
 
         # Append empty features if enabled
         if self.h['pad_zeros']:

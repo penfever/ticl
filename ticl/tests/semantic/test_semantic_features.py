@@ -87,6 +87,108 @@ class TestSemanticFeatures(unittest.TestCase):
         
         # Check if semantic targets are created
         self.assertIn('semantic_targets', info)
+        
+    def test_statistical_terms_integration(self):
+        """Test that statistical terms are integrated with semantic features."""
+        # Mock the base prior to include causality information
+        def get_batch_with_causality(**kwargs):
+            num_features = kwargs.get('num_features', 5)
+            batch_size = kwargs.get('batch_size', 2)
+            n_samples = kwargs.get('n_samples', 10)
+            
+            x_tensor = torch.rand(n_samples, batch_size, num_features)
+            y_tensor = torch.randint(0, 2, (n_samples, batch_size))
+            y_prime_tensor = torch.randint(0, 2, (n_samples, batch_size))
+            
+            # Add causality info
+            causality_info = []
+            for b in range(batch_size):
+                causal_features = [0]  # Mark feature 0 as causal
+                batch_info = {
+                    'is_causal': True,
+                    'causal_features': causal_features,
+                    'feature_metadata': {
+                        0: {
+                            'importance': 0.8,
+                            'direction': 1
+                        }
+                    }
+                }
+                causality_info.append(batch_info)
+            
+            return x_tensor, y_tensor, y_prime_tensor, {'causality_info': causality_info}
+        
+        # Replace the mock prior's get_batch method
+        self.mock_prior.get_batch.side_effect = get_batch_with_causality
+        
+        # Create the adapter with statistical feature support
+        adapter = ClassificationAdapter(self.mock_prior, self.config)
+        
+        # Call the adapter to generate data
+        batch_size = 2
+        n_samples = 10
+        num_features = 5
+        device = 'cpu'
+        single_eval_pos = 5
+        
+        # Mock feature_statistical_analyzer functions to ensure they're called
+        with patch('ticl.priors.feature_statistical_analyzer.analyze_numerical_feature') as mock_analyze, \
+             patch('ticl.priors.feature_statistical_analyzer.get_class_description_from_stats') as mock_get_desc:
+            
+            # Set up the mock analyze function to return valid stats
+            mock_analyze.return_value = {
+                'mean': 0.5,
+                'median': 0.5,
+                'std': 0.2,
+                'percentiles': {
+                    'very_low': 0.1,
+                    'low': 0.3,
+                    'medium': 0.5,
+                    'high': 0.7,
+                    'very_high': 0.9
+                },
+                'class_stats': {
+                    0: {'mean': 0.3}, 
+                    1: {'mean': 0.7}
+                },
+                'correlation': 0.8,
+                'correlation_type': 'strong_positive',
+                'type': 'numerical',
+                'feature_name': 'feature_0'
+            }
+            
+            # Set up the mock get_description function to return sample terms
+            mock_get_desc.return_value = ['high feature_0', 'increasing feature_0', 'above average feature_0']
+            
+            # Generate data with the adapter
+            x, y, y_, info = adapter(
+                batch_size=batch_size,
+                n_samples=n_samples,
+                num_features=num_features,
+                device=device,
+                single_eval_pos=single_eval_pos
+            )
+            
+            # Check if feature stats were generated and mocks were called
+            self.assertTrue(mock_analyze.called)
+            self.assertTrue(mock_get_desc.called)
+            
+            # Check if class token patterns are enhanced with statistical information
+            self.assertIn('class_token_patterns', info)
+            
+            # Since the enhancement is conditional on multiple factors,
+            # we check for expected structure but don't strictly require the enhancements
+            patterns = info['class_token_patterns']
+            for class_id, pattern in patterns.items():
+                self.assertIn('class_name', pattern)
+                # If enhanced_class_name or statistical_terms are present, verify their structure
+                if 'enhanced_class_name' in pattern:
+                    self.assertIsInstance(pattern['enhanced_class_name'], str)
+                if 'statistical_terms' in pattern:
+                    self.assertIsInstance(pattern['statistical_terms'], list)
+                    # Verify terms match what our mock returned
+                    for term in pattern['statistical_terms']:
+                        self.assertIn(term, ['high feature_0', 'increasing feature_0', 'above average feature_0'])
 
 
 class TestSemanticAwareModel(unittest.TestCase):

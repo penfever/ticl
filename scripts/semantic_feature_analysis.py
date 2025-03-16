@@ -3,10 +3,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 import argparse
 import os
+import sys
 import seaborn as sns
 from sklearn.metrics.pairwise import cosine_similarity
 from tabulate import tabulate
 import pandas as pd
+
+# Add the parent directory to the path so we can import ticl modules
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ticl.priors.classification_adapter import ClassificationAdapter
 from ticl.datasets.semantic_prior_data_loader import get_random_semantic_data

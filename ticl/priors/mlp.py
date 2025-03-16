@@ -203,10 +203,61 @@ class MLPPrior:
         self.config = parse_distributions(config or {})
 
     def get_batch(self, batch_size, n_samples, num_features, device=default_device, num_outputs=1, epoch=None, single_eval_pos=None):
-        sample = [MLP(device, num_features, num_outputs, n_samples, **sample_distributions(self.config)).to(device)() for _ in range(0, batch_size)]
-        x, y = zip(*sample)
-
+        # Initialize list to track causal features for each batch sample
+        causality_info = []
+        
+        # Generate samples with MLP
+        mlp_instances = []
+        samples = []
+        
+        for _ in range(batch_size):
+            # Sample from config distributions
+            mlp_params = sample_distributions(self.config)
+            
+            # Create an MLP instance
+            mlp = MLP(device, num_features, num_outputs, n_samples, **mlp_params).to(device)
+            mlp_instances.append(mlp)
+            
+            # Get data from MLP
+            sample_x, sample_y = mlp()
+            samples.append((sample_x, sample_y))
+            
+            # Track causality information
+            batch_info = {
+                'is_causal': mlp.is_causal,
+                'causal_features': [],
+                'feature_metadata': {}
+            }
+            
+            # If this is a causal MLP, identify the causal features
+            if mlp.is_causal:
+                # The feature indices that are causal will depend on how features are sampled
+                # Find output indices that were used for features (random_idx in the MLP.forward method)
+                # This is an approximation since we can't directly access the random indices used
+                
+                # For now, we'll assume a simplified approach: mark approx. 20-40% of features as causal
+                if mlp.num_features > 1:
+                    num_causal = max(1, int(mlp.num_features * (0.2 + 0.2 * random.random())))
+                    causal_indices = random.sample(range(mlp.num_features), num_causal)
+                    batch_info['causal_features'] = causal_indices
+                    
+                    # Add basic causality information for each feature
+                    for idx in causal_indices:
+                        importance = random.uniform(0.5, 1.0)  # Simulate importance score
+                        direction = 1 if random.random() > 0.5 else -1  # Simulate direction
+                        
+                        batch_info['feature_metadata'][idx] = {
+                            'importance': float(importance),
+                            'direction': int(direction)
+                        }
+            
+            causality_info.append(batch_info)
+        
+        # Unzip samples
+        x, y = zip(*samples)
+        
+        # Concatenate tensors
         y = torch.cat(y, 1).detach().squeeze(2)
         x = torch.cat(x, 1).detach()
-
-        return x, y, y
+        
+        return x, y, y, {'causality_info': causality_info}

@@ -134,6 +134,7 @@ def get_prior_config(max_features=100, n_samples=1024+128):
         "multiclass_type": 'rank',
         'categorical_feature_p': .2,  # diff: .0
         'semantic_feature_p': 0.1,    # new parameter for semantic features
+        'track_causal_features': False, # Whether to track and analyze causal features for statistical descriptions
         'nan_prob_no_reason': 0.0,
         'nan_prob_a_reason': 0.0,
         'set_value_to_nan': .9,
