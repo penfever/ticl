@@ -1,0 +1,3942 @@
+{
+  "AAL": [
+    {
+      "cluster": "Identification & Unique Keys",
+      "terms": [
+        "ID",
+        "Identifier",
+        "Key",
+        "Code",
+        "Number",
+        "Index",
+        "Record Number",
+        "Case ID",
+        "User ID",
+        "Product ID",
+        "Transaction ID",
+        "Account Number",
+        "Serial Number"
+      ]
+    },
+    {
+      "cluster": "Dates & Time",
+      "terms": [
+        "Date",
+        "Time",
+        "Timestamp",
+        "Year",
+        "Month",
+        "Day",
+        "Hour",
+        "Minute",
+        "Second",
+        "Duration",
+        "Start Date",
+        "End Date",
+        "Created At",
+        "Updated At",
+        "Event Time"
+      ]
+    },
+    {
+      "cluster": "Location & Geography",
+      "terms": [
+        "Latitude",
+        "Longitude",
+        "City",
+        "State",
+        "Country",
+        "Zip Code",
+        "Address",
+        "Region",
+        "Area",
+        "Postal Code",
+        "Location",
+        "GeoID",
+        "Neighborhood",
+        "Continent"
+      ]
+    },
+    {
+      "cluster": "Categories & Classifications",
+      "terms": [
+        "Category",
+        "Type",
+        "Classification",
+        "Group",
+        "Subgroup",
+        "Label",
+        "Tag",
+        "Status",
+        "Segment",
+        "Class",
+        "Domain",
+        "Genre",
+        "Industry",
+        "Product Category",
+        "Job Title"
+      ]
+    },
+    {
+      "cluster": "Quantities & Measurements",
+      "terms": [
+        "Amount",
+        "Quantity",
+        "Size",
+        "Weight",
+        "Volume",
+        "Length",
+        "Width",
+        "Height",
+        "Price",
+        "Cost",
+        "Value",
+        "Score",
+        "Rating",
+        "Percentage",
+        "Frequency"
+      ]
+    },
+    {
+      "cluster": "Text & Descriptions",
+      "terms": [
+        "Name",
+        "Description",
+        "Title",
+        "Comment",
+        "Review",
+        "Message",
+        "Notes",
+        "Summary",
+        "Details",
+        "Explanation",
+        "Narrative",
+        "Content",
+        "Text",
+        "Abstract"
+      ]
+    },
+    {
+      "cluster": "Boolean & Flags",
+      "terms": [
+        "True",
+        "False",
+        "Yes",
+        "No",
+        "Active",
+        "Inactive",
+        "Enabled",
+        "Disabled",
+        "Verified",
+        "Unverified",
+        "Complete",
+        "Incomplete",
+        "Valid",
+        "Invalid",
+        "Flag"
+      ]
+    },
+    {
+      "cluster": "Relationships & Connections",
+      "terms": [
+        "Parent ID",
+        "Child ID",
+        "Related ID",
+        "Reference ID",
+        "Source ID",
+        "Target ID",
+        "Connection ID",
+        "Link ID",
+        "Partner ID",
+        "Affiliation ID",
+        "CustomerID",
+        "OrderID",
+        "ProductID"
+      ]
+    },
+    {
+      "cluster": "Demographics & Personal Information",
+      "terms": [
+        "Age",
+        "Gender",
+        "Ethnicity",
+        "Income",
+        "Education",
+        "Occupation",
+        "Marital Status",
+        "Household Size",
+        "Nationality",
+        "Religion",
+        "Language",
+        "Email",
+        "Phone Number",
+        "Username"
+      ]
+    },
+    {
+      "cluster": "Status and Condition",
+      "terms": [
+        "Condition",
+        "State",
+        "Status",
+        "Stage",
+        "Phase",
+        "Progress",
+        "Severity",
+        "Urgency",
+        "Resolution",
+        "Outcome",
+        "Result",
+        "Health",
+        "Environment",
+        "Situation",
+        "Mode"
+      ]
+    }
+  ],
+  "AAP": [
+    {
+      "cluster": "Identification & Unique Keys",
+      "terms": [
+        "ID",
+        "Identifier",
+        "Key",
+        "Record ID",
+        "Unique ID",
+        "Index",
+        "Primary Key",
+        "Account Number",
+        "Case Number",
+        "Reference Number",
+        "Serial Number",
+        "Patient ID",
+        "Transaction ID",
+        "User ID",
+        "Code"
+      ]
+    },
+    {
+      "cluster": "Dates & Time",
+      "terms": [
+        "Date",
+        "Time",
+        "Timestamp",
+        "Year",
+        "Month",
+        "Day",
+        "Hour",
+        "Minute",
+        "Second",
+        "Start Date",
+        "End Date",
+        "Created Date",
+        "Modified Date",
+        "Expiration Date",
+        "Event Date"
+      ]
+    },
+    {
+      "cluster": "Categorical Variables & Labels",
+      "terms": [
+        "Category",
+        "Type",
+        "Status",
+        "Label",
+        "Group",
+        "Segment",
+        "Class",
+        "Region",
+        "Country",
+        "City",
+        "Product",
+        "Service",
+        "Industry",
+        "Department",
+        "Level"
+      ]
+    },
+    {
+      "cluster": "Numerical Measures & Quantities",
+      "terms": [
+        "Value",
+        "Amount",
+        "Quantity",
+        "Count",
+        "Score",
+        "Percentage",
+        "Rate",
+        "Price",
+        "Cost",
+        "Revenue",
+        "Volume",
+        "Size",
+        "Weight",
+        "Length",
+        "Area"
+      ]
+    },
+    {
+      "cluster": "Textual Descriptions & Names",
+      "terms": [
+        "Name",
+        "Description",
+        "Title",
+        "Comment",
+        "Note",
+        "Address",
+        "Location",
+        "Summary",
+        "Details",
+        "Explanation",
+        "Review",
+        "Feedback",
+        "Narrative",
+        "Content",
+        "Text"
+      ]
+    },
+    {
+      "cluster": "Boolean Flags & Indicators",
+      "terms": [
+        "Flag",
+        "Indicator",
+        "True",
+        "False",
+        "Yes",
+        "No",
+        "Active",
+        "Inactive",
+        "Enabled",
+        "Disabled",
+        "Verified",
+        "Unverified",
+        "Completed",
+        "Pending",
+        "Approved"
+      ]
+    },
+    {
+      "cluster": "Geographic Information",
+      "terms": [
+        "Latitude",
+        "Longitude",
+        "Zip Code",
+        "Postal Code",
+        "Country Code",
+        "State",
+        "Province",
+        "Region",
+        "City",
+        "Address",
+        "Location",
+        "GeoID",
+        "Coordinate",
+        "Area Code"
+      ]
+    },
+    {
+      "cluster": "Relationships & Connections",
+      "terms": [
+        "Parent ID",
+        "Child ID",
+        "Related ID",
+        "Source ID",
+        "Target ID",
+        "Group ID",
+        "Member ID",
+        "Order ID",
+        "Product ID",
+        "Customer ID",
+        "Reference ID",
+        "Link ID",
+        "Association ID"
+      ]
+    },
+    {
+      "cluster": "Financial Data",
+      "terms": [
+        "Revenue",
+        "Profit",
+        "Loss",
+        "Expense",
+        "Cost",
+        "Price",
+        "Sales",
+        "Income",
+        "Margin",
+        "Budget",
+        "Forecast",
+        "Investment",
+        "Liability",
+        "Asset",
+        "Equity"
+      ]
+    },
+    {
+      "cluster": "Demographic Information",
+      "terms": [
+        "Age",
+        "Gender",
+        "Ethnicity",
+        "Race",
+        "Income",
+        "Education",
+        "Occupation",
+        "Marital Status",
+        "Household Size",
+        "Location",
+        "Nationality",
+        "Religion",
+        "Language",
+        "Employment Status"
+      ]
+    }
+  ],
+  "AAPL": [
+    {
+      "cluster": "Stock Price & Performance",
+      "terms": [
+        "closing price",
+        "opening price",
+        "high",
+        "low",
+        "volume",
+        "adjusted close",
+        "price change",
+        "daily return",
+        "year-to-date return",
+        "volatility",
+        "moving average",
+        "price target",
+        "analyst rating",
+        "market capitalization",
+        "trading range"
+      ]
+    },
+    {
+      "cluster": "Financial Metrics",
+      "terms": [
+        "revenue",
+        "earnings per share (EPS)",
+        "profit margin",
+        "price-to-earnings ratio (P/E)",
+        "debt-to-equity ratio",
+        "return on equity (ROE)",
+        "cash flow",
+        "gross profit",
+        "net income",
+        "operating income",
+        "dividend yield",
+        "earnings growth",
+        "revenue growth",
+        "cost of goods sold",
+        "operating expenses"
+      ]
+    },
+    {
+      "cluster": "Company News & Events",
+      "terms": [
+        "earnings announcement",
+        "product launch",
+        "conference call",
+        "analyst upgrade",
+        "analyst downgrade",
+        "market sentiment",
+        "acquisition",
+        "merger",
+        "regulatory approval",
+        "legal dispute",
+        "partnership",
+        "executive change",
+        "stock split",
+        "investor relations",
+        "company statement"
+      ]
+    },
+    {
+      "cluster": "Market & Industry",
+      "terms": [
+        "S&P 500",
+        "NASDAQ",
+        "Dow Jones Industrial Average",
+        "technology sector",
+        "consumer electronics",
+        "smartphone market",
+        "competitor analysis",
+        "market share",
+        "industry trends",
+        "economic indicators",
+        "interest rates",
+        "inflation",
+        "supply chain",
+        "global economy",
+        "regulatory environment"
+      ]
+    },
+    {
+      "cluster": "Product Sales & Performance",
+      "terms": [
+        "iPhone sales",
+        "iPad sales",
+        "Mac sales",
+        "Apple Watch sales",
+        "Services revenue",
+        "App Store revenue",
+        "product demand",
+        "unit sales",
+        "average selling price (ASP)",
+        "customer satisfaction",
+        "market penetration",
+        "product reviews",
+        "upgrade cycle",
+        "sales growth",
+        "geographic sales"
+      ]
+    },
+    {
+      "cluster": "Investment & Trading",
+      "terms": [
+        "buy rating",
+        "sell rating",
+        "hold rating",
+        "investment strategy",
+        "portfolio allocation",
+        "risk management",
+        "day trading",
+        "swing trading",
+        "long-term investing",
+        "short selling",
+        "option trading",
+        "future contracts",
+        "technical analysis",
+        "fundamental analysis",
+        "stock screener"
+      ]
+    },
+    {
+      "cluster": "Geographic Region",
+      "terms": [
+        "North America",
+        "Europe",
+        "Asia",
+        "China",
+        "United States",
+        "International Sales",
+        "Emerging Markets",
+        "Developed Markets",
+        "Regional Performance",
+        "Market Expansion",
+        "Global Supply Chain",
+        "Geopolitical Risk",
+        "Currency Exchange Rates",
+        "Import Tariffs",
+        "Export Tariffs"
+      ]
+    },
+    {
+      "cluster": "Customer Base & Demographics",
+      "terms": [
+        "Age",
+        "Gender",
+        "Income Level",
+        "Education Level",
+        "Location",
+        "Device Ownership",
+        "Spending Habits",
+        "Brand Loyalty",
+        "Customer Acquisition Cost",
+        "Customer Retention Rate",
+        "Target Market",
+        "Market Segmentation",
+        "User Behavior",
+        "Subscription Services",
+        "Average Revenue Per User (ARPU)"
+      ]
+    }
+  ],
+  "ABBV": [
+    {
+      "cluster": "Common Abbreviations",
+      "terms": [
+        "e.g.",
+        "i.e.",
+        "etc.",
+        "vs.",
+        "a.m.",
+        "p.m.",
+        "Dr.",
+        "Mr.",
+        "Ms.",
+        "Mrs.",
+        "Prof.",
+        "St.",
+        "Ave.",
+        "Rd.",
+        "Dept."
+      ]
+    },
+    {
+      "cluster": "Measurement Abbreviations",
+      "terms": [
+        "mm",
+        "cm",
+        "m",
+        "km",
+        "in",
+        "ft",
+        "yd",
+        "mi",
+        "g",
+        "kg",
+        "lb",
+        "oz",
+        "mL",
+        "L",
+        "gal"
+      ]
+    },
+    {
+      "cluster": "Organization Abbreviations",
+      "terms": [
+        "CEO",
+        "CFO",
+        "COO",
+        "CTO",
+        "HR",
+        "IT",
+        "PR",
+        "R&D",
+        "Corp.",
+        "Inc.",
+        "Ltd.",
+        "LLC",
+        "Assn.",
+        "Org."
+      ]
+    },
+    {
+      "cluster": "Government & Political Abbreviations",
+      "terms": [
+        "USA",
+        "UK",
+        "EU",
+        "UN",
+        "FBI",
+        "CIA",
+        "IRS",
+        "EPA",
+        "NATO",
+        "GOP",
+        "Dem.",
+        "Rep.",
+        "Sen.",
+        "Pres."
+      ]
+    },
+    {
+      "cluster": "Medical Abbreviations",
+      "terms": [
+        "BP",
+        "HR",
+        "BMI",
+        "MRI",
+        "CAT",
+        "ECG",
+        "EEG",
+        "Rx",
+        "Tx",
+        "Dx",
+        "ICU",
+        "ER",
+        "OR",
+        "CBC"
+      ]
+    },
+    {
+      "cluster": "Technical Abbreviations",
+      "terms": [
+        "CPU",
+        "RAM",
+        "ROM",
+        "GPU",
+        "OS",
+        "API",
+        "URL",
+        "HTML",
+        "CSS",
+        "JS",
+        "SQL",
+        "HTTP",
+        "HTTPS",
+        "TCP"
+      ]
+    },
+    {
+      "cluster": "Financial Abbreviations",
+      "terms": [
+        "ROI",
+        "IRR",
+        "NPV",
+        "EPS",
+        "P/E",
+        "FIFO",
+        "LIFO",
+        "GAAP",
+        "SEC",
+        "NYSE",
+        "NASDAQ",
+        "DJIA",
+        "S&P",
+        "Ltd."
+      ]
+    },
+    {
+      "cluster": "Academic Abbreviations",
+      "terms": [
+        "PhD",
+        "BA",
+        "BS",
+        "MA",
+        "MS",
+        "MBA",
+        "JD",
+        "MD",
+        "DDS",
+        "GPA",
+        "SAT",
+        "ACT",
+        "GRE",
+        "TOEFL"
+      ]
+    },
+    {
+      "cluster": "Time-Related Abbreviations",
+      "terms": [
+        "sec",
+        "min",
+        "hr",
+        "day",
+        "wk",
+        "mo",
+        "yr",
+        "Q1",
+        "Q2",
+        "Q3",
+        "Q4",
+        "EST",
+        "PST",
+        "GMT",
+        "UTC"
+      ]
+    },
+    {
+      "cluster": "Transportation Abbreviations",
+      "terms": [
+        "mph",
+        "kph",
+        "rpm",
+        "VIN",
+        "GPS",
+        "TSA",
+        "FAA",
+        "DOT",
+        "ETA",
+        "ETD",
+        "Avg.",
+        "St.",
+        "Ave.",
+        "Blvd."
+      ]
+    }
+  ],
+  "ABI": [
+    {
+      "cluster": "General Data Types",
+      "terms": [
+        "numeric",
+        "categorical",
+        "text",
+        "boolean",
+        "date",
+        "datetime",
+        "integer",
+        "float",
+        "string",
+        "object",
+        "timestamp",
+        "binary",
+        "complex",
+        "interval"
+      ]
+    },
+    {
+      "cluster": "Data Quality Issues",
+      "terms": [
+        "missing values",
+        "null values",
+        "outliers",
+        "duplicates",
+        "inconsistent formatting",
+        "invalid values",
+        "data entry errors",
+        "corrupted data",
+        "noisy data",
+        "incomplete data",
+        "erroneous data",
+        "inaccurate data",
+        "stale data",
+        "unreliable data"
+      ]
+    },
+    {
+      "cluster": "Descriptive Statistics",
+      "terms": [
+        "mean",
+        "median",
+        "mode",
+        "standard deviation",
+        "variance",
+        "minimum",
+        "maximum",
+        "range",
+        "percentile",
+        "quartile",
+        "skewness",
+        "kurtosis",
+        "count",
+        "sum"
+      ]
+    },
+    {
+      "cluster": "Data Transformations",
+      "terms": [
+        "normalization",
+        "standardization",
+        "scaling",
+        "binning",
+        "discretization",
+        "one-hot encoding",
+        "label encoding",
+        "log transformation",
+        "power transformation",
+        "box-cox transformation",
+        "imputation",
+        "feature engineering",
+        "aggregation",
+        "reduction"
+      ]
+    },
+    {
+      "cluster": "Data Relationships",
+      "terms": [
+        "correlation",
+        "covariance",
+        "dependence",
+        "independence",
+        "association",
+        "causation",
+        "interaction",
+        "hierarchy",
+        "network",
+        "relationship strength",
+        "linear relationship",
+        "non-linear relationship",
+        "positive correlation",
+        "negative correlation",
+        "multicollinearity"
+      ]
+    },
+    {
+      "cluster": "Possible Interpretation: Abdominal Bariatric Index (Medical)",
+      "terms": [
+        "BMI",
+        "waist circumference",
+        "hip circumference",
+        "weight",
+        "height",
+        "adiposity",
+        "obesity",
+        "metabolic syndrome",
+        "cardiovascular risk",
+        "body composition",
+        "abdominal fat",
+        "visceral fat",
+        "subcutaneous fat",
+        "body fat percentage",
+        "lean mass"
+      ]
+    },
+    {
+      "cluster": "Possible Interpretation: Ankle-Brachial Index (Medical)",
+      "terms": [
+        "peripheral artery disease",
+        "PAD",
+        "blood pressure",
+        "ankle blood pressure",
+        "brachial blood pressure",
+        "arterial stenosis",
+        "atherosclerosis",
+        "vascular disease",
+        "circulation",
+        "leg pain",
+        "claudication",
+        "ischemia",
+        "vascular ultrasound",
+        "pulse",
+        "Doppler"
+      ]
+    },
+    {
+      "cluster": "Possible Interpretation: Application Binary Interface (Software)",
+      "terms": [
+        "system call",
+        "library call",
+        "memory layout",
+        "data structure",
+        "function signature",
+        "calling convention",
+        "object code",
+        "linker",
+        "compiler",
+        "processor architecture",
+        "instruction set",
+        "operating system",
+        "system library",
+        "header file",
+        "binary compatibility"
+      ]
+    },
+    {
+      "cluster": "Possible Interpretation: Available Bitrate (Telecommunications)",
+      "terms": [
+        "bandwidth",
+        "network throughput",
+        "data rate",
+        "transmission speed",
+        "quality of service",
+        "QoS",
+        "latency",
+        "packet loss",
+        "network congestion",
+        "video streaming",
+        "audio streaming",
+        "file transfer",
+        "network capacity",
+        "link capacity",
+        "bitrate adaptation"
+      ]
+    }
+  ],
+  "ABOmatch": [
+    {
+      "cluster": "Blood Type Compatibility",
+      "terms": [
+        "compatible",
+        "incompatible",
+        "agglutination",
+        "transfusion reaction",
+        "universal donor",
+        "universal recipient",
+        "donor compatibility",
+        "recipient compatibility",
+        "blood group antigens",
+        "antibodies",
+        "hemolysis",
+        "blood mixing",
+        "crossmatching",
+        "alloimmunization",
+        "Rh compatibility"
+      ]
+    },
+    {
+      "cluster": "Blood Transfusion",
+      "terms": [
+        "blood transfusion",
+        "packed red blood cells",
+        "whole blood",
+        "plasma",
+        "platelets",
+        "transfusion medicine",
+        "blood bank",
+        "blood donation",
+        "autologous transfusion",
+        "allogeneic transfusion",
+        "transfusion risks",
+        "transfusion benefits",
+        "transfusion guidelines",
+        "pre-transfusion testing",
+        "post-transfusion monitoring"
+      ]
+    },
+    {
+      "cluster": "Blood Group Systems",
+      "terms": [
+        "ABO blood group system",
+        "Rh blood group system",
+        "Kell blood group system",
+        "Duffy blood group system",
+        "Kidd blood group system",
+        "MNS blood group system",
+        "Lewis blood group system",
+        "P blood group system",
+        "Lutheran blood group system",
+        "Ii blood group system",
+        "blood group antigens",
+        "blood group antibodies",
+        "red blood cell antigens",
+        "genetic inheritance",
+        "phenotype"
+      ]
+    },
+    {
+      "cluster": "Immunology",
+      "terms": [
+        "antigen",
+        "antibody",
+        "immune response",
+        "alloantibody",
+        "isoantibody",
+        "immunoglobulin",
+        "immune system",
+        "immunocompromised",
+        "immunodeficiency",
+        "autoimmunity",
+        "graft rejection",
+        "hematopoiesis",
+        "histocompatibility",
+        "HLA typing",
+        "serology"
+      ]
+    },
+    {
+      "cluster": "Genetics",
+      "terms": [
+        "gene",
+        "allele",
+        "genotype",
+        "phenotype",
+        "inheritance",
+        "dominant",
+        "recessive",
+        "mutation",
+        "chromosome",
+        "DNA",
+        "genetic marker",
+        "genetic testing",
+        "pedigree",
+        "polymorphism",
+        "blood group genes"
+      ]
+    },
+    {
+      "cluster": "Medical Conditions Related to Blood",
+      "terms": [
+        "anemia",
+        "hemolytic anemia",
+        "thrombocytopenia",
+        "hemophilia",
+        "blood disorders",
+        "autoimmune hemolytic anemia",
+        "transfusion-related acute lung injury (TRALI)",
+        "transfusion-associated circulatory overload (TACO)",
+        "alloimmunization to red blood cell antigens",
+        "hemolytic disease of the fetus and newborn (HDFN)",
+        "sickle cell disease",
+        "thalassemia",
+        "bone marrow failure",
+        "aplastic anemia",
+        "leukemia"
+      ]
+    },
+    {
+      "cluster": "Laboratory Testing",
+      "terms": [
+        "blood typing",
+        "antibody screening",
+        "crossmatching",
+        "direct antiglobulin test (DAT)",
+        "indirect antiglobulin test (IAT)",
+        "red blood cell antibody identification",
+        "agglutination test",
+        "hemolysis test",
+        "flow cytometry",
+        "molecular testing",
+        "ELISA",
+        "western blot",
+        "serological testing",
+        "hematology",
+        "clinical laboratory"
+      ]
+    },
+    {
+      "cluster": "Organ Transplantation",
+      "terms": [
+        "organ transplantation",
+        "kidney transplant",
+        "liver transplant",
+        "heart transplant",
+        "lung transplant",
+        "bone marrow transplant",
+        "stem cell transplant",
+        "graft versus host disease (GVHD)",
+        "histocompatibility testing",
+        "HLA matching",
+        "immunosuppression",
+        "rejection",
+        "donor",
+        "recipient",
+        "tissue typing"
+      ]
+    },
+    {
+      "cluster": "Pregnancy and Childbirth",
+      "terms": [
+        "pregnancy",
+        "Rh incompatibility",
+        "hemolytic disease of the fetus and newborn (HDFN)",
+        "antenatal testing",
+        "postpartum testing",
+        "RhoGAM",
+        "fetal blood type",
+        "maternal antibodies",
+        "antibody titer",
+        "intrauterine transfusion",
+        "erythroblastosis fetalis",
+        "hydrops fetalis",
+        "perinatal care",
+        "obstetrics",
+        "neonatology"
+      ]
+    },
+    {
+      "cluster": "Data Management",
+      "terms": [
+        "blood bank information system (BBIS)",
+        "laboratory information system (LIS)",
+        "patient record",
+        "database",
+        "data integrity",
+        "data security",
+        "electronic medical record (EMR)",
+        "data analysis",
+        "reporting",
+        "audit trail",
+        "traceability",
+        "validation",
+        "quality control",
+        "data standardization",
+        "data integration"
+      ]
+    }
+  ],
+  "ABT": [
+    {
+      "cluster": "Descriptive Statistics",
+      "terms": [
+        "mean",
+        "median",
+        "mode",
+        "standard deviation",
+        "variance",
+        "range",
+        "minimum",
+        "maximum",
+        "percentiles",
+        "skewness",
+        "kurtosis",
+        "count",
+        "sum",
+        "frequency",
+        "distribution"
+      ]
+    },
+    {
+      "cluster": "Data Quality",
+      "terms": [
+        "missing values",
+        "null values",
+        "duplicates",
+        "outliers",
+        "inconsistent formatting",
+        "invalid values",
+        "data type errors",
+        "data completeness",
+        "data accuracy",
+        "data integrity",
+        "corrupted data",
+        "noise",
+        "erroneous entries",
+        "data validation"
+      ]
+    },
+    {
+      "cluster": "Time Series",
+      "terms": [
+        "date",
+        "timestamp",
+        "year",
+        "month",
+        "day",
+        "hour",
+        "minute",
+        "second",
+        "time interval",
+        "trend",
+        "seasonality",
+        "cyclical patterns",
+        "autocorrelation",
+        "moving average"
+      ]
+    },
+    {
+      "cluster": "Categorical Variables",
+      "terms": [
+        "categories",
+        "labels",
+        "groups",
+        "classes",
+        "types",
+        "nominal",
+        "ordinal",
+        "hierarchy",
+        "levels",
+        "unique values",
+        "frequency counts",
+        "proportions",
+        "mode",
+        "dominance",
+        "segmentation"
+      ]
+    },
+    {
+      "cluster": "Numerical Variables",
+      "terms": [
+        "integers",
+        "floats",
+        "decimals",
+        "continuous",
+        "discrete",
+        "positive",
+        "negative",
+        "zero",
+        "magnitude",
+        "ratio",
+        "scale",
+        "interval",
+        "distribution",
+        "correlation",
+        "regression"
+      ]
+    },
+    {
+      "cluster": "Textual Data",
+      "terms": [
+        "strings",
+        "characters",
+        "words",
+        "sentences",
+        "paragraphs",
+        "documents",
+        "corpus",
+        "sentiment",
+        "topic",
+        "keywords",
+        "entities",
+        "length",
+        "frequency",
+        "pattern",
+        "regular expression"
+      ]
+    },
+    {
+      "cluster": "Geospatial Data",
+      "terms": [
+        "latitude",
+        "longitude",
+        "coordinates",
+        "location",
+        "address",
+        "city",
+        "state",
+        "country",
+        "region",
+        "zip code",
+        "geography",
+        "distance",
+        "area",
+        "polygon",
+        "spatial relationship"
+      ]
+    },
+    {
+      "cluster": "Data Transformation",
+      "terms": [
+        "normalization",
+        "standardization",
+        "scaling",
+        "encoding",
+        "binning",
+        "discretization",
+        "aggregation",
+        "feature engineering",
+        "one-hot encoding",
+        "dummy variables",
+        "transformation function",
+        "imputation",
+        "outlier removal",
+        "data cleaning",
+        "feature selection"
+      ]
+    },
+    {
+      "cluster": "Relationships and Correlations",
+      "terms": [
+        "correlation coefficient",
+        "covariance",
+        "dependence",
+        "independence",
+        "causation",
+        "association",
+        "interaction",
+        "regression analysis",
+        "linear relationship",
+        "non-linear relationship",
+        "multicollinearity",
+        "confounding variables",
+        "statistical significance",
+        "p-value",
+        "hypothesis testing"
+      ]
+    }
+  ],
+  "ABX Air": [
+    {
+      "cluster": "Airline Operations",
+      "terms": [
+        "Flights",
+        "Routes",
+        "Schedules",
+        "Aircraft",
+        "Pilots",
+        "Flight Attendants",
+        "Maintenance",
+        "Ground Crew",
+        "Air Traffic Control",
+        "Airport",
+        "Departure",
+        "Arrival",
+        "Delays",
+        "Cancellations",
+        "Baggage"
+      ]
+    },
+    {
+      "cluster": "Cargo & Logistics",
+      "terms": [
+        "Shipping",
+        "Freight",
+        "Packages",
+        "Delivery",
+        "Supply Chain",
+        "Warehousing",
+        "Distribution",
+        "Transportation",
+        "Cargo Planes",
+        "Logistics Management",
+        "Tracking",
+        "Customs",
+        "Import",
+        "Export",
+        "Handling"
+      ]
+    },
+    {
+      "cluster": "Aviation Industry",
+      "terms": [
+        "Airlines",
+        "Airports",
+        "Aerospace",
+        "Aviation Safety",
+        "Regulations",
+        "Federal Aviation Administration (FAA)",
+        "National Transportation Safety Board (NTSB)",
+        "Air Travel",
+        "Aviation Technology",
+        "Aircraft Manufacturing",
+        "Airspace",
+        "Aeronautics",
+        "Aviation Security",
+        "Commercial Aviation",
+        "General Aviation"
+      ]
+    },
+    {
+      "cluster": "Financial Performance",
+      "terms": [
+        "Revenue",
+        "Profit",
+        "Expenses",
+        "Operating Costs",
+        "Net Income",
+        "Assets",
+        "Liabilities",
+        "Equity",
+        "Cash Flow",
+        "Stock Price",
+        "Market Capitalization",
+        "Financial Statements",
+        "Debt",
+        "Investments",
+        "Earnings"
+      ]
+    },
+    {
+      "cluster": "Geographic Locations",
+      "terms": [
+        "Origin Airport",
+        "Destination Airport",
+        "City",
+        "State",
+        "Country",
+        "Region",
+        "Hub Airport",
+        "Service Area",
+        "Flight Paths",
+        "International",
+        "Domestic",
+        "Latitude",
+        "Longitude",
+        "Coordinates",
+        "Time Zone"
+      ]
+    },
+    {
+      "cluster": "Customer Service",
+      "terms": [
+        "Customer Support",
+        "Complaints",
+        "Feedback",
+        "Reservations",
+        "Ticketing",
+        "Loyalty Program",
+        "Customer Satisfaction",
+        "Help Desk",
+        "Inquiries",
+        "Service Quality",
+        "Responsiveness",
+        "Accessibility",
+        "Communication",
+        "Assistance",
+        "Experience"
+      ]
+    },
+    {
+      "cluster": "Fleet Management",
+      "terms": [
+        "Aircraft Type",
+        "Aircraft Registration",
+        "Aircraft Age",
+        "Aircraft Configuration",
+        "Fuel Consumption",
+        "Maintenance Schedule",
+        "Utilization Rate",
+        "Operational Status",
+        "Spare Parts",
+        "Engine Type",
+        "Avionics",
+        "Airframe",
+        "Inspection",
+        "Repair",
+        "Overhaul"
+      ]
+    },
+    {
+      "cluster": "Personnel",
+      "terms": [
+        "Employees",
+        "Pilots",
+        "Mechanics",
+        "Flight Attendants",
+        "Management",
+        "Ground Staff",
+        "Salaries",
+        "Benefits",
+        "Training",
+        "Recruitment",
+        "Human Resources",
+        "Labor Relations",
+        "Union",
+        "Staffing Levels",
+        "Performance Reviews"
+      ]
+    },
+    {
+      "cluster": "Safety & Security",
+      "terms": [
+        "Security Protocols",
+        "Emergency Procedures",
+        "Risk Management",
+        "Incident Reporting",
+        "Safety Regulations",
+        "Security Screening",
+        "Hazard Analysis",
+        "Accident Investigation",
+        "Compliance",
+        "Threat Assessment",
+        "Surveillance",
+        "Vulnerability Assessment",
+        "Cybersecurity",
+        "Data Protection",
+        "Privacy"
+      ]
+    }
+  ],
+  "ACC Team": [
+    {
+      "cluster": "Sports Teams",
+      "terms": [
+        "Team Name",
+        "Team Nickname",
+        "Mascot",
+        "Colors",
+        "Conference",
+        "Division",
+        "League",
+        "Home Stadium",
+        "Roster",
+        "Head Coach",
+        "Team Captain",
+        "Record",
+        "Rank",
+        "Championships",
+        "All-Stars"
+      ]
+    },
+    {
+      "cluster": "University Affiliation",
+      "terms": [
+        "University Name",
+        "School",
+        "College",
+        "Location",
+        "City",
+        "State",
+        "Enrollment",
+        "Academic Ranking",
+        "Founding Year",
+        "President",
+        "Alma Mater",
+        "Campus",
+        "Athletic Director",
+        "Student Body",
+        "Academic Programs"
+      ]
+    },
+    {
+      "cluster": "Athletic Performance",
+      "terms": [
+        "Wins",
+        "Losses",
+        "Ties",
+        "Points Scored",
+        "Points Allowed",
+        "Winning Percentage",
+        "Average Points Per Game",
+        "Rankings",
+        "Statistics",
+        "Standings",
+        "Playoff Appearances",
+        "Championship Wins",
+        "Season Record",
+        "Home Record",
+        "Away Record"
+      ]
+    },
+    {
+      "cluster": "Team Personnel",
+      "terms": [
+        "Players",
+        "Coaches",
+        "Assistant Coaches",
+        "Trainers",
+        "Staff",
+        "Recruits",
+        "Alumni",
+        "Former Players",
+        "Team Management",
+        "General Manager",
+        "Owner",
+        "Team Physician",
+        "Strength Coach",
+        "Position Coaches",
+        "Analysts"
+      ]
+    },
+    {
+      "cluster": "Conference Membership (ACC Specific)",
+      "terms": [
+        "Atlantic Coast Conference",
+        "ACC",
+        "Atlantic Division",
+        "Coastal Division",
+        "ACC Championship",
+        "Bowl Games",
+        "Rivals",
+        "Conference Ranking",
+        "Conference Record",
+        "ACC Commissioner",
+        "ACC Network",
+        "ACC Media Days",
+        "ACC Tournament",
+        "ACC Awards",
+        "ACC Standings"
+      ]
+    },
+    {
+      "cluster": "Game Information",
+      "terms": [
+        "Opponent",
+        "Date",
+        "Time",
+        "Location",
+        "Score",
+        "Result",
+        "Attendance",
+        "Broadcast Channel",
+        "Game Recap",
+        "Highlights",
+        "Pre-game Analysis",
+        "Post-game Analysis",
+        "Referee",
+        "Quarter Scores",
+        "Final Score"
+      ]
+    },
+    {
+      "cluster": "Recruiting and Scouting",
+      "terms": [
+        "Recruiting Class",
+        "Star Rating",
+        "Commitments",
+        "Offers",
+        "Visits",
+        "Scouting Reports",
+        "Player Evaluations",
+        "Recruiting Rankings",
+        "Prospects",
+        "Scholarships",
+        "National Signing Day",
+        "High School",
+        "Position Ranking",
+        "State Ranking",
+        "Recruiting Coordinator"
+      ]
+    },
+    {
+      "cluster": "Financial Aspects of Athletics",
+      "terms": [
+        "Budget",
+        "Revenue",
+        "Expenses",
+        "Donations",
+        "Ticket Sales",
+        "Merchandise Sales",
+        "Sponsorships",
+        "Endowments",
+        "Salaries",
+        "Facilities",
+        "Funding",
+        "Financial Aid",
+        "Scholarships",
+        "Athletic Department",
+        "Booster Clubs"
+      ]
+    },
+    {
+      "cluster": "Media and Public Relations",
+      "terms": [
+        "News",
+        "Articles",
+        "Press Releases",
+        "Interviews",
+        "Social Media",
+        "Website",
+        "Fanbase",
+        "Public Opinion",
+        "Branding",
+        "Marketing",
+        "Advertising",
+        "Media Coverage",
+        "Reputation",
+        "Image",
+        "Community Outreach"
+      ]
+    }
+  ],
+  "ACE": [
+    {
+      "cluster": "Acronyms & Initialisms",
+      "terms": [
+        "abbreviation",
+        "short form",
+        "initials",
+        "acronym",
+        "expanded form",
+        "full name",
+        "meaning",
+        "definition",
+        "explanation",
+        "usage",
+        "context",
+        "industry",
+        "field",
+        "domain"
+      ]
+    },
+    {
+      "cluster": "Data Type & Format",
+      "terms": [
+        "string",
+        "text",
+        "character",
+        "alphanumeric",
+        "identifier",
+        "code",
+        "representation",
+        "format",
+        "encoding",
+        "syntax",
+        "pattern",
+        "regular expression",
+        "validation",
+        "standard",
+        "specification"
+      ]
+    },
+    {
+      "cluster": "Identifier & Key",
+      "terms": [
+        "unique identifier",
+        "primary key",
+        "foreign key",
+        "reference",
+        "lookup",
+        "index",
+        "record ID",
+        "entity ID",
+        "attribute",
+        "property",
+        "descriptor",
+        "characteristic",
+        "value",
+        "label",
+        "tag"
+      ]
+    },
+    {
+      "cluster": "Company & Organization",
+      "terms": [
+        "business",
+        "corporation",
+        "enterprise",
+        "firm",
+        "establishment",
+        "institution",
+        "agency",
+        "entity",
+        "group",
+        "team",
+        "department",
+        "division",
+        "subsidiary",
+        "branch",
+        "office"
+      ]
+    },
+    {
+      "cluster": "Location & Geography",
+      "terms": [
+        "address",
+        "city",
+        "state",
+        "country",
+        "zip code",
+        "postal code",
+        "region",
+        "territory",
+        "continent",
+        "latitude",
+        "longitude",
+        "coordinates",
+        "location",
+        "place",
+        "geography"
+      ]
+    },
+    {
+      "cluster": "Assessment & Evaluation",
+      "terms": [
+        "score",
+        "rating",
+        "grade",
+        "level",
+        "performance",
+        "ranking",
+        "evaluation",
+        "assessment",
+        "measure",
+        "metric",
+        "indicator",
+        "result",
+        "outcome",
+        "status",
+        "progress"
+      ]
+    },
+    {
+      "cluster": "Control & Enforcement",
+      "terms": [
+        "authority",
+        "regulation",
+        "compliance",
+        "restriction",
+        "license",
+        "permit",
+        "certification",
+        "authorization",
+        "ban",
+        "prohibition",
+        "enforcement",
+        "oversight",
+        "monitoring",
+        "validation",
+        "verification"
+      ]
+    },
+    {
+      "cluster": "Error & Exception",
+      "terms": [
+        "error code",
+        "exception",
+        "failure",
+        "fault",
+        "problem",
+        "issue",
+        "defect",
+        "bug",
+        "warning",
+        "message",
+        "notification",
+        "alert",
+        "status code",
+        "response code",
+        "indicator"
+      ]
+    },
+    {
+      "cluster": "Access Control Entry (Specific to ACE)",
+      "terms": [
+        "permission",
+        "access",
+        "authorization",
+        "grant",
+        "deny",
+        "user",
+        "group",
+        "role",
+        "rights",
+        "privilege",
+        "security",
+        "resource",
+        "object",
+        "control",
+        "policy"
+      ]
+    },
+    {
+      "cluster": "File Extension & Type",
+      "terms": [
+        "file extension",
+        "file type",
+        "format",
+        "mime type",
+        "document",
+        "image",
+        "audio",
+        "video",
+        "archive",
+        "executable",
+        "binary",
+        "text file",
+        "source code",
+        "data file",
+        "configuration file"
+      ]
+    }
+  ],
+  "ACE2": [
+    {
+      "cluster": "ACE2 Function & Structure",
+      "terms": [
+        "angiotensin-converting enzyme 2",
+        "carboxypeptidase activity",
+        "zinc metallopeptidase",
+        "membrane-bound protein",
+        "ectodomain shedding",
+        "receptor binding",
+        "peptidase M2 domain",
+        "N-terminal peptidase domain",
+        "dimerization",
+        "glycosylation",
+        "amino acid sequence",
+        "protein structure",
+        "active site",
+        "substrate specificity"
+      ]
+    },
+    {
+      "cluster": "Viral Entry & Infection (COVID-19 Focus)",
+      "terms": [
+        "SARS-CoV-2 receptor",
+        "COVID-19 pathogenesis",
+        "spike protein binding",
+        "viral entry mechanism",
+        "endocytosis",
+        "TMPRSS2",
+        "viral replication",
+        "host cell interaction",
+        "antibody neutralization",
+        "vaccine efficacy",
+        "viral load",
+        "disease severity",
+        "mutations affecting ACE2 binding",
+        "ACE2 polymorphism",
+        "furin cleavage site"
+      ]
+    },
+    {
+      "cluster": "Cardiovascular System & Hypertension",
+      "terms": [
+        "renin-angiotensin system (RAS)",
+        "angiotensin II",
+        "blood pressure regulation",
+        "hypertension",
+        "cardiac function",
+        "vasoconstriction",
+        "vasodilation",
+        "heart failure",
+        "myocardial infarction",
+        "atherosclerosis",
+        "endothelial dysfunction",
+        "ACE inhibitors",
+        "angiotensin receptor blockers (ARBs)",
+        "RAAS inhibitors",
+        "cardioprotection"
+      ]
+    },
+    {
+      "cluster": "Lung Physiology & Respiratory Disease",
+      "terms": [
+        "acute respiratory distress syndrome (ARDS)",
+        "lung injury",
+        "pulmonary fibrosis",
+        "alveolar epithelium",
+        "gas exchange",
+        "lung inflammation",
+        "cytokine storm",
+        "pneumonia",
+        "respiratory failure",
+        "ventilation",
+        "oxygenation",
+        "lung compliance",
+        "airway resistance",
+        "pulmonary edema",
+        "hypoxia"
+      ]
+    },
+    {
+      "cluster": "Kidney Function & Renal Disease",
+      "terms": [
+        "renal tubules",
+        "glomerular filtration",
+        "electrolyte balance",
+        "kidney injury",
+        "diabetic nephropathy",
+        "chronic kidney disease (CKD)",
+        "proteinuria",
+        "renal failure",
+        "fluid regulation",
+        "sodium reabsorption",
+        "potassium excretion",
+        "renin secretion",
+        "angiotensinogen",
+        "aldosterone",
+        "kidney transplantation"
+      ]
+    },
+    {
+      "cluster": "Expression & Tissue Distribution",
+      "terms": [
+        "tissue-specific expression",
+        "lung expression",
+        "heart expression",
+        "kidney expression",
+        "intestinal expression",
+        "brain expression",
+        "endothelial cells",
+        "epithelial cells",
+        "gene expression regulation",
+        "mRNA levels",
+        "protein levels",
+        "immunohistochemistry",
+        "cell lines",
+        "knockout models",
+        "transgenic animals"
+      ]
+    },
+    {
+      "cluster": "Therapeutic Interventions & Drug Development",
+      "terms": [
+        "recombinant ACE2",
+        "soluble ACE2",
+        "ACE2 inhibitors",
+        "ACE2 activators",
+        "drug targets",
+        "clinical trials",
+        "pharmacokinetics",
+        "pharmacodynamics",
+        "drug delivery",
+        "therapeutic efficacy",
+        "adverse effects",
+        "drug repurposing",
+        "small molecule inhibitors",
+        "antibody therapies",
+        "gene therapy"
+      ]
+    },
+    {
+      "cluster": "Diabetes & Metabolic Syndrome",
+      "terms": [
+        "insulin resistance",
+        "glucose metabolism",
+        "obesity",
+        "inflammation",
+        "adipose tissue",
+        "metabolic disorders",
+        "hyperglycemia",
+        "dyslipidemia",
+        "non-alcoholic fatty liver disease (NAFLD)",
+        "oxidative stress",
+        "endothelial dysfunction",
+        "vascular complications",
+        "insulin signaling",
+        "glucose transport",
+        "adipokines"
+      ]
+    },
+    {
+      "cluster": "Neurological Function",
+      "terms": [
+        "blood-brain barrier",
+        "neuroinflammation",
+        "cognitive function",
+        "neurodegenerative diseases",
+        "stroke",
+        "cerebral blood flow",
+        "neuronal signaling",
+        "synaptic plasticity",
+        "neurotransmitters",
+        "brain injury",
+        "encephalitis",
+        "dementia",
+        "Alzheimer's disease",
+        "Parkinson's disease",
+        "central nervous system"
+      ]
+    },
+    {
+      "cluster": "General Biological Processes",
+      "terms": [
+        "protein-protein interactions",
+        "signal transduction",
+        "cell signaling",
+        "gene regulation",
+        "enzyme kinetics",
+        "post-translational modifications",
+        "cellular metabolism",
+        "immune response",
+        "inflammation",
+        "apoptosis",
+        "cell proliferation",
+        "cell differentiation",
+        "homeostasis",
+        "developmental biology",
+        "molecular biology"
+      ]
+    }
+  ],
+  "ACQ TIME": [
+    {
+      "cluster": "Temporal Measurement",
+      "terms": [
+        "acquisition time",
+        "measurement time",
+        "capture time",
+        "sampling time",
+        "recording time",
+        "observation time",
+        "event time",
+        "timestamp",
+        "timepoint",
+        "epoch",
+        "duration",
+        "latency",
+        "period",
+        "interval"
+      ]
+    },
+    {
+      "cluster": "Data Acquisition Process",
+      "terms": [
+        "data collection",
+        "data logging",
+        "data capture",
+        "sensor reading",
+        "instrument reading",
+        "signal acquisition",
+        "image acquisition",
+        "video acquisition",
+        "audio acquisition",
+        "experimental data",
+        "monitoring data",
+        "telemetry",
+        "remote sensing",
+        "data stream"
+      ]
+    },
+    {
+      "cluster": "Time Series Analysis",
+      "terms": [
+        "time series data",
+        "temporal data",
+        "trend analysis",
+        "seasonal analysis",
+        "cyclical analysis",
+        "forecasting",
+        "time-dependent variables",
+        "autocorrelation",
+        "moving average",
+        "exponential smoothing",
+        "time warping",
+        "dynamic time warping",
+        "sequence analysis",
+        "event sequence"
+      ]
+    },
+    {
+      "cluster": "Data Logging & Storage",
+      "terms": [
+        "log files",
+        "database timestamp",
+        "data warehousing",
+        "data storage",
+        "data archiving",
+        "version control",
+        "audit trail",
+        "data provenance",
+        "metadata",
+        "time-based indexing",
+        "data retention",
+        "data backup",
+        "data recovery",
+        "data integrity"
+      ]
+    },
+    {
+      "cluster": "System Performance",
+      "terms": [
+        "response time",
+        "processing time",
+        "execution time",
+        "latency",
+        "throughput",
+        "system load",
+        "resource utilization",
+        "performance monitoring",
+        "optimization",
+        "bottleneck analysis",
+        "scalability",
+        "efficiency",
+        "real-time performance",
+        "system health"
+      ]
+    },
+    {
+      "cluster": "Event Sequencing & Chronology",
+      "terms": [
+        "event sequence",
+        "event ordering",
+        "chronological order",
+        "timeline",
+        "historical data",
+        "event correlation",
+        "causality",
+        "precedence",
+        "succession",
+        "sequence of events",
+        "event tracking",
+        "incident response",
+        "root cause analysis",
+        "process flow"
+      ]
+    },
+    {
+      "cluster": "Synchronization & Scheduling",
+      "terms": [
+        "synchronization",
+        "time synchronization",
+        "clock synchronization",
+        "scheduling",
+        "task scheduling",
+        "event scheduling",
+        "real-time scheduling",
+        "deadline",
+        "priority",
+        "concurrency",
+        "parallel processing",
+        "distributed systems",
+        "atomic operations",
+        "time window"
+      ]
+    },
+    {
+      "cluster": "Data Quality & Accuracy",
+      "terms": [
+        "time accuracy",
+        "time precision",
+        "time resolution",
+        "data quality",
+        "data validation",
+        "error detection",
+        "data cleaning",
+        "outlier detection",
+        "data imputation",
+        "missing data",
+        "data consistency",
+        "data integrity",
+        "noise reduction",
+        "signal processing"
+      ]
+    },
+    {
+      "cluster": "Time Zones & Localization",
+      "terms": [
+        "time zone",
+        "UTC",
+        "GMT",
+        "local time",
+        "daylight saving time",
+        "time offset",
+        "localization",
+        "internationalization",
+        "global data",
+        "regional data",
+        "geographic location",
+        "cultural context",
+        "timezone conversion",
+        "date formatting"
+      ]
+    }
+  ],
+  "ACT": [
+    {
+      "cluster": "Action & Behavior",
+      "terms": [
+        "activity",
+        "behavior",
+        "conduct",
+        "deed",
+        "performance",
+        "execution",
+        "operation",
+        "function",
+        "process",
+        "procedure",
+        "practice",
+        "accomplishment",
+        "achievement",
+        "impact"
+      ]
+    },
+    {
+      "cluster": "Legislation & Regulation",
+      "terms": [
+        "law",
+        "statute",
+        "ordinance",
+        "regulation",
+        "ruling",
+        "decree",
+        "edict",
+        "legislation",
+        "provision",
+        "clause",
+        "article",
+        "section",
+        "amendment",
+        "bill"
+      ]
+    },
+    {
+      "cluster": "Event & Occurrence",
+      "terms": [
+        "event",
+        "incident",
+        "happening",
+        "occurrence",
+        "episode",
+        "proceeding",
+        "affair",
+        "development",
+        "situation",
+        "circumstance",
+        "experience",
+        "phenomenon",
+        "instance",
+        "case"
+      ]
+    },
+    {
+      "cluster": "Decision & Judgment",
+      "terms": [
+        "decision",
+        "judgment",
+        "ruling",
+        "verdict",
+        "determination",
+        "resolution",
+        "conclusion",
+        "assessment",
+        "evaluation",
+        "appraisal",
+        "consideration",
+        "deliberation",
+        "finding",
+        "outcome"
+      ]
+    },
+    {
+      "cluster": "Performance Measurement",
+      "terms": [
+        "metric",
+        "indicator",
+        "measure",
+        "benchmark",
+        "standard",
+        "criterion",
+        "target",
+        "goal",
+        "objective",
+        "result",
+        "outcome",
+        "score",
+        "rating",
+        "level",
+        "value"
+      ]
+    },
+    {
+      "cluster": "Document & Record",
+      "terms": [
+        "document",
+        "record",
+        "report",
+        "file",
+        "entry",
+        "log",
+        "transcript",
+        "certificate",
+        "evidence",
+        "proof",
+        "testimony",
+        "account",
+        "inventory",
+        "register"
+      ]
+    },
+    {
+      "cluster": "Response & Reaction",
+      "terms": [
+        "reaction",
+        "response",
+        "action",
+        "counteraction",
+        "influence",
+        "effect",
+        "impact",
+        "consequence",
+        "outcome",
+        "result",
+        "implication",
+        "repercussion",
+        "side effect",
+        "feedback"
+      ]
+    },
+    {
+      "cluster": "Initiative & Project",
+      "terms": [
+        "initiative",
+        "project",
+        "program",
+        "scheme",
+        "undertaking",
+        "endeavor",
+        "venture",
+        "effort",
+        "operation",
+        "campaign",
+        "task",
+        "mission",
+        "assignment",
+        "process"
+      ]
+    },
+    {
+      "cluster": "Stage & Step",
+      "terms": [
+        "stage",
+        "step",
+        "phase",
+        "period",
+        "interval",
+        "duration",
+        "segment",
+        "component",
+        "element",
+        "part",
+        "section",
+        "cycle",
+        "sequence",
+        "process"
+      ]
+    },
+    {
+      "cluster": "Communication & Expression",
+      "terms": [
+        "statement",
+        "declaration",
+        "affirmation",
+        "representation",
+        "expression",
+        "communication",
+        "announcement",
+        "notification",
+        "report",
+        "account",
+        "description",
+        "narration",
+        "presentation",
+        "disclosure"
+      ]
+    }
+  ],
+  "ACTION": [
+    {
+      "cluster": "Data Manipulation",
+      "terms": [
+        "update",
+        "insert",
+        "delete",
+        "modify",
+        "append",
+        "replace",
+        "merge",
+        "split",
+        "transform",
+        "convert",
+        "extract",
+        "load",
+        "clean",
+        "validate",
+        "normalize"
+      ]
+    },
+    {
+      "cluster": "Data Retrieval",
+      "terms": [
+        "select",
+        "query",
+        "filter",
+        "search",
+        "find",
+        "retrieve",
+        "get",
+        "read",
+        "lookup",
+        "access",
+        "browse",
+        "scan",
+        "fetch",
+        "discover",
+        "list"
+      ]
+    },
+    {
+      "cluster": "Workflow Management",
+      "terms": [
+        "start",
+        "stop",
+        "pause",
+        "resume",
+        "cancel",
+        "schedule",
+        "trigger",
+        "execute",
+        "run",
+        "monitor",
+        "log",
+        "notify",
+        "alert",
+        "retry",
+        "escalate"
+      ]
+    },
+    {
+      "cluster": "User Interaction",
+      "terms": [
+        "submit",
+        "confirm",
+        "approve",
+        "reject",
+        "request",
+        "authorize",
+        "login",
+        "logout",
+        "register",
+        "view",
+        "edit",
+        "create",
+        "download",
+        "upload",
+        "share"
+      ]
+    },
+    {
+      "cluster": "System Administration",
+      "terms": [
+        "configure",
+        "deploy",
+        "install",
+        "uninstall",
+        "restart",
+        "backup",
+        "restore",
+        "upgrade",
+        "patch",
+        "monitor",
+        "diagnose",
+        "troubleshoot",
+        "optimize",
+        "scale",
+        "secure"
+      ]
+    },
+    {
+      "cluster": "Communication",
+      "terms": [
+        "send",
+        "receive",
+        "reply",
+        "forward",
+        "broadcast",
+        "publish",
+        "subscribe",
+        "connect",
+        "disconnect",
+        "join",
+        "leave",
+        "invite",
+        "announce",
+        "chat",
+        "post"
+      ]
+    },
+    {
+      "cluster": "Process Control",
+      "terms": [
+        "enable",
+        "disable",
+        "activate",
+        "deactivate",
+        "initialize",
+        "terminate",
+        "suspend",
+        "resume",
+        "allocate",
+        "release",
+        "assign",
+        "reassign",
+        "process",
+        "control",
+        "regulate"
+      ]
+    },
+    {
+      "cluster": "Security Related Actions",
+      "terms": [
+        "authenticate",
+        "authorize",
+        "encrypt",
+        "decrypt",
+        "hash",
+        "verify",
+        "audit",
+        "protect",
+        "block",
+        "unblock",
+        "revoke",
+        "grant",
+        "secure",
+        "isolate",
+        "quarantine"
+      ]
+    }
+  ],
+  "ACTO": [
+    {
+      "cluster": "Legal & Regulatory Actions",
+      "terms": [
+        "Lawsuit",
+        "Litigation",
+        "Settlement",
+        "Regulatory Action",
+        "Compliance",
+        "Enforcement",
+        "Investigation",
+        "Decree",
+        "Sanction",
+        "Penalty",
+        "Fine",
+        "Injunction",
+        "Cease and Desist",
+        "Consent Order",
+        "Administrative Order"
+      ]
+    },
+    {
+      "cluster": "Financial Transactions",
+      "terms": [
+        "Purchase",
+        "Sale",
+        "Acquisition",
+        "Divestiture",
+        "Merger",
+        "Investment",
+        "Funding",
+        "Loan",
+        "Grant",
+        "Subsidy",
+        "Capital Expenditure",
+        "Revenue",
+        "Expense",
+        "Profit",
+        "Loss"
+      ]
+    },
+    {
+      "cluster": "Organizational Roles & Responsibilities",
+      "terms": [
+        "Management",
+        "Leadership",
+        "Supervision",
+        "Oversight",
+        "Responsibility",
+        "Accountability",
+        "Control",
+        "Authority",
+        "Decision-Making",
+        "Governance",
+        "Administration",
+        "Implementation",
+        "Execution",
+        "Monitoring",
+        "Reporting"
+      ]
+    },
+    {
+      "cluster": "Events & Occurrences",
+      "terms": [
+        "Incident",
+        "Event",
+        "Occurrence",
+        "Accident",
+        "Failure",
+        "Malfunction",
+        "Breach",
+        "Violation",
+        "Error",
+        "Omission",
+        "Delay",
+        "Interruption",
+        "Disruption",
+        "Change",
+        "Modification"
+      ]
+    },
+    {
+      "cluster": "Status & Conditions",
+      "terms": [
+        "Active",
+        "Inactive",
+        "Pending",
+        "Completed",
+        "Approved",
+        "Rejected",
+        "Valid",
+        "Invalid",
+        "Open",
+        "Closed",
+        "Resolved",
+        "Unresolved",
+        "In Progress",
+        "Ongoing",
+        "Terminated"
+      ]
+    },
+    {
+      "cluster": "Quantitative Measures",
+      "terms": [
+        "Amount",
+        "Quantity",
+        "Value",
+        "Number",
+        "Percentage",
+        "Rate",
+        "Frequency",
+        "Duration",
+        "Size",
+        "Volume",
+        "Weight",
+        "Length",
+        "Area",
+        "Temperature",
+        "Pressure"
+      ]
+    },
+    {
+      "cluster": "Qualitative Assessments",
+      "terms": [
+        "Quality",
+        "Performance",
+        "Effectiveness",
+        "Efficiency",
+        "Safety",
+        "Reliability",
+        "Security",
+        "Risk",
+        "Impact",
+        "Severity",
+        "Importance",
+        "Significance",
+        "Relevance",
+        "Appropriateness",
+        "Adequacy"
+      ]
+    },
+    {
+      "cluster": "Communication & Documentation",
+      "terms": [
+        "Communication",
+        "Notification",
+        "Report",
+        "Document",
+        "Record",
+        "Evidence",
+        "Information",
+        "Data",
+        "Instruction",
+        "Procedure",
+        "Guidance",
+        "Policy",
+        "Regulation",
+        "Standard",
+        "Protocol"
+      ]
+    },
+    {
+      "cluster": "Location & Geography",
+      "terms": [
+        "Location",
+        "Region",
+        "Country",
+        "State",
+        "City",
+        "Address",
+        "Area",
+        "Site",
+        "Facility",
+        "Building",
+        "Zone",
+        "Territory",
+        "District",
+        "Coordinates",
+        "Proximity"
+      ]
+    }
+  ],
+  "ADA": [
+    {
+      "cluster": "Personal Information",
+      "terms": [
+        "Name",
+        "Full Name",
+        "First Name",
+        "Last Name",
+        "Middle Name",
+        "Nickname",
+        "Alias",
+        "Maiden Name",
+        "Former Name",
+        "Preferred Name",
+        "Legal Name",
+        "Given Name",
+        "Surname",
+        "Family Name"
+      ]
+    },
+    {
+      "cluster": "Contact Information",
+      "terms": [
+        "Email",
+        "Phone Number",
+        "Mobile Number",
+        "Address",
+        "Street Address",
+        "City",
+        "State",
+        "Zip Code",
+        "Country",
+        "Fax Number",
+        "Contact Person",
+        "Emergency Contact",
+        "Work Phone",
+        "Home Phone"
+      ]
+    },
+    {
+      "cluster": "Identification",
+      "terms": [
+        "ID",
+        "Identification Number",
+        "Social Security Number",
+        "Driver's License",
+        "Passport Number",
+        "National ID",
+        "Employee ID",
+        "Student ID",
+        "Account Number",
+        "Reference Number",
+        "Record Number",
+        "File Number",
+        "Case Number"
+      ]
+    },
+    {
+      "cluster": "Demographics",
+      "terms": [
+        "Age",
+        "Gender",
+        "Sex",
+        "Date of Birth",
+        "Ethnicity",
+        "Race",
+        "Nationality",
+        "Marital Status",
+        "Religion",
+        "Language",
+        "Education Level",
+        "Occupation",
+        "Income"
+      ]
+    },
+    {
+      "cluster": "Location Data",
+      "terms": [
+        "Latitude",
+        "Longitude",
+        "Geolocation",
+        "Location",
+        "Address",
+        "City",
+        "State",
+        "Country",
+        "Postal Code",
+        "Region",
+        "Area Code",
+        "Timezone",
+        "Coordinates"
+      ]
+    },
+    {
+      "cluster": "Dates and Times",
+      "terms": [
+        "Date",
+        "Time",
+        "Timestamp",
+        "Start Date",
+        "End Date",
+        "Created Date",
+        "Modified Date",
+        "Event Date",
+        "Appointment Time",
+        "Duration",
+        "Year",
+        "Month",
+        "Day"
+      ]
+    },
+    {
+      "cluster": "Numerical Values",
+      "terms": [
+        "Amount",
+        "Quantity",
+        "Price",
+        "Cost",
+        "Value",
+        "Score",
+        "Rating",
+        "Percentage",
+        "Count",
+        "Number",
+        "Size",
+        "Weight",
+        "Volume",
+        "Distance"
+      ]
+    },
+    {
+      "cluster": "Categories and Types",
+      "terms": [
+        "Category",
+        "Type",
+        "Classification",
+        "Group",
+        "Subgroup",
+        "Status",
+        "Label",
+        "Tag",
+        "Code",
+        "Description",
+        "Product Type",
+        "Service Type",
+        "Event Type",
+        "Issue Type"
+      ]
+    },
+    {
+      "cluster": "Text and Descriptions",
+      "terms": [
+        "Description",
+        "Notes",
+        "Comments",
+        "Review",
+        "Feedback",
+        "Summary",
+        "Title",
+        "Content",
+        "Message",
+        "Explanation",
+        "Instructions",
+        "Details",
+        "Text",
+        "Narrative"
+      ]
+    },
+    {
+      "cluster": "Boolean Flags",
+      "terms": [
+        "Active",
+        "Enabled",
+        "Valid",
+        "True",
+        "False",
+        "Yes",
+        "No",
+        "Completed",
+        "Approved",
+        "Flag",
+        "Selected",
+        "Default",
+        "Is_Active",
+        "Has_Data"
+      ]
+    }
+  ],
+  "ADBE": [
+    {
+      "cluster": "Company Performance",
+      "terms": [
+        "Revenue",
+        "Profit",
+        "Net Income",
+        "Earnings per Share (EPS)",
+        "Gross Margin",
+        "Operating Margin",
+        "Stock Price",
+        "Market Capitalization",
+        "Return on Equity (ROE)",
+        "Return on Assets (ROA)",
+        "Debt-to-Equity Ratio",
+        "Price-to-Earnings Ratio (P/E)",
+        "Price-to-Sales Ratio (P/S)",
+        "Cash Flow",
+        "Free Cash Flow"
+      ]
+    },
+    {
+      "cluster": "Software Products",
+      "terms": [
+        "Photoshop",
+        "Illustrator",
+        "InDesign",
+        "Premiere Pro",
+        "After Effects",
+        "Acrobat",
+        "Adobe XD",
+        "Lightroom",
+        "Dreamweaver",
+        "Animate",
+        "Substance 3D",
+        "Adobe Fresco",
+        "Adobe Dimension",
+        "Adobe Audition",
+        "Character Animator"
+      ]
+    },
+    {
+      "cluster": "Creative Cloud",
+      "terms": [
+        "Subscription",
+        "Plans",
+        "Pricing",
+        "Creative Suite",
+        "Cloud Storage",
+        "Adobe Fonts",
+        "Adobe Stock",
+        "Behance",
+        "Adobe Portfolio",
+        "Adobe Express",
+        "Collaboration",
+        "Version Control",
+        "Asset Management",
+        "Libraries",
+        "Adobe Sensei"
+      ]
+    },
+    {
+      "cluster": "Digital Marketing",
+      "terms": [
+        "Adobe Experience Cloud",
+        "Adobe Analytics",
+        "Adobe Campaign",
+        "Adobe Target",
+        "Adobe Audience Manager",
+        "Adobe Marketo Engage",
+        "Customer Experience Management (CXM)",
+        "Personalization",
+        "Marketing Automation",
+        "Data Management Platform (DMP)",
+        "Real-Time CDP",
+        "Digital Advertising",
+        "Content Management System (CMS)",
+        "Search Engine Optimization (SEO)",
+        "Social Media Marketing"
+      ]
+    },
+    {
+      "cluster": "Document Management",
+      "terms": [
+        "PDF",
+        "Acrobat Reader",
+        "Acrobat Pro",
+        "E-Signatures",
+        "Document Cloud",
+        "PDF Editor",
+        "Document Security",
+        "Optical Character Recognition (OCR)",
+        "PDF Conversion",
+        "Document Collaboration",
+        "Forms",
+        "Scanned Documents",
+        "Accessibility",
+        "Digital Signatures",
+        "Workflow Automation"
+      ]
+    },
+    {
+      "cluster": "Competition",
+      "terms": [
+        "Microsoft",
+        "Apple",
+        "Canva",
+        "Autodesk",
+        "Corel",
+        "Google",
+        "Affinity",
+        "Sketch",
+        "Quark",
+        "Blackmagic Design",
+        "Figma",
+        "Box",
+        "Dropbox",
+        "Salesforce",
+        "Oracle"
+      ]
+    },
+    {
+      "cluster": "Financial Metrics",
+      "terms": [
+        "Cost of Revenue",
+        "Research and Development (R&D)",
+        "Sales and Marketing",
+        "General and Administrative (G&A)",
+        "Operating Expenses",
+        "Interest Expense",
+        "Tax Expense",
+        "Depreciation and Amortization",
+        "EBITDA",
+        "Capital Expenditures (CAPEX)",
+        "Working Capital",
+        "Shareholder Equity",
+        "Liabilities",
+        "Assets"
+      ]
+    },
+    {
+      "cluster": "Industry Trends",
+      "terms": [
+        "Digital Transformation",
+        "Cloud Computing",
+        "Artificial Intelligence (AI)",
+        "Machine Learning (ML)",
+        "Content Creation",
+        "Graphic Design",
+        "Video Editing",
+        "Web Design",
+        "User Experience (UX)",
+        "Mobile Apps",
+        "Remote Work",
+        "E-commerce",
+        "Data Privacy",
+        "Cybersecurity"
+      ]
+    },
+    {
+      "cluster": "Customer Segments",
+      "terms": [
+        "Designers",
+        "Photographers",
+        "Videographers",
+        "Illustrators",
+        "Marketers",
+        "Businesses",
+        "Students",
+        "Educators",
+        "Agencies",
+        "Enterprises",
+        "Small Businesses",
+        "Freelancers",
+        "Government",
+        "Non-Profits",
+        "Content Creators"
+      ]
+    },
+    {
+      "cluster": "Corporate Governance",
+      "terms": [
+        "Board of Directors",
+        "Executive Team",
+        "Shareholders",
+        "Investor Relations",
+        "Corporate Social Responsibility (CSR)",
+        "Environmental, Social, and Governance (ESG)",
+        "Ethics",
+        "Compliance",
+        "Legal",
+        "Audit",
+        "Risk Management",
+        "Sustainability",
+        "Diversity and Inclusion",
+        "Human Resources",
+        "Intellectual Property"
+      ]
+    }
+  ],
+  "ADDRESS": [
+    {
+      "cluster": "Location Identifiers",
+      "terms": [
+        "Street Number",
+        "Street Name",
+        "Apartment Number",
+        "Building Name",
+        "Floor",
+        "Suite",
+        "PO Box",
+        "Rural Route",
+        "Delivery Address",
+        "Location Code",
+        "Latitude",
+        "Longitude",
+        "Geolocation",
+        "GPS Coordinates",
+        "Intersection"
+      ]
+    },
+    {
+      "cluster": "Geographic Regions",
+      "terms": [
+        "City",
+        "Town",
+        "Village",
+        "County",
+        "State",
+        "Province",
+        "Region",
+        "District",
+        "Territory",
+        "Country",
+        "Nation",
+        "Continent",
+        "Municipality",
+        "Prefecture",
+        "Parish"
+      ]
+    },
+    {
+      "cluster": "Postal Information",
+      "terms": [
+        "Zip Code",
+        "Postal Code",
+        "Area Code",
+        "Delivery Zone",
+        "Routing Number",
+        "Postal District",
+        "Zip+4",
+        "Mail Code",
+        "Post Office",
+        "Postal Box",
+        "Carrier Route",
+        "Barcode",
+        "Forward Sortation Area",
+        "Local Delivery Unit",
+        "Address Validation"
+      ]
+    },
+    {
+      "cluster": "Address Types",
+      "terms": [
+        "Residential Address",
+        "Business Address",
+        "Shipping Address",
+        "Billing Address",
+        "Mailing Address",
+        "Temporary Address",
+        "Permanent Address",
+        "Forwarding Address",
+        "Previous Address",
+        "Emergency Address",
+        "Rental Address",
+        "Home Address",
+        "Work Address",
+        "Vacation Address",
+        "Military Address"
+      ]
+    },
+    {
+      "cluster": "Address Attributes",
+      "terms": [
+        "Address Line 1",
+        "Address Line 2",
+        "Address Line 3",
+        "Formatted Address",
+        "Canonical Address",
+        "Normalized Address",
+        "Valid Address",
+        "Incomplete Address",
+        "Ambiguous Address",
+        "Primary Address",
+        "Secondary Address",
+        "Address Format",
+        "Address Verification",
+        "Address Correction",
+        "Address Standardization"
+      ]
+    },
+    {
+      "cluster": "Demographic Information",
+      "terms": [
+        "Neighborhood",
+        "Community",
+        "District",
+        "Ward",
+        "Census Tract",
+        "Block Group",
+        "Urban Area",
+        "Rural Area",
+        "Metropolitan Area",
+        "Micropolitan Area",
+        "Housing Density",
+        "Population Density",
+        "Income Level",
+        "Education Level",
+        "Age Demographics"
+      ]
+    },
+    {
+      "cluster": "Mapping & Navigation",
+      "terms": [
+        "Map Coordinates",
+        "Driving Directions",
+        "Walking Directions",
+        "Public Transportation",
+        "Route Planning",
+        "Navigation System",
+        "Geocoding Service",
+        "Reverse Geocoding",
+        "Map Location",
+        "Landmark",
+        "Point of Interest",
+        "Proximity Search",
+        "Nearby Places",
+        "Estimated Travel Time",
+        "Distance"
+      ]
+    },
+    {
+      "cluster": "Property & Real Estate",
+      "terms": [
+        "Property Address",
+        "Deed",
+        "Title",
+        "Land Registry",
+        "Parcel Number",
+        "Assessor's Office",
+        "Property Value",
+        "Property Tax",
+        "Lot Size",
+        "Building Size",
+        "Zoning",
+        "HOA",
+        "Real Estate Agent",
+        "Mortgage",
+        "Appraisal"
+      ]
+    },
+    {
+      "cluster": "Government & Regulatory",
+      "terms": [
+        "Voting District",
+        "School District",
+        "Electoral College",
+        "Jurisdiction",
+        "Local Government",
+        "State Government",
+        "Federal Government",
+        "Constituency",
+        "Service Area",
+        "Utility Service",
+        "Emergency Services",
+        "Fire Station",
+        "Police Station",
+        "Hospital",
+        "Government Building"
+      ]
+    }
+  ],
+  "ADI": [
+    {
+      "cluster": "Personal Information",
+      "terms": [
+        "Name",
+        "Full Name",
+        "First Name",
+        "Last Name",
+        "Middle Name",
+        "Alias",
+        "Nickname",
+        "Preferred Name",
+        "Former Name",
+        "Maiden Name",
+        "Given Name",
+        "Surname",
+        "Family Name"
+      ]
+    },
+    {
+      "cluster": "Demographic Information",
+      "terms": [
+        "Age",
+        "Gender",
+        "Sex",
+        "Date of Birth",
+        "Place of Birth",
+        "Nationality",
+        "Ethnicity",
+        "Race",
+        "Marital Status",
+        "Religion",
+        "Language"
+      ]
+    },
+    {
+      "cluster": "Contact Information",
+      "terms": [
+        "Address",
+        "Street Address",
+        "City",
+        "State",
+        "Zip Code",
+        "Postal Code",
+        "Country",
+        "Phone Number",
+        "Mobile Number",
+        "Email Address",
+        "Website",
+        "Social Media",
+        "Fax Number"
+      ]
+    },
+    {
+      "cluster": "Identification Numbers",
+      "terms": [
+        "Social Security Number",
+        "Driver's License Number",
+        "Passport Number",
+        "National ID",
+        "Tax ID",
+        "Employee ID",
+        "Student ID",
+        "Membership ID",
+        "Account Number",
+        "Vehicle Identification Number",
+        "License Plate"
+      ]
+    },
+    {
+      "cluster": "Location Data",
+      "terms": [
+        "Latitude",
+        "Longitude",
+        "Geolocation",
+        "Coordinates",
+        "Location",
+        "Region",
+        "Territory",
+        "Address",
+        "IP Address",
+        "Timezone",
+        "Area Code",
+        "Postal Code",
+        "Country Code"
+      ]
+    },
+    {
+      "cluster": "Time and Date",
+      "terms": [
+        "Date",
+        "Time",
+        "Timestamp",
+        "Year",
+        "Month",
+        "Day",
+        "Hour",
+        "Minute",
+        "Second",
+        "Millisecond",
+        "Weekday",
+        "Weekend",
+        "Date/Time"
+      ]
+    },
+    {
+      "cluster": "Numerical Data",
+      "terms": [
+        "Quantity",
+        "Amount",
+        "Value",
+        "Count",
+        "Percentage",
+        "Ratio",
+        "Score",
+        "Rating",
+        "Price",
+        "Cost",
+        "Volume",
+        "Weight",
+        "Distance"
+      ]
+    },
+    {
+      "cluster": "Categorical Data",
+      "terms": [
+        "Category",
+        "Type",
+        "Status",
+        "Classification",
+        "Group",
+        "Label",
+        "Code",
+        "Indicator",
+        "Flag",
+        "Option",
+        "Choice",
+        "Selection",
+        "Level",
+        "Degree"
+      ]
+    },
+    {
+      "cluster": "Textual Data",
+      "terms": [
+        "Description",
+        "Comment",
+        "Note",
+        "Review",
+        "Summary",
+        "Explanation",
+        "Narrative",
+        "Statement",
+        "Content",
+        "Text",
+        "Message",
+        "Body",
+        "Title",
+        "Subject"
+      ]
+    },
+    {
+      "cluster": "Financial Data",
+      "terms": [
+        "Income",
+        "Expense",
+        "Revenue",
+        "Profit",
+        "Loss",
+        "Balance",
+        "Debt",
+        "Credit",
+        "Asset",
+        "Liability",
+        "Transaction",
+        "Payment",
+        "Salary",
+        "Wage"
+      ]
+    }
+  ],
+  "ADM": [
+    {
+      "cluster": "Administration & Management",
+      "terms": [
+        "Management",
+        "Administration",
+        "Supervision",
+        "Oversight",
+        "Coordination",
+        "Planning",
+        "Organization",
+        "Direction",
+        "Control",
+        "Regulation",
+        "Governance",
+        "Policy",
+        "Strategy",
+        "Implementation",
+        "Process"
+      ]
+    },
+    {
+      "cluster": "Admission & Enrollment",
+      "terms": [
+        "Admission",
+        "Enrollment",
+        "Registration",
+        "Application",
+        "Acceptance",
+        "Student",
+        "Candidate",
+        "Applicant",
+        "Matriculation",
+        "Recruitment",
+        "Selection",
+        "Eligibility",
+        "Requirements",
+        "Credentials",
+        "Entry"
+      ]
+    },
+    {
+      "cluster": "Administrative Divisions & Geographic Areas",
+      "terms": [
+        "Administrative Division",
+        "Region",
+        "Province",
+        "State",
+        "County",
+        "District",
+        "Municipality",
+        "Territory",
+        "Area",
+        "Zone",
+        "Sector",
+        "Ward",
+        "Constituency",
+        "Locality",
+        "Jurisdiction"
+      ]
+    },
+    {
+      "cluster": "Administrative Roles & Positions",
+      "terms": [
+        "Administrator",
+        "Manager",
+        "Director",
+        "Supervisor",
+        "Coordinator",
+        "Executive",
+        "Officer",
+        "Clerk",
+        "Secretary",
+        "Assistant",
+        "Specialist",
+        "Representative",
+        "Agent",
+        "Official",
+        "Staff"
+      ]
+    },
+    {
+      "cluster": "Administrative Systems & Processes",
+      "terms": [
+        "System",
+        "Process",
+        "Procedure",
+        "Workflow",
+        "Protocol",
+        "Guideline",
+        "Regulation",
+        "Standard",
+        "Form",
+        "Document",
+        "Record",
+        "Database",
+        "Software",
+        "Platform",
+        "Application"
+      ]
+    },
+    {
+      "cluster": "Administrative Tasks & Functions",
+      "terms": [
+        "Reporting",
+        "Filing",
+        "Record-keeping",
+        "Documentation",
+        "Communication",
+        "Scheduling",
+        "Budgeting",
+        "Accounting",
+        "Auditing",
+        "Compliance",
+        "Customer Service",
+        "Data Entry",
+        "Analysis",
+        "Training",
+        "Support"
+      ]
+    },
+    {
+      "cluster": "Data Management & Metadata",
+      "terms": [
+        "Metadata",
+        "Data Dictionary",
+        "Data Governance",
+        "Data Quality",
+        "Data Integration",
+        "Data Security",
+        "Data Privacy",
+        "Data Lineage",
+        "Data Catalog",
+        "Data Modeling",
+        "Data Architecture",
+        "Master Data Management",
+        "Reference Data",
+        "Data Standards",
+        "Data Provenance"
+      ]
+    },
+    {
+      "cluster": "Decision Making & Analysis",
+      "terms": [
+        "Decision",
+        "Analysis",
+        "Assessment",
+        "Evaluation",
+        "Judgment",
+        "Inference",
+        "Reasoning",
+        "Planning",
+        "Strategy",
+        "Policy",
+        "Risk",
+        "Opportunity",
+        "Benefit",
+        "Cost",
+        "Trade-off"
+      ]
+    },
+    {
+      "cluster": "Organizational Structure & Hierarchy",
+      "terms": [
+        "Hierarchy",
+        "Structure",
+        "Department",
+        "Division",
+        "Team",
+        "Unit",
+        "Group",
+        "Level",
+        "Rank",
+        "Position",
+        "Authority",
+        "Responsibility",
+        "Reporting",
+        "Subordinate",
+        "Superior"
+      ]
+    },
+    {
+      "cluster": "Access & Authorization",
+      "terms": [
+        "Access",
+        "Authorization",
+        "Permission",
+        "Role",
+        "Privilege",
+        "Security",
+        "Authentication",
+        "Identification",
+        "Credential",
+        "User",
+        "Group",
+        "Account",
+        "Control",
+        "Policy",
+        "Restriction"
+      ]
+    }
+  ],
+  "ADM1 PCODE": [
+    {
+      "cluster": "Administrative Division",
+      "terms": [
+        "Administrative Level 1",
+        "First-Level Division",
+        "Province",
+        "State",
+        "Region",
+        "Department",
+        "Prefecture",
+        "Canton",
+        "Oblast",
+        "Governorate",
+        "Land",
+        "Territory",
+        "District",
+        "County"
+      ]
+    },
+    {
+      "cluster": "Unique Identifier",
+      "terms": [
+        "Code",
+        "Identifier",
+        "Key",
+        "Unique ID",
+        "Primary Key",
+        "Foreign Key",
+        "ISO Code",
+        "FIPS Code",
+        "GeoID",
+        "HASC Code",
+        "GADM Code",
+        "Numeric Code",
+        "Alphanumeric Code",
+        "Internal Code",
+        "Standard Code"
+      ]
+    },
+    {
+      "cluster": "Geographic Location",
+      "terms": [
+        "Geography",
+        "Location",
+        "Place",
+        "Area",
+        "Spatial",
+        "Coordinates",
+        "Latitude",
+        "Longitude",
+        "GIS",
+        "Geospatial Data",
+        "Region",
+        "Subregion",
+        "Country",
+        "Continent"
+      ]
+    },
+    {
+      "cluster": "Political Boundaries",
+      "terms": [
+        "Political",
+        "Administrative Boundary",
+        "Border",
+        "Boundary",
+        "Jurisdiction",
+        "Government",
+        "Governance",
+        "Local Government",
+        "Political Division",
+        "Electoral District",
+        "Constituency",
+        "Ward",
+        "Precinct",
+        "Municipality",
+        "City"
+      ]
+    },
+    {
+      "cluster": "Standardization & Interoperability",
+      "terms": [
+        "Standard",
+        "Standardization",
+        "Interoperability",
+        "Data Exchange",
+        "Data Integration",
+        "Data Harmonization",
+        "Common Standard",
+        "International Standard",
+        "National Standard",
+        "Crosswalk",
+        "Mapping",
+        "Reference Data",
+        "Lookup Table",
+        "Metadata",
+        "Controlled Vocabulary"
+      ]
+    },
+    {
+      "cluster": "Population & Demographics",
+      "terms": [
+        "Population",
+        "Demographics",
+        "Census",
+        "Population Count",
+        "Population Density",
+        "Age",
+        "Gender",
+        "Ethnicity",
+        "Income",
+        "Education",
+        "Household",
+        "Urban",
+        "Rural",
+        "Migration",
+        "Fertility Rate"
+      ]
+    },
+    {
+      "cluster": "Economic Indicators",
+      "terms": [
+        "Economy",
+        "Economic",
+        "GDP",
+        "Gross Domestic Product",
+        "Income",
+        "Poverty",
+        "Employment",
+        "Unemployment",
+        "Industry",
+        "Agriculture",
+        "Services",
+        "Trade",
+        "Investment",
+        "Inflation",
+        "Consumer Price Index"
+      ]
+    },
+    {
+      "cluster": "Environmental Factors",
+      "terms": [
+        "Environment",
+        "Environmental",
+        "Climate",
+        "Weather",
+        "Temperature",
+        "Precipitation",
+        "Land Use",
+        "Water Resources",
+        "Air Quality",
+        "Pollution",
+        "Deforestation",
+        "Biodiversity",
+        "Natural Resources",
+        "Ecosystem",
+        "Sustainability"
+      ]
+    },
+    {
+      "cluster": "Infrastructure & Services",
+      "terms": [
+        "Infrastructure",
+        "Services",
+        "Transportation",
+        "Roads",
+        "Bridges",
+        "Railways",
+        "Airports",
+        "Ports",
+        "Utilities",
+        "Electricity",
+        "Water Supply",
+        "Sanitation",
+        "Healthcare",
+        "Education",
+        "Communication",
+        "Internet Access"
+      ]
+    },
+    {
+      "cluster": "Socio-Cultural Aspects",
+      "terms": [
+        "Society",
+        "Culture",
+        "Social",
+        "Cultural",
+        "Language",
+        "Religion",
+        "Education",
+        "Healthcare",
+        "Social Services",
+        "Community",
+        "Traditions",
+        "Customs",
+        "Arts",
+        "Recreation",
+        "Quality of Life"
+      ]
+    }
+  ]
+}

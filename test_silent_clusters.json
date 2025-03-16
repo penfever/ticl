@@ -1,0 +1,20 @@
+{
+  "test_column": [
+    {
+      "cluster": "Health",
+      "terms": [
+        "healthy",
+        "sick",
+        "wellness"
+      ]
+    },
+    {
+      "cluster": "Finance",
+      "terms": [
+        "money",
+        "budget",
+        "income"
+      ]
+    }
+  ]
+}

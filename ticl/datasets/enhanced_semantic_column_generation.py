@@ -108,13 +108,26 @@ class EnhancedColumnSemanticTokenizer(ColumnSemanticTokenizer):
         self.curation_strategy = kwargs.pop('curation_strategy', 'standard')
         self.prompt_template = PROMPT_TEMPLATES.get(self.curation_strategy, PROMPT_TEMPLATES['standard'])
         
+        # Dictionary to store raw structured data for special curation strategies
+        self.structured_data = {}
+        
+        # Path to save conceptual clusters data
+        self.clusters_save_path = kwargs.pop('clusters_save_path', None)
+        
         # Call the parent constructor with the remaining arguments
         super().__init__(*args, **kwargs)
     
-    def _parse_generated_list(self, text: str) -> List[str]:
+    def _parse_generated_list(self, text: str, column_name: str = None) -> List[str]:
         """
         Parse the generated text to extract a list of semantic values.
         Enhanced to handle different output formats based on curation strategy.
+        
+        Args:
+            text: The generated text containing a Python list
+            column_name: Optional name of the column being processed
+            
+        Returns:
+            List of extracted semantic values
         """
         if self.curation_strategy == 'conceptual_clusters':
             # Try to extract a list of dictionaries with clusters
@@ -131,6 +144,12 @@ class EnhancedColumnSemanticTokenizer(ColumnSemanticTokenizer):
                     # Parse the JSON-like structure
                     clusters = ast.literal_eval(list_str)
                     
+                    # Store the raw cluster data if column_name is provided
+                    if column_name is not None:
+                        self.structured_data[column_name] = clusters
+                        # Save the clusters to a file if path is provided
+                        self._save_clusters_data()
+                    
                     # Extract all terms from all clusters and flatten them
                     all_terms = []
                     for cluster in clusters:
@@ -142,9 +161,9 @@ class EnhancedColumnSemanticTokenizer(ColumnSemanticTokenizer):
                             all_terms.extend(cluster['terms'])
                     
                     return all_terms
-            except Exception as e:
-                print(f"Error parsing conceptual clusters: {e}")
-                # Fall back to standard parsing
+            except Exception:
+                # Fall back to standard parsing without verbose error message
+                pass
         
         elif self.curation_strategy == 'contrastive_pairs':
             # Try to extract a list of pairs
@@ -161,6 +180,12 @@ class EnhancedColumnSemanticTokenizer(ColumnSemanticTokenizer):
                     # Parse the list of pairs
                     pairs = ast.literal_eval(list_str)
                     
+                    # Store the raw pairs data if column_name is provided
+                    if column_name is not None:
+                        self.structured_data[column_name] = pairs
+                        # Save the structured data to a file if path is provided
+                        self._save_clusters_data()
+                    
                     # Flatten the pairs into a single list
                     all_terms = []
                     for pair in pairs:
@@ -168,12 +193,25 @@ class EnhancedColumnSemanticTokenizer(ColumnSemanticTokenizer):
                             all_terms.extend(pair)
                     
                     return all_terms
-            except Exception as e:
-                print(f"Error parsing contrastive pairs: {e}")
-                # Fall back to standard parsing
+            except Exception:
+                # Fall back to standard parsing without verbose error message
+                pass
         
         # For other strategies or if specialized parsing failed, use the standard parser
         return super()._parse_generated_list(text)
+    
+    def _save_clusters_data(self):
+        """
+        Save the structured data to a JSON file.
+        Only saves if clusters_save_path is set.
+        """
+        if self.clusters_save_path and self.structured_data:
+            # Create directory if it doesn't exist
+            os.makedirs(os.path.dirname(os.path.abspath(self.clusters_save_path)), exist_ok=True)
+            
+            # Save the structured data to a JSON file
+            with open(self.clusters_save_path, 'w') as f:
+                json.dump(self.structured_data, f, indent=2)
     
     def _generate_numeric_property_descriptors(self, column_name: str) -> List[str]:
         """
@@ -281,16 +319,15 @@ class EnhancedColumnSemanticTokenizer(ColumnSemanticTokenizer):
                     temperature=0.7,
                 )
                 
-            # Parse the generated list
-            semantic_values = self._parse_generated_list(generated_text)
+            # Parse the generated list, passing the column name for structured data storage
+            semantic_values = self._parse_generated_list(generated_text, column_name=column_name)
             
             # If we're using the numeric_properties strategy and didn't get good results, use the fallback
             if self.curation_strategy == 'numeric_properties' and (not semantic_values or len(semantic_values) < 20):
                 semantic_values = self._generate_numeric_property_descriptors(column_name)
                 
-        except Exception as e:
-            print(f"Error generating semantic values for {column_name}: {e}")
-            # If generation fails, create a fallback based on the column name
+        except Exception:
+            # If generation fails, create a fallback based on the column name without printing error
             if self.curation_strategy == 'numeric_properties':
                 semantic_values = self._generate_numeric_property_descriptors(column_name)
             else:
@@ -420,8 +457,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--max-concurrent",
         type=int,
-        default=5,
-        help="Maximum number of concurrent API requests (default: 5)"
+        default=10,
+        help="Maximum number of concurrent API requests (default: 10)"
     )
     
     parser.add_argument(
@@ -432,18 +469,28 @@ if __name__ == "__main__":
         help=f"Curation strategy to use for semantic values (default: standard)"
     )
     
+    parser.add_argument(
+        "--clusters-save-path",
+        type=str,
+        default=None,
+        help="Path to save structured data (clusters/pairs) in JSON format. Required for conceptual_clusters and contrastive_pairs strategies."
+    )
+    
     args = parser.parse_args()
     
     # Get some example column names from Schema.org
     column_names = SCHEMA_TYPES
     
-    print(f"Using provider: {args.provider}")
-    print(f"Model: {args.model if args.model else 'default for provider'}")
-    print(f"Curation strategy: {args.curation_strategy}")
+    # Warn about missing clusters save path for relevant strategies
+    if args.curation_strategy in ['conceptual_clusters', 'contrastive_pairs'] and not args.clusters_save_path:
+        # Set a default path in the current working directory if none provided for these strategies
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        args.clusters_save_path = os.path.join(os.getcwd(), f"{args.curation_strategy}_data_{timestamp}.json")
     
     # Set the log file based on curation strategy if not provided
     if args.log_file is None:
-        args.log_file = f"completed_columns_{args.curation_strategy}.json"
+        # Use current working directory for the log file
+        args.log_file = os.path.join(os.getcwd(), f"completed_columns_{args.curation_strategy}.json")
     
     # Initialize the enhanced tokenizer with curation strategy
     tokenizer = EnhancedColumnSemanticTokenizer(
@@ -452,7 +499,8 @@ if __name__ == "__main__":
         device=args.device,
         max_tokens=args.max_tokens,
         max_concurrent=args.max_concurrent,
-        curation_strategy=args.curation_strategy
+        curation_strategy=args.curation_strategy,
+        clusters_save_path=args.clusters_save_path
     )
     
     # Determine the output path
@@ -461,11 +509,10 @@ if __name__ == "__main__":
     else:
         now = datetime.now()
         date_time = now.strftime("%Y-%m-%d_%H-%M-%S")
-        output_path = f"tokenized_semantic_features_{args.provider}_{args.curation_strategy}_{date_time}.pt"
+        output_path = os.path.join(os.getcwd(), f"tokenized_semantic_features_{args.provider}_{args.curation_strategy}_{date_time}.pt")
     
     # Process columns - with parallel processing if requested and using Gemini
     if args.parallel and args.provider == "gemini":
-        print(f"Using parallel processing with max {args.max_concurrent} concurrent requests")
         # Need to create and run the event loop
         import asyncio
         
@@ -494,4 +541,3 @@ if __name__ == "__main__":
     
     # Save the final results
     torch.save(tokens_batch, output_path)
-    print(f"Final tokenized features saved to {output_path} using '{args.curation_strategy}' curation strategy")
