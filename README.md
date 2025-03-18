@@ -299,6 +299,92 @@ If you want to create a new run in MLFlow even when continuing:
 python -m ticl.fit_model mothernet -f /path/to/checkpoint.pt -c -R --use-mlflow
 ```
 
+### Model Validation During Training
+
+The framework supports automatic validation of models during training to track performance on real datasets. This helps in monitoring how well your model generalizes as training progresses.
+
+#### Validation Options
+
+- `--validate`: Enables or disables validation during training (default: True)
+- `--valid-data`: Selects which validation dataset to use:
+  - `old`: Standard validation datasets (default)
+  - `new`: New validation datasets with different characteristics
+  - `large`: Larger validation datasets for testing scaling
+- `--pca`: Whether to use PCA preprocessing on validation data (default: False)
+- `--save-every`: Controls how often (in epochs) models are saved and validation is performed (default: 10)
+
+#### Validation Frequency
+
+Validation is performed at two specific points during training:
+
+1. **Periodic Validation**: Runs every `save-every` epochs (default: 10)
+   - This means validation happens at epochs 10, 20, 30, etc. by default
+   - Adjust `--save-every` parameter to change this frequency
+   - Lower values (e.g., 5) give more frequent validation but slow down training
+   - Higher values (e.g., 25) reduce validation overhead for faster training
+
+2. **Final Validation**: Runs once at the end of training
+   - Always happens regardless of epoch count when training completes
+
+Validation is an epoch-level operation, not performed after individual batches or steps.
+
+#### How Validation Works
+
+When validation is enabled, the system automatically:
+
+1. Runs the model on a collection of benchmark datasets after each saving checkpoint
+2. Calculates appropriate metrics (AUC for classification, RMSE for regression)
+3. Reports these metrics to MLFlow and/or Weights & Biases
+4. Preserves checkpoints with better validation performance
+
+For classification, the model is tested on 30+ OpenML benchmark datasets via the `TabularClassificationBenchmark` suite. For regression models, a separate set of regression benchmarks is used.
+
+Example usage:
+```bash
+# Train with validation enabled (default)
+python -m ticl.fit_model mothernet
+
+# Train without validation
+python -m ticl.fit_model mothernet --validate False
+
+# Train with validation on new datasets
+python -m ticl.fit_model mothernet --valid-data new
+
+# Train with validation on large datasets
+python -m ticl.fit_model mothernet --valid-data large --pca True
+```
+
+Validation results are logged along with training metrics, allowing you to track model improvement over time and identify overfitting.
+
+#### Validation Results Storage
+
+Validation results are stored in several places, whether or not you use experiment tracking systems like MLflow or wandb:
+
+1. **Console Output**:
+   - Summary validation scores are printed to the console during training
+   - Per-dataset metrics are displayed for detailed analysis
+
+2. **Log Files**:
+   - Training logs including validation metrics are written to:
+     ```
+     {base_path}/log/{model_string}.log
+     ```
+   - This captures epoch-by-epoch progression with validation scores
+
+3. **Detailed Results Files**:
+   - Detailed per-dataset results are saved as numpy files at:
+     ```
+     {base_path}/results/tabular/{task_type}/results_{method}_{dataset}_{eval_position}_{n_samples}_{split_number}_{device}.npy
+     ```
+   - These contain predictions, ground truth values, and performance metrics
+
+4. **Smart Checkpoint Management**:
+   - Even without MLflow or wandb, validation results are used to decide which model checkpoints to keep
+   - Better-performing checkpoints are preserved while worse ones may be deleted to save disk space
+   - Checkpoints include validation metrics for later analysis
+
+When using either MLflow or wandb, these metrics are additionally logged to their respective platforms, but the local storage mechanism remains the same.
+
 ## Semantic Features and Text-Based Classification
 
 This repository includes support for semantic features and text-based classification, allowing models to learn meaningful associations between features and classes, as well as enabling classification based on text descriptions rather than numeric class indices.

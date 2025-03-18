@@ -48,9 +48,15 @@ def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
             # For float targets, bincount won't work directly
             memory_logger.debug("Targets are float type - likely regression task")
         else:
-            # For integer targets, we can use bincount
+            # For integer targets, we can use bincount if there are valid samples
             valid_targets = targets[targets>=0].long()  # Ensure long type for bincount
-            memory_logger.debug(f"Target classes distribution: {torch.bincount(valid_targets)}")
+            if valid_targets.numel() > 0:  # Only proceed if we have valid targets
+                try:
+                    memory_logger.debug(f"Target classes distribution: {torch.bincount(valid_targets)}")
+                except Exception as e:
+                    memory_logger.warning(f"Error during statistical analysis: {e}")
+            else:
+                memory_logger.debug("No valid targets found for distribution analysis")
     except Exception as e:
         memory_logger.debug(f"Could not compute target distribution: {e}")
     
@@ -268,7 +274,13 @@ def train_epoch(
                     # Only try to compute distribution if integer type
                     if not torch.is_floating_point(sem_targets):
                         valid_sem_targets = sem_targets[sem_targets>=0].long()
-                        memory_logger.debug(f"Semantic target distribution: {torch.bincount(valid_sem_targets)}")
+                        if valid_sem_targets.numel() > 0:  # Check if we have any valid targets
+                            try:
+                                memory_logger.debug(f"Semantic target distribution: {torch.bincount(valid_sem_targets)}")
+                            except Exception as e:
+                                memory_logger.warning(f"Error during statistical analysis: {e}")
+                        else:
+                            memory_logger.debug("No valid semantic targets found for distribution analysis")
                 except Exception as e:
                     memory_logger.debug(f"Could not calculate semantic target stats: {e}")
         

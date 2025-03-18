@@ -472,7 +472,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--clusters-save-path",
         type=str,
-        default=None,
+        default="conceptual_clusters_raw_text_data.json",
         help="Path to save structured data (clusters/pairs) in JSON format. Required for conceptual_clusters and contrastive_pairs strategies."
     )
     
