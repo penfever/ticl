@@ -729,7 +729,8 @@ def validate_model(model, config):
     from ticl.models.tabpfn import TabPFN
     from ticl.models.perceiver import TabPerceiver
     from ticl.models.biattention_tabpfn import BiAttentionTabPFN
-    from ticl.prediction import GAMformerClassifier, MotherNetClassifier, TabPFNClassifier, GAMformerRegressor 
+    from ticl.models.semantic_aware_model import SemanticAwareClassifier
+    from ticl.prediction import GAMformerClassifier, MotherNetClassifier, TabPFNClassifier, GAMformerRegressor, SemanticAwareClassifierWrapper 
     from ticl.evaluation.tabular_evaluation import eval_on_datasets
     from ticl.evaluation import tabular_metrics
     from uuid import uuid4
@@ -793,6 +794,52 @@ def validate_model(model, config):
                 N_ensemble_configurations=1
             )
             print(f"Using TabPFNClassifier for validation with 1 ensemble configuration")
+        elif isinstance(model, SemanticAwareClassifier):
+            # Get semantic feature probability from config
+            if 'transformer' in config:
+                semantic_feature_p = config['transformer'].get('semantic_feature_p', 0.0)
+            elif 'linear_attention' in config:
+                semantic_feature_p = config['linear_attention'].get('semantic_feature_p', 0.0)
+            else:
+                semantic_feature_p = 0.0
+                
+            # Detect semantic columns using semantic_feature_p parameter
+            # In real data, semantic columns would be identified by data type or metadata
+            # For validation with random data, we'll simulate this by considering a percentage
+            # of columns as semantic based on the semantic_feature_p setting
+            if semantic_feature_p > 0:
+                # For validation purposes, we'll mark approximately semantic_feature_p 
+                # percentage of columns as semantic
+                num_features = config['prior']['num_features']
+                num_semantic = max(1, int(num_features * semantic_feature_p))
+                semantic_column_indices = list(range(num_semantic))
+                
+                # Create simple semantic class descriptions for testing
+                semantic_class_descriptions = {
+                    f"Class {i}": f"This is the class {i} in the validation dataset" 
+                    for i in range(config['prior']['classification']['max_num_classes'])
+                }
+                
+                if config.get('debug_level', 'INFO') == 'DEBUG':
+                    print(f"Identified {num_semantic} columns as semantic for validation")
+                    print(f"Using synthetic class descriptions for validation")
+            else:
+                semantic_column_indices = []
+                semantic_class_descriptions = None
+            
+            # Create the classifier wrapper with ensemble support
+            clf = SemanticAwareClassifierWrapper(
+                device=config['device'],
+                model=model,
+                config=config,
+                batch_size=32,
+                verbose=(config.get('debug_level', 'INFO') == 'DEBUG'),
+                N_ensemble_configurations=3,  # Use smaller ensemble for validation
+                seed=42,
+                semantic_column_indices=semantic_column_indices,
+                semantic_class_descriptions=semantic_class_descriptions
+            )
+            print(f"Using SemanticAwareClassifierWrapper for validation with ensemble support")
         else:
             raise ValueError(f"Model {model.__class__.__name__} not supported for validation")
             
