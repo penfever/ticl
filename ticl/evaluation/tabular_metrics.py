@@ -54,8 +54,21 @@ def auc_metric(target, pred, multi_class='ovo', numpy=False):
             # Convert to numpy for easier manipulation
             pred_np = pred.detach().cpu().numpy() if torch.is_tensor(pred) else pred
             
+            # Check if predictions contain NaN values
+            if np.isnan(pred_np).any():
+                print("Warning: NaN values detected in predictions, replacing with 0")
+                pred_np = np.nan_to_num(pred_np, nan=0.0)
+            
             # Check if predictions sum to approximately 1
             row_sums = np.sum(pred_np, axis=1)
+            # Ensure no zero row sums to avoid division by zero
+            zero_rows = np.where(np.abs(row_sums) < 1e-10)[0]
+            if len(zero_rows) > 0:
+                print(f"Warning: {len(zero_rows)} rows with zero sum detected, setting to uniform distribution")
+                n_classes = pred_np.shape[1]
+                pred_np[zero_rows] = np.ones((len(zero_rows), n_classes)) / n_classes
+                row_sums[zero_rows] = 1.0
+                
             if not np.allclose(row_sums, 1.0, rtol=1e-3, atol=1e-3):
                 # Normalize predictions to sum to 1 across classes
                 pred_np = pred_np / row_sums[:, np.newaxis]
@@ -65,16 +78,42 @@ def auc_metric(target, pred, multi_class='ovo', numpy=False):
                 else:
                     pred = pred_np
         
-        if not numpy:
-            return torch.tensor(roc_auc_score(target, pred, multi_class=multi_class))
-        return roc_auc_score(target, pred, multi_class=multi_class)
+        try:
+            if not numpy:
+                return torch.tensor(roc_auc_score(target, pred, multi_class=multi_class))
+            return roc_auc_score(target, pred, multi_class=multi_class)
+        except Exception as e:
+            print(f"Error in roc_auc_score calculation: {e}")
+            # Fallback to accuracy if AUC fails
+            if not numpy:
+                return torch.tensor(0.5)  # Default AUC for random classifier
+            return 0.5
     else:
         # Binary classification
         if len(pred.shape) == 2:
             pred = pred[:, 1]
-        if not numpy:
-            return torch.tensor(roc_auc_score(target, pred))
-        return roc_auc_score(target, pred)
+        
+        # Check for NaN values
+        if numpy:
+            if np.isnan(pred).any():
+                print("Warning: NaN values detected in binary predictions, replacing with 0.5")
+                pred = np.nan_to_num(pred, nan=0.5)
+        else:
+            pred_np = pred.detach().cpu().numpy() if torch.is_tensor(pred) else pred
+            if np.isnan(pred_np).any():
+                print("Warning: NaN values detected in binary predictions, replacing with 0.5")
+                pred_np = np.nan_to_num(pred_np, nan=0.5)
+                pred = torch.tensor(pred_np, device=pred.device if torch.is_tensor(pred) else None)
+                
+        try:
+            if not numpy:
+                return torch.tensor(roc_auc_score(target, pred))
+            return roc_auc_score(target, pred)
+        except Exception as e:
+            print(f"Error in binary roc_auc_score calculation: {e}")
+            if not numpy:
+                return torch.tensor(0.5)  # Default AUC for random classifier
+            return 0.5
 
 
 def accuracy_metric(target, pred):

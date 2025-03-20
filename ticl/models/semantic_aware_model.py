@@ -1268,7 +1268,7 @@ def get_clip_text_embeddings(texts, clip_model, tokenizer, batch_size=5, device=
         return torch.zeros((0, clip_model.config.hidden_size), device=processing_device)
 
 
-def create_semantic_aware_model(base_model, num_semantic_classes=None, freeze_clip=True):
+def create_semantic_aware_model(base_model, num_semantic_classes=None, freeze_clip=True, semantic_column_metadata=None):
     """
     Factory function to create a CLIP-style semantic-aware model.
     
@@ -1281,6 +1281,8 @@ def create_semantic_aware_model(base_model, num_semantic_classes=None, freeze_cl
         automatically from available semantic data.
     freeze_clip : bool
         Whether to freeze the CLIP text encoder parameters (recommended)
+    semantic_column_metadata : dict, optional
+        Metadata about semantic columns in the dataset
         
     Returns:
     --------
@@ -1292,6 +1294,11 @@ def create_semantic_aware_model(base_model, num_semantic_classes=None, freeze_cl
         print(f"Creating semantic-aware model with {num_semantic_classes} semantic classes")
     
     model = SemanticAwareClassifier(base_model, num_semantic_classes)
+    
+    # If we have semantic column metadata, store it in the model
+    if semantic_column_metadata:
+        model.semantic_column_metadata = semantic_column_metadata
+        print(f"Added semantic column metadata for {len(semantic_column_metadata)} columns")
     
     # Set CLIP text encoder parameters to frozen/trainable based on flag
     if freeze_clip:

@@ -350,7 +350,21 @@ def get_model(
         from ticl.models.semantic_aware_model import create_semantic_aware_model
         num_semantic_classes = config.get('num_semantic_classes', 3)
         print(f"Creating semantic-aware model with {num_semantic_classes} semantic classes")
-        model = create_semantic_aware_model(model, num_semantic_classes)
+        
+        # Pass semantic column metadata if available
+        semantic_column_metadata = config.get('semantic_column_metadata', None)
+        freeze_clip = config.get('freeze_clip', True)
+        
+        if semantic_column_metadata:
+            print(f"Using semantic column metadata with {len(semantic_column_metadata)} features")
+            model = create_semantic_aware_model(
+                model, 
+                num_semantic_classes,
+                freeze_clip=freeze_clip,
+                semantic_column_metadata=semantic_column_metadata
+            )
+        else:
+            model = create_semantic_aware_model(model, num_semantic_classes, freeze_clip=freeze_clip)
 
     if model_state is not None:
         if not load_model_strict:

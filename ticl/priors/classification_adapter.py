@@ -9,6 +9,7 @@ from ticl.utils import (get_nan_value, normalize_by_used_features_f, normalize_d
 from ticl.distributions import sample_distributions, uniform_int_sampler_f, parse_distributions, safe_randint
 from ticl.priors.boundaries import *
 from ticl.datasets.semantic_prior_data_loader import get_random_semantic_data
+from ticl.datasets.labeled_numeric_prior_data_loader import labeled_numeric_data, get_random_value, column_metadata
 from .utils import CategoricalActivation, randomize_classes
 
 memory_logger = logging.getLogger("memory_profiling")
@@ -472,23 +473,44 @@ class ClassificationAdapter:
                     'semantic_class': pattern['semantic_class']
                 }
         
+        # MODIFICATION: Reserve 3 semantic features for statistical information
+        # The last 3 features in semantic_features will be reserved for statistical metadata
+        # These indices will always be consistent between training and inference
+        num_reserved_features = 3
+        
+        # Check if we have enough semantic features for our reserved features
+        if n_semantic_features >= num_reserved_features:
+            # Get the indices of the reserved features (the last 3 in the semantic_features list)
+            reserved_indices = semantic_features[-num_reserved_features:]
+            # Get the regular semantic features (all except the last 3)
+            regular_semantic_features = semantic_features[:-num_reserved_features]
+            n_regular_features = len(regular_semantic_features)
+            
+            memory_logger.debug(f"Reserved {num_reserved_features} semantic features at indices {reserved_indices}")
+        else:
+            # If we don't have enough features, don't reserve any
+            reserved_indices = []
+            regular_semantic_features = semantic_features
+            n_regular_features = n_semantic_features
+            memory_logger.debug(f"Not enough semantic features to reserve ({n_semantic_features} < {num_reserved_features})")
+        
         # Process each batch separately
         for b in range(batch_size):
             # 1. Determine which features will be causal for this batch
             # Increase causal feature ratios to use more semantic features effectively
             min_causal_ratio, max_causal_ratio = 0.4, 0.7  # Increased from 0.3-0.6
             num_causal = max(
-                int(n_semantic_features * min_causal_ratio),
-                min(int(n_semantic_features * max_causal_ratio), 1)
+                int(n_regular_features * min_causal_ratio),
+                min(int(n_regular_features * max_causal_ratio), 1)
             )
             
-            # Select random features to be causal (using tensor operations)
-            causal_indices = torch.randperm(n_semantic_features)[:num_causal].tolist()
-            causal_features = [semantic_features[i] for i in causal_indices]
+            # Select random features to be causal (using tensor operations) - only from regular features
+            causal_indices = torch.randperm(n_regular_features)[:num_causal].tolist()
+            causal_features = [regular_semantic_features[i] for i in causal_indices]
             causal_features_map[b] = causal_features
             
             # 2. Create boolean mask for causal features
-            is_causal = torch.zeros(n_semantic_features, dtype=torch.bool, device=device)
+            is_causal = torch.zeros(n_regular_features, dtype=torch.bool, device=device)
             is_causal[causal_indices] = True
             
             # 3. Get class assignments for this batch
@@ -525,7 +547,7 @@ class ClassificationAdapter:
                     token_count = len(class_tokens)
                 
                 # 6. Process features for this class (both causal and non-causal)
-                for feat_idx in range(n_semantic_features):
+                for feat_idx in range(n_regular_features):
                     # Determine if this feature is causal
                     feature_is_causal = is_causal[feat_idx]
                     
@@ -627,22 +649,24 @@ class ClassificationAdapter:
                         # Assign all tokens at once
                         semantic_feature_tensor[fill_positions, b, feat_idx] = token_values
         
-        # Transfer the semantic features to the original tensor
-        for i, feat in enumerate(semantic_features):
+        # Transfer the regular semantic features to the original tensor
+        for i, feat in enumerate(regular_semantic_features):
             x[:, :, feat] = semantic_feature_tensor[:, :, i]
         
+        # MODIFICATION: Fill the reserved features with statistical information tokens
         # Create info dictionary with semantic information
         semantic_info = {
             'class_token_patterns': self.class_token_patterns,
             'semantic_targets': semantic_targets,
-            'causal_features_map': causal_features_map
+            'causal_features_map': causal_features_map,
+            'reserved_feature_indices': reserved_indices  # Store reserved feature indices
         }
         
         # Only run detailed diagnostic checks if debug logging is enabled
         if memory_logger.isEnabledFor(logging.DEBUG):
             memory_logger.debug(f"=== _apply_semantic_prior ===")
             # Check for zeros and non-zeros in semantic features
-            semantic_feature_view = x[:, :, semantic_features]
+            semantic_feature_view = x[:, :, regular_semantic_features]
             non_zeros = (semantic_feature_view != 0).sum().item()
             total_elements = semantic_feature_view.numel()
             non_zero_percentage = (non_zeros / total_elements) * 100
@@ -763,6 +787,32 @@ class ClassificationAdapter:
             total = semantic_region.numel()
             fill_percentage = (non_zeros / total) * 100
             memory_logger.debug(f"Semantic features filled: {non_zeros}/{total} elements ({fill_percentage:.1f}% non-zero)")
+            
+            # Generate synthetic column names for tracking during training
+            # Sample from labeled_numeric_prior_data_loader
+            synthetic_column_names = []
+            available_columns = list(labeled_numeric_data.keys())
+            
+            # First, use the reserved feature names (always consistent)
+            if len(semantic_features) >= 3:
+                synthetic_column_names.extend([
+                    "feature_statistics",
+                    "class_statistics", 
+                    "table_metadata"
+                ])
+                # Start with indices after the reserved features
+                start_idx = 3
+            else:
+                start_idx = 0
+            
+            # Then add random numeric column names for the remaining features
+            for i in range(start_idx, len(semantic_features)):
+                # Sample a random column name
+                col_name = random.choice(available_columns)
+                synthetic_column_names.append(col_name)
+            
+            # Add the synthetic column names to the info dictionary
+            info['semantic_column_names'] = synthetic_column_names
             
             # Enhance class token patterns with statistical terms if available
             if 'statistical_class_terms' in info:
@@ -912,6 +962,248 @@ class ClassificationAdapter:
                 # Add statistical information to info dictionary
                 info['feature_stats'] = feature_stats
                 info['statistical_class_terms'] = statistical_class_terms
+                
+                # Populate reserved semantic features with statistical information if they exist
+                if 'reserved_feature_indices' in info and info['reserved_feature_indices']:
+                    try:
+                        # Get the reserved feature indices
+                        reserved_indices = info['reserved_feature_indices']
+                        
+                        # Get CLIP tokenizer for tokenizing statistical information
+                        from transformers import CLIPTokenizerFast
+                        tokenizer = CLIPTokenizerFast.from_pretrained("openai/clip-vit-base-patch32")
+                        
+                        # Populate each reserved feature with different statistical information
+                        # Feature 1: Row-wise semanticized numeric values for the first feature
+                        if len(reserved_indices) >= 1:
+                            # Get the first reserved feature index
+                            feature_idx = reserved_indices[0]
+                            
+                            # We need to set values that represent actual numeric data in each row
+                            # Find numerical features to semanticize
+                            numeric_features = []
+                            numeric_feature_stats = {}
+                            
+                            # Identify numeric features and gather their statistics
+                            for batch_idx, batch_stats in feature_stats.items():
+                                for feat_idx, stats in batch_stats.items():
+                                    if stats.get('type') == 'numerical':
+                                        if feat_idx not in numeric_features:
+                                            numeric_features.append(feat_idx)
+                                            numeric_feature_stats[feat_idx] = stats
+                            
+                            # Ensure we found some numeric features
+                            if numeric_features:
+                                # Sort to ensure consistent ordering
+                                numeric_features.sort()
+                                memory_logger.debug(f"Found {len(numeric_features)} numeric features to semanticize")
+                                
+                                # Select the first numeric feature to semanticize (if available)
+                                first_numeric_feat = numeric_features[0]
+                                stats = numeric_feature_stats.get(first_numeric_feat, {})
+                                
+                                # Get min/max/mean for normalization
+                                feat_min = stats.get('min', 0)
+                                feat_max = stats.get('max', 1)
+                                feat_mean = stats.get('mean', (feat_min + feat_max) / 2)
+                                
+                                # Define thresholds for low/medium/high categorization
+                                # If we have quantile information, use that instead of evenly spaced thresholds
+                                if 'quantiles' in stats:
+                                    quant_25 = stats['quantiles'].get('25%', feat_min + (feat_max - feat_min) * 0.25)
+                                    quant_75 = stats['quantiles'].get('75%', feat_min + (feat_max - feat_min) * 0.75)
+                                else:
+                                    # Define even thresholds if no quantiles available
+                                    range_val = feat_max - feat_min
+                                    quant_25 = feat_min + range_val * 0.25
+                                    quant_75 = feat_min + range_val * 0.75
+                                
+                                # Process each row for each batch
+                                for b in range(batch_size):
+                                    # For each sample/row in this batch
+                                    for s in range(sample_size):
+                                        # Get the actual value for this feature in this row
+                                        if first_numeric_feat < x.shape[2]:
+                                            value = x[s, b, first_numeric_feat].item()
+                                            
+                                            # Determine if the value is low, medium, or high
+                                            token_value = 0  # Default token
+                                            if value <= quant_25:
+                                                # Low value
+                                                token_value = 10  # Arbitrary token for "low"
+                                                token_text = "low"
+                                            elif value <= quant_75:
+                                                # Medium value
+                                                token_value = 20  # Arbitrary token for "medium"
+                                                token_text = "medium"
+                                            else:
+                                                # High value
+                                                token_value = 30  # Arbitrary token for "high"
+                                                token_text = "high"
+                                            
+                                            # Set the token value for this row
+                                            x[s, b, feature_idx] = token_value
+                                        
+                                memory_logger.debug(f"First reserved feature filled with semanticized values for feature {first_numeric_feat}")
+                            else:
+                                # No numeric features found, use a placeholder
+                                memory_logger.debug("No numeric features found for semanticization, using placeholder")
+                                placeholder_text = "No numeric features to semanticize"
+                                tokens = tokenizer(
+                                    placeholder_text, 
+                                    return_tensors="pt",
+                                    padding="max_length",
+                                    max_length=77,
+                                    truncation=True
+                                ).input_ids[0].to(device)
+                                
+                                # Use a placeholder value for all rows
+                                x[:, :, feature_idx] = tokens[0].to(x.dtype)
+                        
+                        # Feature 2: Row-wise semanticized numeric values for the second feature
+                        if len(reserved_indices) >= 2:
+                            # Get the second reserved feature index
+                            feature_idx = reserved_indices[1]
+                            
+                            # Find numerical features to semanticize (same as for first feature)
+                            numeric_features = []
+                            numeric_feature_stats = {}
+                            
+                            # Identify numeric features and gather their statistics
+                            for batch_idx, batch_stats in feature_stats.items():
+                                for feat_idx, stats in batch_stats.items():
+                                    if stats.get('type') == 'numerical':
+                                        if feat_idx not in numeric_features:
+                                            numeric_features.append(feat_idx)
+                                            numeric_feature_stats[feat_idx] = stats
+                            
+                            # Ensure we found at least two numeric features
+                            if len(numeric_features) >= 2:
+                                # Sort to ensure consistent ordering
+                                numeric_features.sort()
+                                
+                                # Select the second numeric feature to semanticize
+                                second_numeric_feat = numeric_features[1]
+                                stats = numeric_feature_stats.get(second_numeric_feat, {})
+                                
+                                # Get min/max/mean for normalization
+                                feat_min = stats.get('min', 0)
+                                feat_max = stats.get('max', 1)
+                                feat_mean = stats.get('mean', (feat_min + feat_max) / 2)
+                                
+                                # Define thresholds for low/medium/high categorization
+                                if 'quantiles' in stats:
+                                    quant_25 = stats['quantiles'].get('25%', feat_min + (feat_max - feat_min) * 0.25)
+                                    quant_75 = stats['quantiles'].get('75%', feat_min + (feat_max - feat_min) * 0.75)
+                                else:
+                                    # Define even thresholds if no quantiles available
+                                    range_val = feat_max - feat_min
+                                    quant_25 = feat_min + range_val * 0.25
+                                    quant_75 = feat_min + range_val * 0.75
+                                
+                                # Process each row for each batch
+                                for b in range(batch_size):
+                                    # For each sample/row in this batch
+                                    for s in range(sample_size):
+                                        # Get the actual value for this feature in this row
+                                        if second_numeric_feat < x.shape[2]:
+                                            value = x[s, b, second_numeric_feat].item()
+                                            
+                                            # Determine if the value is low, medium, or high
+                                            token_value = 0  # Default token
+                                            if value <= quant_25:
+                                                # Low value
+                                                token_value = 40  # Different token than feature 1
+                                                token_text = "low"
+                                            elif value <= quant_75:
+                                                # Medium value
+                                                token_value = 50  # Different token than feature 1
+                                                token_text = "medium"
+                                            else:
+                                                # High value
+                                                token_value = 60  # Different token than feature 1
+                                                token_text = "high"
+                                            
+                                            # Set the token value for this row
+                                            x[s, b, feature_idx] = token_value
+                                        
+                                memory_logger.debug(f"Second reserved feature filled with semanticized values for feature {second_numeric_feat}")
+                            elif len(numeric_features) == 1:
+                                # Only have one numeric feature, use class information instead
+                                memory_logger.debug("Only one numeric feature found, using class info for second feature")
+                                
+                                # Use the class terms to make the feature row-dependent
+                                if statistical_class_terms:
+                                    for b in range(batch_size):
+                                        # Get batch class terms if available
+                                        batch_terms = statistical_class_terms.get(b, {})
+                                        
+                                        # For each sample/row in this batch
+                                        for s in range(sample_size):
+                                            # Get the class for this sample if possible
+                                            if s < y.shape[0] and b < y.shape[1]:
+                                                class_idx = int(y[s, b].item()) if not torch.isnan(y[s, b]) else 0
+                                                
+                                                # Check if we have terms for this class
+                                                if class_idx in batch_terms:
+                                                    # Use different token values for different classes
+                                                    token_value = 70 + class_idx  # Based on class index
+                                                else:
+                                                    token_value = 70  # Default class token
+                                                
+                                                # Set the token value for this row
+                                                x[s, b, feature_idx] = token_value
+                                else:
+                                    # No class terms available, use a placeholder
+                                    x[:, :, feature_idx] = 70  # A default token value
+                                    
+                                memory_logger.debug("Second reserved feature filled with class-based values")
+                            else:
+                                # No numeric features found, use a placeholder
+                                memory_logger.debug("No second numeric feature found, using placeholder")
+                                placeholder_text = "No second numeric feature to semanticize"
+                                tokens = tokenizer(
+                                    placeholder_text, 
+                                    return_tensors="pt",
+                                    padding="max_length",
+                                    max_length=77,
+                                    truncation=True
+                                ).input_ids[0].to(device)
+                                
+                                # Use a placeholder value for all rows
+                                x[:, :, feature_idx] = tokens[0].to(x.dtype)
+                        
+                        # Feature 3: Metadata about the table or problem domain (placeholder for now)
+                        if len(reserved_indices) >= 3:
+                            # For now, just add a placeholder for table metadata
+                            # This will be replaced with real metadata when available
+                            metadata_placeholder = "Table metadata placeholder - will be loaded from JSON in future"
+                            
+                            # Tokenize and convert to tensor
+                            tokens = tokenizer(
+                                metadata_placeholder,
+                                return_tensors="pt",
+                                padding="max_length",
+                                max_length=77,
+                                truncation=True
+                            ).input_ids[0].to(device)
+                            
+                            # Fill the third reserved feature with the placeholder
+                            feature_idx = reserved_indices[2]
+                            x[:, :, feature_idx] = tokens[0].to(x.dtype)  # Use first token as placeholder
+                            memory_logger.debug(f"Filled reserved feature {feature_idx} with metadata placeholder")
+                                
+                        # Add information about what's in the reserved features to the info dictionary
+                        info['reserved_features_content'] = {
+                            'feature_1': 'feature_statistics' if len(reserved_indices) >= 1 else None,
+                            'feature_2': 'class_statistical_terms' if len(reserved_indices) >= 2 else None,
+                            'feature_3': 'table_metadata' if len(reserved_indices) >= 3 else None
+                        }
+                            
+                    except Exception as e:
+                        memory_logger.warning(f"Error filling reserved semantic features: {e}")
+                        import traceback
+                        traceback.print_exc()
                 
             except Exception as e:
                 memory_logger.warning(f"Error during statistical analysis: {e}")

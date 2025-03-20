@@ -311,9 +311,12 @@ class EnhancedColumnSemanticTokenizer(ColumnSemanticTokenizer):
             with open(self.clusters_save_path, 'w') as f:
                 json.dump(existing_data, f, indent=2)
                 
-            # Clear the structured_data dictionary to prevent memory build-up
-            # We've already saved it to the file and merged with existing data
-            self.structured_data = {}
+            # Only clear the dictionary if we're in sequential mode
+            # In parallel mode, we need to keep the data for batch processing
+            if not hasattr(self, 'keep_structured_data') or not self.keep_structured_data:
+                # Clear the structured_data dictionary to prevent memory build-up
+                # We've already saved it to the file and merged with existing data
+                self.structured_data = {}
     
     def _generate_numeric_property_descriptors(self, column_name: str) -> List[str]:
         """
@@ -553,7 +556,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--parallel",
         action="store_true",
-        help="Use parallel processing for Gemini API requests"
+        default=True,
+        help="Use parallel processing for Gemini API requests (default: True)"
     )
     
     parser.add_argument(
@@ -618,11 +622,192 @@ if __name__ == "__main__":
         # Need to create and run the event loop
         import asyncio
         
+        # Create a wrapper around the parent class's process_columns_parallel
+        # This is needed because we need to modify that method for use with Enhanced tokenizer
+        async def enhanced_process_columns_parallel(tokenizer, column_names, **kwargs):
+            # Set flag to keep structured data between batch processing
+            tokenizer.keep_structured_data = True
+            """Modified version of process_columns_parallel for EnhancedColumnSemanticTokenizer"""
+            
+            batch_size = kwargs.get('batch_size', 10)
+            max_non_zero_tokens = kwargs.get('max_non_zero_tokens', None)
+            log_file = kwargs.get('log_file', 'completed_columns.json')
+            save_path = kwargs.get('save_path', None)
+            save_interval = kwargs.get('save_interval', 100)
+            
+            # We need to use the parent class's _get_expected_tensor_size method
+            max_tensor_size = tokenizer._get_expected_tensor_size(column_names[0], max_non_zero_tokens)
+            
+            # Load the completion log if it exists
+            log_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), log_file)
+            completed_columns = {}
+            
+            if os.path.exists(log_file_path):
+                try:
+                    with open(log_file_path, 'r') as f:
+                        completed_columns = json.load(f)
+                    print(f"Loaded completion log with {len(completed_columns)} entries")
+                except json.JSONDecodeError:
+                    print(f"Error parsing log file {log_file_path}, starting fresh")
+                    completed_columns = {}
+                    
+            # Process first column if needed with the enhanced method
+            sample_col = next((col for col in column_names if col not in completed_columns), column_names[0])
+            if sample_col not in completed_columns:
+                sample_tokens = tokenizer.process_column(sample_col, max_non_zero_tokens)
+                # Save this result in the completed columns
+                completed_columns[sample_col] = sample_tokens.tolist()
+                with open(log_file_path, 'w') as f:
+                    json.dump(completed_columns, f)
+            
+            # Filter out columns that have already been processed
+            columns_to_process = [col for col in column_names if col not in completed_columns]
+            print(f"Need to process {len(columns_to_process)} columns out of {len(column_names)} total")
+            
+            results = {}
+            # Add already processed columns to results
+            for col_name in column_names:
+                if col_name in completed_columns:
+                    tensor_data = torch.tensor(completed_columns[col_name])
+                    # Ensure the tensor has the right size
+                    if tensor_data.size(0) < max_tensor_size:
+                        padding = torch.zeros(max_tensor_size - tensor_data.size(0), dtype=tensor_data.dtype)
+                        tensor_data = torch.cat([tensor_data, padding])
+                    elif tensor_data.size(0) > max_tensor_size:
+                        tensor_data = tensor_data[:max_tensor_size]
+                    results[col_name] = tensor_data
+                    
+            # Process remaining columns in batches
+            for batch_start in range(0, len(columns_to_process), batch_size):
+                batch_end = min(batch_start + batch_size, len(columns_to_process))
+                batch_columns = columns_to_process[batch_start:batch_end]
+                
+                # Generate prompts for all columns in the batch using the enhanced prompt template
+                prompts = []
+                for col_name in batch_columns:
+                    col_name_clean = col_name.replace("_", " ").replace("-", " ")
+                    # Use the tokenizer's prompt template based on curation strategy
+                    prompt = tokenizer.prompt_template.format(column_name=col_name_clean)
+                    prompts.append(prompt)
+                
+                # Process the batch in parallel
+                print(f"Processing batch of {len(batch_columns)} columns...")
+                batch_responses = await tokenizer.text_client.generate_batch_async(
+                    prompts,
+                    temperature=0.7,
+                    max_tokens=1024
+                )
+                
+                # Process each response using enhanced tokenizer approach
+                for i, (col_name, response_text) in enumerate(zip(batch_columns, batch_responses)):
+                    try:
+                        if isinstance(response_text, str) and response_text.startswith("Error:"):
+                            print(f"Error processing column {col_name}: {response_text}")
+                            # Even with errors, try to store something in structured_data
+                            tokenizer.structured_data[col_name] = {"error": response_text}
+                            col_tokens = torch.zeros(max_tensor_size, dtype=torch.long)
+                        else:
+                            # Parse the generated list with the column name for structured data storage
+                            semantic_values = tokenizer._parse_generated_list(response_text, column_name=col_name)
+                            
+                            # Process the column name and semantic values as in process_column
+                            col_name_clean = col_name.replace("_", " ").replace("-", " ")
+                            column_name_tokens = tokenizer.clip_tokenizer(
+                                col_name_clean,
+                                return_tensors="pt",
+                                padding="max_length",
+                                max_length=tokenizer.max_tokens,
+                                truncation=True
+                            ).input_ids[0]
+                            
+                            column_name_tokens = truncate_tensor(column_name_tokens)
+                            
+                            if not isinstance(semantic_values, list):
+                                col_tokens = torch.cat([column_name_tokens, torch.zeros(tokenizer.max_tokens - len(column_name_tokens))])
+                            else:
+                                joined_values = ", ".join([str(value) for value in semantic_values])
+                                
+                                tokens = tokenizer.clip_tokenizer(
+                                    joined_values,
+                                    return_tensors="pt",
+                                    padding="max_length",
+                                    max_length=tokenizer.max_tokens,
+                                    truncation=True
+                                ).input_ids[0]
+                                
+                                tokens = truncate_tensor(tokens)
+                                
+                                if max_non_zero_tokens and max_non_zero_tokens < tokenizer.max_tokens:
+                                    non_zero_mask = tokens != 0
+                                    non_zero_count = torch.sum(non_zero_mask).item()
+                                    
+                                    if non_zero_count > max_non_zero_tokens:
+                                        non_zero_indices = torch.nonzero(tokens).squeeze()
+                                        keep_mask = torch.zeros_like(tokens, dtype=torch.bool)
+                                        keep_mask[non_zero_indices[:max_non_zero_tokens]] = True
+                                        tokens = tokens * keep_mask
+                                
+                                col_tokens = torch.cat([column_name_tokens, tokens])
+                                
+                            # Ensure the tensor has the right size
+                            if col_tokens.size(0) < max_tensor_size:
+                                padding = torch.zeros(max_tensor_size - col_tokens.size(0), dtype=col_tokens.dtype)
+                                col_tokens = torch.cat([col_tokens, padding])
+                            elif col_tokens.size(0) > max_tensor_size:
+                                col_tokens = col_tokens[:max_tensor_size]
+                            
+                            # Save in the completion log
+                            completed_columns[col_name] = col_tokens.tolist()
+                        
+                        results[col_name] = col_tokens
+                        
+                    except Exception as e:
+                        print(f"Error processing column {col_name}: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        col_tokens = torch.zeros(max_tensor_size, dtype=torch.long)
+                        results[col_name] = col_tokens
+                
+                # Update the log file after each batch
+                with open(log_file_path, 'w') as f:
+                    json.dump(completed_columns, f)
+                    
+                # Explicitly save the structured data for this batch to ensure we don't lose anything
+                # This calls _save_clusters_data with the current structured_data dictionary
+                if hasattr(tokenizer, 'clusters_save_path') and tokenizer.clusters_save_path and hasattr(tokenizer, 'structured_data'):
+                    tokenizer._save_clusters_data()
+                
+                # Save intermediate results if we've processed enough columns
+                total_processed = batch_end + len([c for c in column_names if c in completed_columns and c not in columns_to_process])
+                if save_path and total_processed % save_interval == 0:
+                    try:
+                        ordered_results = [results[col] for col in column_names if col in results]
+                        
+                        if ordered_results:
+                            intermediate_results = torch.stack(ordered_results)
+                            intermediate_save_path = f"{save_path}.partial_{total_processed}"
+                            torch.save(intermediate_results, intermediate_save_path)
+                            print(f"Saved intermediate progress ({total_processed}/{len(column_names)} columns) to {intermediate_save_path}")
+                    except Exception as e:
+                        print(f"Error saving intermediate results: {e}")
+            
+            # Build final results in the correct order
+            final_results = []
+            for col_name in column_names:
+                if col_name in results:
+                    final_results.append(results[col_name])
+                else:
+                    col_tokens = torch.zeros(max_tensor_size, dtype=torch.long)
+                    final_results.append(col_tokens)
+                    
+            return torch.stack(final_results)
+        
         if __name__ == "__main__":  # Protect against multiple process spawning
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             tokens_batch = loop.run_until_complete(
-                tokenizer.process_columns_parallel(
+                enhanced_process_columns_parallel(
+                    tokenizer,
                     column_names, 
                     max_non_zero_tokens=args.max_non_zero_tokens,
                     save_path=output_path,

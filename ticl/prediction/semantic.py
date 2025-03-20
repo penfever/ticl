@@ -6,8 +6,10 @@ from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.preprocessing import LabelEncoder
 from sklearn.utils.validation import check_is_fitted, check_X_y, check_array
 import pandas as pd
+from transformers import CLIPTokenizerFast
 
 from ticl.utils import log_gpu_memory
+from ticl.datasets.labeled_numeric_prior_data_loader import labeled_numeric_data, column_metadata
 
 
 class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
@@ -21,7 +23,12 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
                  N_ensemble_configurations=3,
                  seed=0,
                  semantic_column_indices=None,
-                 semantic_class_descriptions=None):
+                 semantic_class_descriptions=None,
+                 feature_stats=None,
+                 statistical_class_terms=None,
+                 reserved_feature_indices=None,
+                 table_metadata=None,
+                 column_names=None):
         """
         Initialize the classifier wrapper for semantic-aware models.
         
@@ -45,6 +52,16 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
             Indices of semantic columns in the input data
         semantic_class_descriptions : dict or list, optional
             Class descriptions for semantic matching
+        feature_stats : dict, optional
+            Statistical information about numeric features
+        statistical_class_terms : dict, optional
+            Statistical terms describing each class
+        reserved_feature_indices : list, optional
+            Indices of reserved semantic features (always the last 3 semantic features)
+        table_metadata : dict or str, optional
+            Metadata about the table or problem domain
+        column_names : list, optional
+            Actual column names for the input data (for semantic feature enhancment)
         """
         if model is None:
             raise ValueError("Model must be provided")
@@ -61,16 +78,39 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
         self.semantic_column_indices = semantic_column_indices
         self.semantic_class_descriptions = semantic_class_descriptions
         
+        # Add new statistical information parameters
+        self.feature_stats = feature_stats
+        self.statistical_class_terms = statistical_class_terms
+        self.reserved_feature_indices = reserved_feature_indices
+        self.table_metadata = table_metadata
+        self.column_names = column_names
+        
         # Get model's capabilities from config
         if "prior" in config:
             self.max_num_features = config['prior']['num_features']
+            # If we have semantic features, we need to account for them
+            if 'num_features_with_semantic' in config['prior']:
+                self.max_num_features_with_semantic = config['prior']['num_features_with_semantic']
+                if self.verbose:
+                    print(f"Using max features with semantic: {self.max_num_features_with_semantic}")
+            else:
+                self.max_num_features_with_semantic = self.max_num_features
+                
             if 'classification' in config['prior']:
                 self.max_num_classes = config['prior']['classification']['max_num_classes']
             else:
                 self.max_num_classes = 2
         else:
             self.max_num_features = config.get('num_features', 100)
+            self.max_num_features_with_semantic = config.get('num_features_with_semantic', 
+                                                           self.max_num_features)
             self.max_num_classes = config.get('max_num_classes', 2)
+            
+        # Check if model has semantic column metadata
+        if hasattr(model, 'semantic_column_metadata') and model.semantic_column_metadata:
+            if self.verbose:
+                print(f"Using semantic column metadata from model with {len(model.semantic_column_metadata)} columns")
+            self.semantic_column_metadata = model.semantic_column_metadata
             
         # Set model to eval mode during init
         self.model.eval()
@@ -547,6 +587,7 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
         import warnings
         from ticl.utils import normalize_data, remove_outliers, normalize_by_used_features_f
         from sklearn.preprocessing import PowerTransformer, QuantileTransformer, RobustScaler
+        import numpy as np
         
         # Use provided device or default to the instance device
         device = device or self.device
@@ -554,6 +595,17 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
         # Check batch dimension
         if eval_xs.shape[1] > 1:
             raise Exception("Transforms only allow one batch dim")
+        
+        # Add reserved feature indices to categorical features if they exist
+        if self.reserved_feature_indices:
+            # Make a copy of categorical_feats to avoid modifying the original
+            if categorical_feats:
+                categorical_feats = list(set(categorical_feats).union(set(self.reserved_feature_indices)))
+            else:
+                categorical_feats = self.reserved_feature_indices
+            
+            if self.verbose:
+                print(f"Added reserved feature indices {self.reserved_feature_indices} to categorical features")
             
         # Handle max feature count
         if eval_xs.shape[2] > max_features:
@@ -566,6 +618,10 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
                 # Fill remaining slots with random features
                 remaining_slots = max_features - len(semantic_indices)
                 if remaining_slots > 0 and len(remaining_indices) > 0:
+                    # Set random seed for reproducibility if specified
+                    if self.seed is not None:
+                        np.random.seed(self.seed)
+                    
                     # Choose from remaining indices
                     remaining_selected = sorted(np.random.choice(
                         list(remaining_indices), 
@@ -575,10 +631,30 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
                     # Combine selected indices
                     selected_indices = sorted(list(semantic_indices) + remaining_selected)
                 else:
-                    # Only have room for some semantic columns
-                    selected_indices = sorted(list(semantic_indices)[:max_features])
+                    # Only have room for some semantic columns - prioritize reserved features if they exist
+                    if self.reserved_feature_indices:
+                        # Ensure reserved features are included first
+                        priority_features = set(self.reserved_feature_indices)
+                        remaining_semantic = list(semantic_indices - priority_features)
+                        
+                        # Calculate how many remaining slots we have after including reserved features
+                        remaining_slots = max_features - len(priority_features)
+                        if remaining_slots > 0:
+                            # Use remaining slots for other semantic features
+                            selected_semantic = remaining_semantic[:remaining_slots]
+                            selected_indices = sorted(list(priority_features) + selected_semantic)
+                        else:
+                            # Only include reserved features
+                            selected_indices = sorted(list(priority_features)[:max_features])
+                    else:
+                        # No reserved features, just take the first max_features semantic columns
+                        selected_indices = sorted(list(semantic_indices)[:max_features])
             else:
                 # No semantic columns, just select random features
+                # Set random seed for reproducibility if specified
+                if self.seed is not None:
+                    np.random.seed(self.seed)
+                    
                 selected_indices = sorted(np.random.choice(eval_xs.shape[2], max_features, replace=False))
                 
             # Apply selection
@@ -586,6 +662,37 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
             
             if self.verbose:
                 print(f"Selected {len(selected_indices)} features for preprocessing")
+                
+            # Update categorical_feats indices to match the new tensor dimensions
+            if categorical_feats:
+                # Create mapping from old indices to new positions
+                index_map = {old_idx: new_idx for new_idx, old_idx in enumerate(selected_indices)}
+                
+                # Map the categorical feature indices to their new positions
+                categorical_feats = [index_map[feat] for feat in categorical_feats if feat in index_map]
+                
+                if self.verbose and hasattr(self, 'semantic_column_indices') and self.semantic_column_indices:
+                    # Check how many of the original semantic indices were preserved
+                    preserved = [i for i in self.semantic_column_indices if i in selected_indices]
+                    print(f"Preserved {len(preserved)}/{len(self.semantic_column_indices)} semantic columns")
+                
+                # If we have reserved features, make sure they're updated in the object
+                if self.reserved_feature_indices:
+                    self.reserved_feature_indices = [index_map[feat] for feat in self.reserved_feature_indices 
+                                                    if feat in index_map]
+                    
+                    if self.verbose:
+                        print(f"Updated reserved feature indices to {self.reserved_feature_indices}")
+            
+            # Check if we need to fill reserved features with statistical information
+            if self.reserved_feature_indices and (self.feature_stats or self.statistical_class_terms):
+                # We need to add statistical information to the reserved features
+                self._fill_reserved_features_with_stats(eval_xs, device)
+                
+            # Fill all available semantic features with numerical feature semanticizations
+            # If we have column names, we can use them to create better semanticizations
+            if self.semantic_column_indices and len(self.semantic_column_indices) > (len(self.reserved_feature_indices or [])):
+                self._fill_semantic_features_with_numeric_semanticization(eval_xs, device, categorical_feats)
         
         # Initialize preprocessing transformer based on type
         if preprocess_transform != 'none':
@@ -634,6 +741,24 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
                         new_categorical_feats.append(current_pos)
                     current_pos += 1
             categorical_feats = new_categorical_feats
+            
+            # Update reserved feature indices if they exist
+            if self.reserved_feature_indices:
+                # Create mapping from old indices to new positions after filtering
+                old_to_new = {}
+                new_pos = 0
+                for old_pos, keep in enumerate(include_mask):
+                    if keep:
+                        old_to_new[old_pos] = new_pos
+                        new_pos += 1
+                        
+                # Update reserved feature indices
+                self.reserved_feature_indices = [old_to_new.get(idx, -1) for idx in self.reserved_feature_indices]
+                # Filter out any that didn't make it through filtering
+                self.reserved_feature_indices = [idx for idx in self.reserved_feature_indices if idx >= 0]
+                
+                if self.verbose:
+                    print(f"Updated reserved feature indices after filtering: {self.reserved_feature_indices}")
         
         # Apply feature transformation
         warnings.simplefilter('error')
@@ -686,6 +811,407 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
             eval_xs = normalize_by_used_features_f(eval_xs, eval_xs.shape[-1], max_features)
             
         return eval_xs.to(device)
+        
+    def _fill_reserved_features_with_stats(self, x, device):
+        """
+        Fill reserved semantic features with statistical information at inference time.
+        
+        Parameters:
+        -----------
+        x : torch.Tensor
+            Input tensor with shape [samples, batch, features]
+        device : str or torch.device
+            Device to use for computation
+            
+        Returns:
+        --------
+        None (modifies x in-place)
+        """
+        if not self.reserved_feature_indices or (not self.feature_stats and not self.statistical_class_terms):
+            # Nothing to do
+            return
+            
+        try:
+            # Initialize tokenizer
+            tokenizer = CLIPTokenizerFast.from_pretrained("openai/clip-vit-base-patch32")
+            
+            # Feature 1: Row-wise semanticized representation of first numeric feature
+            if len(self.reserved_feature_indices) >= 1 and self.feature_stats:
+                feature_idx = self.reserved_feature_indices[0]
+                
+                # Find numerical features to semanticize
+                numeric_features = []
+                numeric_feature_stats = {}
+                
+                # Identify numeric features and gather their statistics
+                for batch_idx, batch_stats in self.feature_stats.items():
+                    for feat_idx, stats in batch_stats.items():
+                        if stats.get('type') == 'numerical':
+                            if feat_idx not in numeric_features:
+                                numeric_features.append(feat_idx)
+                                numeric_feature_stats[feat_idx] = stats
+                
+                # Ensure we found some numeric features
+                if numeric_features:
+                    # Sort to ensure consistent ordering
+                    numeric_features.sort()
+                    if self.verbose:
+                        print(f"Found {len(numeric_features)} numeric features to semanticize")
+                    
+                    # Select the first numeric feature to semanticize
+                    first_numeric_feat = numeric_features[0]
+                    stats = numeric_feature_stats.get(first_numeric_feat, {})
+                    
+                    # Get min/max/mean for normalization
+                    feat_min = stats.get('min', 0)
+                    feat_max = stats.get('max', 1)
+                    feat_mean = stats.get('mean', (feat_min + feat_max) / 2)
+                    
+                    # Define thresholds for low/medium/high categorization
+                    if 'quantiles' in stats:
+                        quant_25 = stats['quantiles'].get('25%', feat_min + (feat_max - feat_min) * 0.25)
+                        quant_75 = stats['quantiles'].get('75%', feat_min + (feat_max - feat_min) * 0.75)
+                    else:
+                        # Define even thresholds if no quantiles available
+                        range_val = feat_max - feat_min
+                        quant_25 = feat_min + range_val * 0.25
+                        quant_75 = feat_min + range_val * 0.75
+                    
+                    # Process each row in the input tensor
+                    for i in range(x.shape[0]):  # For each sample in batch
+                        for j in range(x.shape[1]):  # For each batch
+                            if first_numeric_feat < x.shape[2]:
+                                # Get the actual value for this feature in this row
+                                value = x[i, j, first_numeric_feat].item()
+                                
+                                # Determine if the value is low, medium, or high
+                                token_value = 0  # Default token
+                                if value <= quant_25:
+                                    # Low value
+                                    token_value = 10  # Arbitrary token for "low"
+                                elif value <= quant_75:
+                                    # Medium value
+                                    token_value = 20  # Arbitrary token for "medium"
+                                else:
+                                    # High value
+                                    token_value = 30  # Arbitrary token for "high"
+                                
+                                # Set the token value for this row
+                                x[i, j, feature_idx] = token_value
+                    
+                    if self.verbose:
+                        print(f"Filled reserved feature {feature_idx} with semanticized values for feature {first_numeric_feat}")
+                else:
+                    # No numeric features found, use a placeholder
+                    if self.verbose:
+                        print("No numeric features found for semanticization, using placeholder")
+                    placeholder_text = "No numeric features to semanticize"
+                    tokens = tokenizer(
+                        placeholder_text, 
+                        return_tensors="pt",
+                        padding="max_length",
+                        max_length=77,
+                        truncation=True
+                    ).input_ids[0].to(device)
+                    
+                    # Use a placeholder value for all rows
+                    x[:, :, feature_idx] = tokens[0].to(x.dtype)
+            
+            # Feature 2: Row-wise semanticized representation of second numeric feature
+            if len(self.reserved_feature_indices) >= 2 and self.feature_stats:
+                feature_idx = self.reserved_feature_indices[1]
+                
+                # Find numerical features to semanticize (reuse from feature 1)
+                numeric_features = []
+                numeric_feature_stats = {}
+                
+                # Identify numeric features and gather their statistics
+                for batch_idx, batch_stats in self.feature_stats.items():
+                    for feat_idx, stats in batch_stats.items():
+                        if stats.get('type') == 'numerical':
+                            if feat_idx not in numeric_features:
+                                numeric_features.append(feat_idx)
+                                numeric_feature_stats[feat_idx] = stats
+                
+                # Ensure we found at least two numeric features
+                if len(numeric_features) >= 2:
+                    # Sort to ensure consistent ordering
+                    numeric_features.sort()
+                    
+                    # Select the second numeric feature to semanticize
+                    second_numeric_feat = numeric_features[1]
+                    stats = numeric_feature_stats.get(second_numeric_feat, {})
+                    
+                    # Get min/max/mean for normalization
+                    feat_min = stats.get('min', 0)
+                    feat_max = stats.get('max', 1)
+                    feat_mean = stats.get('mean', (feat_min + feat_max) / 2)
+                    
+                    # Define thresholds for low/medium/high categorization
+                    if 'quantiles' in stats:
+                        quant_25 = stats['quantiles'].get('25%', feat_min + (feat_max - feat_min) * 0.25)
+                        quant_75 = stats['quantiles'].get('75%', feat_min + (feat_max - feat_min) * 0.75)
+                    else:
+                        # Define even thresholds if no quantiles available
+                        range_val = feat_max - feat_min
+                        quant_25 = feat_min + range_val * 0.25
+                        quant_75 = feat_min + range_val * 0.75
+                    
+                    # Process each row in the input tensor
+                    for i in range(x.shape[0]):  # For each sample in batch
+                        for j in range(x.shape[1]):  # For each batch
+                            if second_numeric_feat < x.shape[2]:
+                                # Get the actual value for this feature in this row
+                                value = x[i, j, second_numeric_feat].item()
+                                
+                                # Determine if the value is low, medium, or high
+                                token_value = 0  # Default token
+                                if value <= quant_25:
+                                    # Low value
+                                    token_value = 40  # Different token than feature 1
+                                elif value <= quant_75:
+                                    # Medium value
+                                    token_value = 50  # Different token than feature 1
+                                else:
+                                    # High value
+                                    token_value = 60  # Different token than feature 1
+                                
+                                # Set the token value for this row
+                                x[i, j, feature_idx] = token_value
+                    
+                    if self.verbose:
+                        print(f"Filled reserved feature {feature_idx} with semanticized values for feature {second_numeric_feat}")
+                elif len(numeric_features) == 1 and self.statistical_class_terms:
+                    # Only have one numeric feature, use class information if available
+                    if self.verbose:
+                        print("Only one numeric feature found, using class information for second feature")
+                    
+                    # Try to fill with class tokens based on statistical_class_terms
+                    have_class_info = False
+                    
+                    # Check if we have classes to use
+                    if hasattr(self, 'classes_'):
+                        # We only have test data, so we can't know the class yet
+                        # Just use a default token based on the number of classes
+                        for i in range(x.shape[0]):  # For each sample in batch
+                            for j in range(x.shape[1]):  # For each batch
+                                # Use a default token value - we don't know the class yet
+                                token_value = 70  # Base token for class info
+                                x[i, j, feature_idx] = token_value
+                        
+                        have_class_info = True
+                        if self.verbose:
+                            print(f"Filled reserved feature {feature_idx} with default class-based token")
+                    
+                    # If we don't have class info, use a placeholder
+                    if not have_class_info:
+                        if self.verbose:
+                            print("No class information available, using placeholder")
+                        placeholder_text = "No second feature or class info available"
+                        tokens = tokenizer(
+                            placeholder_text, 
+                            return_tensors="pt",
+                            padding="max_length",
+                            max_length=77,
+                            truncation=True
+                        ).input_ids[0].to(device)
+                        
+                        # Use a placeholder value for all rows
+                        x[:, :, feature_idx] = tokens[0].to(x.dtype)
+                else:
+                    # No second numeric feature or class info, use a placeholder
+                    if self.verbose:
+                        print("No second numeric feature found, using placeholder")
+                    placeholder_text = "No second numeric feature to semanticize"
+                    tokens = tokenizer(
+                        placeholder_text, 
+                        return_tensors="pt",
+                        padding="max_length",
+                        max_length=77,
+                        truncation=True
+                    ).input_ids[0].to(device)
+                    
+                    # Use a placeholder value for all rows
+                    x[:, :, feature_idx] = tokens[0].to(x.dtype)
+            
+            # Feature 3: Table or problem domain metadata
+            if len(self.reserved_feature_indices) >= 3:
+                feature_idx = self.reserved_feature_indices[2]
+                
+                # Use provided metadata if available, otherwise use placeholder
+                if self.table_metadata:
+                    if isinstance(self.table_metadata, dict):
+                        # Convert dictionary to text format
+                        metadata_text = []
+                        for key, value in self.table_metadata.items():
+                            metadata_text.append(f"{key}: {value}")
+                        metadata_str = ". ".join(metadata_text)
+                    else:
+                        # Assume it's already a string
+                        metadata_str = str(self.table_metadata)
+                else:
+                    # Use placeholder if no metadata is provided
+                    metadata_str = "Table metadata placeholder - no metadata provided at inference time"
+                
+                # Tokenize the metadata
+                tokens = tokenizer(
+                    metadata_str,
+                    return_tensors="pt",
+                    padding="max_length",
+                    max_length=77,
+                    truncation=True
+                ).input_ids[0].to(device)
+                
+                # Fill the third reserved feature with this information
+                x[:, :, feature_idx] = tokens[0].to(x.dtype)
+                if self.verbose:
+                    print(f"Filled reserved feature {feature_idx} with table metadata")
+                    
+            # Now fill any remaining semantic features (those that aren't reserved)
+            self._fill_semantic_features_with_numeric_semanticization(x, device)
+        
+        except Exception as e:
+            if self.verbose:
+                print(f"Error filling reserved features with statistical information: {e}")
+                import traceback
+                traceback.print_exc()
+    
+    def _fill_semantic_features_with_numeric_semanticization(self, x, device, categorical_feats=None):
+        """
+        Fill all non-reserved semantic features with semanticized numeric features.
+        
+        Parameters:
+        -----------
+        x : torch.Tensor
+            Input tensor with shape [samples, batch, features]
+        device : str or torch.device
+            Device to use for computation
+        categorical_feats : list, optional
+            List of categorical feature indices to exclude
+            
+        Returns:
+        --------
+        None (modifies x in-place)
+        """
+        if not self.semantic_column_indices:
+            return
+        
+        # Get indices of semantic features that aren't reserved
+        reserved_indices = set(self.reserved_feature_indices or [])
+        semantic_indices = [idx for idx in self.semantic_column_indices if idx not in reserved_indices]
+        
+        if not semantic_indices:
+            return
+            
+        if self.verbose:
+            print(f"Filling {len(semantic_indices)} semantic features with numeric semanticization")
+            
+        try:
+            # Initialize tokenizer
+            tokenizer = CLIPTokenizerFast.from_pretrained("openai/clip-vit-base-patch32")
+            
+            # Find numeric columns in the input data
+            if categorical_feats is None:
+                categorical_feats = []
+            
+            # Identify numeric features (those not in categorical_feats)
+            numeric_features = [i for i in range(x.shape[2]) if i not in categorical_feats and i not in semantic_indices]
+            
+            if not numeric_features:
+                if self.verbose:
+                    print("No numeric features found to semanticize")
+                return
+                
+            # For each semantic feature, find a corresponding numeric feature to semanticize
+            for i, sem_idx in enumerate(semantic_indices):
+                # Select a numeric feature to semanticize
+                if i < len(numeric_features):
+                    num_idx = numeric_features[i]
+                else:
+                    # If we have more semantic features than numeric features, cycle through them
+                    num_idx = numeric_features[i % len(numeric_features)]
+                
+                # Get column name if available, otherwise use a synthetic name
+                column_name = None
+                if self.column_names and num_idx < len(self.column_names):
+                    column_name = self.column_names[num_idx]
+                
+                # If we don't have a real column name, use one from labeled_numeric_prior_data_loader
+                if not column_name:
+                    column_name = random.choice(list(labeled_numeric_data.keys()))
+                
+                # Get metadata for this column type
+                col_metadata = column_metadata.get(column_name, {})
+                col_description = col_metadata.get('description', f"Numeric feature {num_idx}")
+                col_units = col_metadata.get('units', '')
+                
+                # Create a semantic tag for the feature
+                if col_units:
+                    semantic_tag = f"{column_name} ({col_description}, {col_units})"
+                else:
+                    semantic_tag = f"{column_name} ({col_description})"
+                
+                # Compute statistics for this numeric feature
+                col_values = x[:, :, num_idx].flatten()
+                valid_values = col_values[~torch.isnan(col_values)]
+                
+                if len(valid_values) > 0:
+                    # Compute quantiles for classification
+                    sorted_values, _ = torch.sort(valid_values)
+                    q25_idx = max(0, min(int(len(sorted_values) * 0.25), len(sorted_values) - 1))
+                    q75_idx = max(0, min(int(len(sorted_values) * 0.75), len(sorted_values) - 1))
+                    
+                    q25 = sorted_values[q25_idx].item()
+                    q75 = sorted_values[q75_idx].item()
+                    
+                    # Process each row for semanticization
+                    for i in range(x.shape[0]):
+                        for j in range(x.shape[1]):
+                            if num_idx < x.shape[2]:
+                                value = x[i, j, num_idx].item()
+                                
+                                # Skip NaN values
+                                if torch.isnan(torch.tensor(value)):
+                                    continue
+                                
+                                # Determine the category (low, medium, high)
+                                if value <= q25:
+                                    category = "low"
+                                    token_value = 10 + (i % 10)  # Vary slightly to prevent all rows having same token
+                                elif value <= q75:
+                                    category = "medium"
+                                    token_value = 20 + (i % 10)
+                                else:
+                                    category = "high" 
+                                    token_value = 30 + (i % 10)
+                                
+                                # Fill the semantic feature with the token value
+                                x[i, j, sem_idx] = token_value
+                    
+                    if self.verbose:
+                        print(f"Filled semantic feature {sem_idx} with semanticized values for {semantic_tag}")
+                else:
+                    # No valid values, use a placeholder
+                    if self.verbose:
+                        print(f"No valid values for feature {num_idx}, using placeholder")
+                    
+                    # Tokenize the column name as a placeholder
+                    tokens = tokenizer(
+                        semantic_tag,
+                        return_tensors="pt",
+                        padding="max_length",
+                        max_length=77,
+                        truncation=True
+                    ).input_ids[0].to(device)
+                    
+                    # Use a placeholder value for all rows
+                    x[:, :, sem_idx] = tokens[0].to(x.dtype)
+        
+        except Exception as e:
+            if self.verbose:
+                print(f"Error filling semantic features with numeric semanticization: {e}")
+                import traceback
+                traceback.print_exc()
     
     def predict(self, X, class_descriptions=None):
         """
