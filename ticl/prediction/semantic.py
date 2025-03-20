@@ -152,7 +152,7 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
             Returns self
         """
         # Validate inputs
-        X, y = check_X_y(X, y, force_all_finite=False)
+        X, y = check_X_y(X, y)
         
         # Store classes seen during fit
         self.classes_ = np.unique(y)
@@ -170,19 +170,12 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
         
         # If we have semantic column indices but no textual data, try to infer it from X
         if self.semantic_column_indices and X_semantic_text is None:
-            if self.verbose:
-                print(f"Semantic columns identified: {self.semantic_column_indices}")
-                print("No semantic text provided - will use numeric values for semantic columns")
             # In a real implementation, you might extract text from a pandas DataFrame here
             self.has_semantic_data = False
         elif X_semantic_text is not None:
-            if self.verbose:
-                print(f"Using provided semantic text data for {len(self.semantic_column_indices)} columns")
             self.X_semantic_text = X_semantic_text
             self.has_semantic_data = True
         else:
-            if self.verbose:
-                print("No semantic columns identified")
             self.has_semantic_data = False
             
         # Convert to torch tensors and store - ensuring proper dtype compatibility for MPS
@@ -220,9 +213,6 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
         
         # Track if the model has been fitted
         self.is_fitted_ = True
-        
-        if self.verbose:
-            print(f"Fitted model with {len(self.X_)} samples, {self.X_.shape[1]} features, {len(self.classes_)} classes")
             
         return self
     
@@ -288,30 +278,16 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
             Class probabilities for each sample
         """
         try:
-            # Set up error logging and debugging
-            if self.verbose:
-                print(f"Starting predict_proba with input shape: {X.shape}")
-                print(f"Model device: {self.device}, Data type: {type(X)}")
-                if torch.is_tensor(self.X_):
-                    print(f"Training data: shape={self.X_.shape}, device={self.X_.device}, dtype={self.X_.dtype}")
-                if torch.is_tensor(self.y_):
-                    print(f"Training labels: shape={self.y_.shape}, device={self.y_.device}, dtype={self.y_.dtype}")
                 
             # Check if fit had been called
             check_is_fitted(self, ['is_fitted_'])
             
             # Input validation
-            X = check_array(X, force_all_finite=False)
+            X = check_array(X)
             
             # Apply feature selection if needed
             if self.feature_indices is not None:
                 X = X[:, self.feature_indices]
-                if self.verbose:
-                    print(f"Applied feature selection: {X.shape[1]} features")
-            
-            # Convert to tensors using TabPFN approach
-            if self.verbose:
-                print(f"Input shape: {X.shape}, training shape: {self.X_.shape}")
                 
             # Concatenate training and test data
             if torch.is_tensor(X):
@@ -324,19 +300,12 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
                     X_test = torch.tensor(X, dtype=torch.float32, device=self.device)
                 else:
                     X_test = torch.tensor(X, device=self.device).float()
-            
-            # Ensure X_full is properly constructed on the correct device
-            if self.verbose:
-                print(f"Training data device: {self.X_.device}, test data device: {X_test.device}")
                 
             # Make sure both tensors are on the same device
             if self.X_.device != X_test.device:
                 X_test = X_test.to(self.X_.device)
                 
             X_full = torch.cat((self.X_, X_test), dim=0).float().unsqueeze(1)
-            
-            if self.verbose:
-                print(f"Combined data shape: {X_full.shape}, device: {X_full.device}")
                 
             # Create targets tensor - being careful with device
             if torch.is_tensor(self.y_):
@@ -371,13 +340,8 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
             except (KeyError, AttributeError):
                 pass
                 
-            if self.verbose:
-                print(f"Feature extension enabled: {extend_features}")
-                
             # Get maximum number of features the model supports
             max_features = self.max_num_features
-            if self.verbose:
-                print(f"Max features: {max_features}")
             
             # Prepare prediction configurations
             preprocess_transform = 'none' if getattr(self, 'no_preprocess_mode', False) else 'mix'
@@ -403,9 +367,6 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
             rng.shuffle(ensemble_configurations)
             ensemble_configurations = list(itertools.product(ensemble_configurations, preprocess_transform_configurations))
             ensemble_configurations = ensemble_configurations[0:self.N_ensemble_configurations]
-            
-            if self.verbose:
-                print(f"Using {len(ensemble_configurations)} ensemble configurations")
                 
             # Start ensemble prediction
             output = None
@@ -604,9 +565,6 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
             else:
                 categorical_feats = self.reserved_feature_indices
             
-            if self.verbose:
-                print(f"Added reserved feature indices {self.reserved_feature_indices} to categorical features")
-            
         # Handle max feature count
         if eval_xs.shape[2] > max_features:
             # Randomly select max_features columns, preserving semantic columns if possible
@@ -659,9 +617,6 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
                 
             # Apply selection
             eval_xs = eval_xs[:, :, selected_indices]
-            
-            if self.verbose:
-                print(f"Selected {len(selected_indices)} features for preprocessing")
                 
             # Update categorical_feats indices to match the new tensor dimensions
             if categorical_feats:
@@ -674,15 +629,11 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
                 if self.verbose and hasattr(self, 'semantic_column_indices') and self.semantic_column_indices:
                     # Check how many of the original semantic indices were preserved
                     preserved = [i for i in self.semantic_column_indices if i in selected_indices]
-                    print(f"Preserved {len(preserved)}/{len(self.semantic_column_indices)} semantic columns")
                 
                 # If we have reserved features, make sure they're updated in the object
                 if self.reserved_feature_indices:
                     self.reserved_feature_indices = [index_map[feat] for feat in self.reserved_feature_indices 
                                                     if feat in index_map]
-                    
-                    if self.verbose:
-                        print(f"Updated reserved feature indices to {self.reserved_feature_indices}")
             
             # Check if we need to fill reserved features with statistical information
             if self.reserved_feature_indices and (self.feature_stats or self.statistical_class_terms):
@@ -756,9 +707,6 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
                 self.reserved_feature_indices = [old_to_new.get(idx, -1) for idx in self.reserved_feature_indices]
                 # Filter out any that didn't make it through filtering
                 self.reserved_feature_indices = [idx for idx in self.reserved_feature_indices if idx >= 0]
-                
-                if self.verbose:
-                    print(f"Updated reserved feature indices after filtering: {self.reserved_feature_indices}")
         
         # Apply feature transformation
         warnings.simplefilter('error')
@@ -855,8 +803,6 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
                 if numeric_features:
                     # Sort to ensure consistent ordering
                     numeric_features.sort()
-                    if self.verbose:
-                        print(f"Found {len(numeric_features)} numeric features to semanticize")
                     
                     # Select the first numeric feature to semanticize
                     first_numeric_feat = numeric_features[0]
@@ -898,13 +844,8 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
                                 
                                 # Set the token value for this row
                                 x[i, j, feature_idx] = token_value
-                    
-                    if self.verbose:
-                        print(f"Filled reserved feature {feature_idx} with semanticized values for feature {first_numeric_feat}")
                 else:
                     # No numeric features found, use a placeholder
-                    if self.verbose:
-                        print("No numeric features found for semanticization, using placeholder")
                     placeholder_text = "No numeric features to semanticize"
                     tokens = tokenizer(
                         placeholder_text, 
@@ -978,13 +919,8 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
                                 
                                 # Set the token value for this row
                                 x[i, j, feature_idx] = token_value
-                    
-                    if self.verbose:
-                        print(f"Filled reserved feature {feature_idx} with semanticized values for feature {second_numeric_feat}")
                 elif len(numeric_features) == 1 and self.statistical_class_terms:
                     # Only have one numeric feature, use class information if available
-                    if self.verbose:
-                        print("Only one numeric feature found, using class information for second feature")
                     
                     # Try to fill with class tokens based on statistical_class_terms
                     have_class_info = False
@@ -1000,13 +936,11 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
                                 x[i, j, feature_idx] = token_value
                         
                         have_class_info = True
-                        if self.verbose:
-                            print(f"Filled reserved feature {feature_idx} with default class-based token")
+                        
                     
                     # If we don't have class info, use a placeholder
                     if not have_class_info:
-                        if self.verbose:
-                            print("No class information available, using placeholder")
+                        
                         placeholder_text = "No second feature or class info available"
                         tokens = tokenizer(
                             placeholder_text, 
@@ -1019,9 +953,7 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
                         # Use a placeholder value for all rows
                         x[:, :, feature_idx] = tokens[0].to(x.dtype)
                 else:
-                    # No second numeric feature or class info, use a placeholder
-                    if self.verbose:
-                        print("No second numeric feature found, using placeholder")
+                    
                     placeholder_text = "No second numeric feature to semanticize"
                     tokens = tokenizer(
                         placeholder_text, 
@@ -1064,8 +996,7 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
                 
                 # Fill the third reserved feature with this information
                 x[:, :, feature_idx] = tokens[0].to(x.dtype)
-                if self.verbose:
-                    print(f"Filled reserved feature {feature_idx} with table metadata")
+                
                     
             # Now fill any remaining semantic features (those that aren't reserved)
             self._fill_semantic_features_with_numeric_semanticization(x, device)
@@ -1102,9 +1033,7 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
         
         if not semantic_indices:
             return
-            
-        if self.verbose:
-            print(f"Filling {len(semantic_indices)} semantic features with numeric semanticization")
+        
             
         try:
             # Initialize tokenizer
@@ -1188,12 +1117,10 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
                                 # Fill the semantic feature with the token value
                                 x[i, j, sem_idx] = token_value
                     
-                    if self.verbose:
-                        print(f"Filled semantic feature {sem_idx} with semanticized values for {semantic_tag}")
+                    
                 else:
                     # No valid values, use a placeholder
-                    if self.verbose:
-                        print(f"No valid values for feature {num_idx}, using placeholder")
+                    
                     
                     # Tokenize the column name as a placeholder
                     tokens = tokenizer(
@@ -1347,7 +1274,7 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
         check_is_fitted(self, ['is_fitted_'])
         
         # Input validation
-        X = check_array(X, force_all_finite=False)
+        X = check_array(X)
         
         # Apply feature selection if needed
         if self.feature_indices is not None:

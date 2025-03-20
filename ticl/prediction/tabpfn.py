@@ -252,7 +252,7 @@ class TabPFNClassifier(BaseEstimator, ClassifierMixin):
         self.model = model
         if self.no_grad:
             # Check that X and y have correct shape
-            X, y = check_X_y(X, y, force_all_finite=False)
+            X, y = check_X_y(X, y)
         # Store the classes seen during fit
         y = self._validate_targets(y)
         self.label_encoder = LabelEncoder()
@@ -273,7 +273,7 @@ class TabPFNClassifier(BaseEstimator, ClassifierMixin):
 
         # Input validation
         if self.no_grad:
-            X = check_array(X, force_all_finite=False)
+            X = check_array(X)
             if X.shape[1] > self.max_num_features:      
                 if self.dimension_reduction == 'random':
                     X = X[:, self.feature_selected]

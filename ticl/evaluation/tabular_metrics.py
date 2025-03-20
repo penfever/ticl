@@ -64,7 +64,6 @@ def auc_metric(target, pred, multi_class='ovo', numpy=False):
             # Ensure no zero row sums to avoid division by zero
             zero_rows = np.where(np.abs(row_sums) < 1e-10)[0]
             if len(zero_rows) > 0:
-                print(f"Warning: {len(zero_rows)} rows with zero sum detected, setting to uniform distribution")
                 n_classes = pred_np.shape[1]
                 pred_np[zero_rows] = np.ones((len(zero_rows), n_classes)) / n_classes
                 row_sums[zero_rows] = 1.0
