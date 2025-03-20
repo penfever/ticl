@@ -294,9 +294,26 @@ class EnhancedColumnSemanticTokenizer(ColumnSemanticTokenizer):
             # Create directory if it doesn't exist
             os.makedirs(os.path.dirname(os.path.abspath(self.clusters_save_path)), exist_ok=True)
             
-            # Save the structured data to a JSON file
+            # Check if the file already exists
+            existing_data = {}
+            if os.path.exists(self.clusters_save_path):
+                try:
+                    with open(self.clusters_save_path, 'r') as f:
+                        existing_data = json.load(f)
+                except Exception:
+                    # If loading fails, we'll start with an empty dict
+                    pass
+            
+            # Merge existing data with new data (update will overwrite duplicates)
+            existing_data.update(self.structured_data)
+            
+            # Save the merged data to a JSON file
             with open(self.clusters_save_path, 'w') as f:
-                json.dump(self.structured_data, f, indent=2)
+                json.dump(existing_data, f, indent=2)
+                
+            # Clear the structured_data dictionary to prevent memory build-up
+            # We've already saved it to the file and merged with existing data
+            self.structured_data = {}
     
     def _generate_numeric_property_descriptors(self, column_name: str) -> List[str]:
         """
@@ -557,8 +574,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--clusters-save-path",
         type=str,
-        default=None,
-        help="Path to save structured data (clusters/pairs/metadata descriptions) in JSON format. Required for conceptual_clusters, contrastive_pairs, and metadata_description strategies."
+        default="structured_data.json",
+        help="Path to save structured data (clusters/pairs/metadata descriptions) in JSON format. For conceptual_clusters, contrastive_pairs, and metadata_description strategies."
     )
     
     args = parser.parse_args()
@@ -566,9 +583,9 @@ if __name__ == "__main__":
     # Get some example column names from Schema.org
     column_names = SCHEMA_TYPES
     
-    # Warn about missing save path for strategies that produce structured data
-    if args.curation_strategy in ['conceptual_clusters', 'contrastive_pairs', 'metadata_description'] and not args.clusters_save_path:
-        # Set a default path in the current working directory if none provided for these strategies
+    # For strategies that produce structured data, use strategy-specific filename if default is used
+    if args.curation_strategy in ['conceptual_clusters', 'contrastive_pairs', 'metadata_description'] and args.clusters_save_path == "structured_data.json":
+        # Create a more descriptive filename
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         args.clusters_save_path = os.path.join(os.getcwd(), f"{args.curation_strategy}_data_{timestamp}.json")
     

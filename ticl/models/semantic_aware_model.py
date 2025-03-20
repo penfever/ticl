@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import logging
 from ticl.utils import log_gpu_memory, log_tensor_info, memory_logger, track_tensors_memory
 
 class SemanticAwareClassifier(nn.Module):
@@ -206,16 +207,21 @@ class SemanticAwareClassifier(nn.Module):
         text_tokens = None  # Track for memory management
         
         # Debug class_texts parameter
-        memory_logger.debug(f"Class texts parameter type: {type(class_texts)}")
+        if memory_logger.isEnabledFor(logging.DEBUG):
+            memory_logger.debug(f"Class texts parameter type: {type(class_texts)}")
         if class_texts is None:
-            memory_logger.debug("class_texts is None - No class texts provided")
+            if memory_logger.isEnabledFor(logging.DEBUG):
+                memory_logger.debug("class_texts is None - No class texts provided")
         elif len(class_texts) == 0:
-            memory_logger.debug("class_texts is an empty list")
+            if memory_logger.isEnabledFor(logging.DEBUG):
+                memory_logger.debug("class_texts is an empty list")
         else:
-            memory_logger.debug(f"Found {len(class_texts)} class texts: {class_texts[:3]}...")
+            if memory_logger.isEnabledFor(logging.DEBUG):
+                memory_logger.debug(f"Found {len(class_texts)} class texts: {class_texts[:3]}...")
         
         if class_texts and len(class_texts) > 0:
-            memory_logger.debug(f"Processing {len(class_texts)} class texts with CLIP")
+            if memory_logger.isEnabledFor(logging.DEBUG):
+                memory_logger.debug(f"Processing {len(class_texts)} class texts with CLIP")
             
             # Create CLIP embeddings for class texts
             # Using a balanced approach for different devices
@@ -226,17 +232,20 @@ class SemanticAwareClassifier(nn.Module):
                 if tabular_features.device.type in ['mps', 'cuda']:
                     # For MPS and CUDA, it's safer to run on the same device
                     clip_device = tabular_features.device
-                    memory_logger.debug(f"Using {clip_device} for CLIP processing")
+                    if memory_logger.isEnabledFor(logging.DEBUG):
+                        memory_logger.debug(f"Using {clip_device} for CLIP processing")
                 else:
                     # For CPU, continue using CPU
                     clip_device = "cpu"
-                    memory_logger.debug(f"Using CPU for CLIP text processing")
+                    if memory_logger.isEnabledFor(logging.DEBUG):
+                        memory_logger.debug(f"Using CPU for CLIP text processing")
                 
                 text_features_list = []
                 
                 # Process in batches to control memory usage
                 batch_size = min(16, len(class_texts))
-                memory_logger.debug(f"Processing {len(class_texts)} texts in batches of {batch_size}")
+                if memory_logger.isEnabledFor(logging.DEBUG):
+                    memory_logger.debug(f"Processing {len(class_texts)} texts in batches of {batch_size}")
                 
                 for i in range(0, len(class_texts), batch_size):
                     batch_texts = class_texts[i:i+batch_size]
@@ -258,7 +267,8 @@ class SemanticAwareClassifier(nn.Module):
                         batch_outputs = self.clip_text_model(**text_tokens)
                         batch_text_features = batch_outputs.pooler_output
                         text_features_list.append(batch_text_features)
-                        memory_logger.debug(f"Successfully processed batch {i//batch_size + 1}/{(len(class_texts) + batch_size - 1)//batch_size}")
+                        if memory_logger.isEnabledFor(logging.DEBUG):
+                            memory_logger.debug(f"Successfully processed batch {i//batch_size + 1}/{(len(class_texts) + batch_size - 1)//batch_size}")
                     except Exception as e:
                         memory_logger.error(f"Error processing text batch: {e}")
                         # Try again with CPU as fallback for any device-specific error
@@ -267,7 +277,8 @@ class SemanticAwareClassifier(nn.Module):
                         except:
                             check = clip_device != 'cpu'
                         if check:
-                            memory_logger.debug(f"Retrying with CPU as fallback")
+                            if memory_logger.isEnabledFor(logging.DEBUG):
+                                memory_logger.debug(f"Retrying with CPU as fallback")
                             # Move tokens to CPU
                             cpu_tokens = {k: v.to('cpu') for k, v in text_tokens.items()}
                             try:
@@ -277,7 +288,8 @@ class SemanticAwareClassifier(nn.Module):
                                 text_features_list.append(batch_text_features)
                                 # Move model back to original device
                                 self.clip_text_model.to(clip_device)
-                                memory_logger.debug(f"Fallback to CPU succeeded")
+                                if memory_logger.isEnabledFor(logging.DEBUG):
+                                    memory_logger.debug(f"Fallback to CPU succeeded")
                             except Exception as e2:
                                 memory_logger.error(f"CPU fallback also failed: {e2}")
                                 # Return empty features as ultimate fallback
@@ -303,7 +315,8 @@ class SemanticAwareClassifier(nn.Module):
                             }
                             all_token_texts.append(class_tokens)
                         except Exception as e:
-                            memory_logger.debug(f"Error processing token texts: {e}")
+                            if memory_logger.isEnabledFor(logging.DEBUG):
+                                memory_logger.debug(f"Error processing token texts: {e}")
                             # Add a simpler version without tokenization
                             class_tokens = {
                                 'text': text,
@@ -319,24 +332,28 @@ class SemanticAwareClassifier(nn.Module):
                 
                 # If we have any features, concatenate them
                 if len(text_features_list) > 0:
-                    memory_logger.debug(f"Concatenating {len(text_features_list)} text feature batches")
+                    if memory_logger.isEnabledFor(logging.DEBUG):
+                        memory_logger.debug(f"Concatenating {len(text_features_list)} text feature batches")
                     text_features = torch.cat(text_features_list, dim=0)
                     
                     # Move to same device as tabular features if needed for computation
                     if tabular_features.device.type != text_features.device.type:
-                        memory_logger.debug(f"Moving text features from {text_features.device} to {tabular_features.device}")
+                        if memory_logger.isEnabledFor(logging.DEBUG):
+                            memory_logger.debug(f"Moving text features from {text_features.device} to {tabular_features.device}")
                         try:
                             # Try to move text features to match tabular features
                             text_features = text_features.to(tabular_features.device)
                         except RuntimeError as e:
                             memory_logger.error(f"Failed to move text features to {tabular_features.device}: {e}")
                             # Fall back to moving tabular features to text device as a last resort
-                            memory_logger.debug(f"Falling back: Moving tabular features from {tabular_features.device} to {text_features.device}")
+                            if memory_logger.isEnabledFor(logging.DEBUG):
+                                memory_logger.debug(f"Falling back: Moving tabular features from {tabular_features.device} to {text_features.device}")
                             tabular_features = tabular_features.to(text_features.device)
                     
                     # Normalize text features for cosine similarity
                     text_features = F.normalize(text_features, dim=1)
-                    memory_logger.debug(f"Normalized {len(text_features)} text features for cosine similarity")
+                    if memory_logger.isEnabledFor(logging.DEBUG):
+                        memory_logger.debug(f"Normalized {len(text_features)} text features for cosine similarity")
                 else:
                     # Handle the case where all batches failed
                     memory_logger.warning(f"No text features were successfully processed")
@@ -358,30 +375,36 @@ class SemanticAwareClassifier(nn.Module):
             )
         else:
             # No class texts provided - use fallback approach
-            memory_logger.debug(f"No class texts provided. Checking if we should use semantic_data...")
+            if memory_logger.isEnabledFor(logging.DEBUG):
+                memory_logger.debug(f"No class texts provided. Checking if we should use semantic_data...")
             
             # Import the semantic data on demand
             try:
-                memory_logger.debug(f"Fallback mode - no class texts provided")
+                if memory_logger.isEnabledFor(logging.DEBUG):
+                    memory_logger.debug(f"Fallback mode - no class texts provided")
                 
                 # Instead of using the huge semantic data, create a smaller tensor with the right class count
                 semantic_logits = torch.zeros(
                     (tabular_features.shape[0], self.num_semantic_classes),
                     device=tabular_features.device
                 )
-                memory_logger.debug(f"Created empty semantic_logits with shape: {semantic_logits.shape}")
+                if memory_logger.isEnabledFor(logging.DEBUG):
+                    memory_logger.debug(f"Created empty semantic_logits with shape: {semantic_logits.shape}")
                 
                 # Fill with small random values to prevent all-zero gradients
                 semantic_logits = torch.randn_like(semantic_logits) * 0.01
-                memory_logger.debug(f"Filled semantic_logits with small random values for stable training")
+                if memory_logger.isEnabledFor(logging.DEBUG):
+                    memory_logger.debug(f"Filled semantic_logits with small random values for stable training")
             except (ImportError, Exception) as e:
-                memory_logger.debug(f"Error loading semantic data: {e}")
+                if memory_logger.isEnabledFor(logging.DEBUG):
+                    memory_logger.debug(f"Error loading semantic data: {e}")
                 # Fallback to zeros
                 semantic_logits = torch.zeros(
                     (tabular_features.shape[0], self.num_semantic_classes),
                     device=tabular_features.device
                 )
-                memory_logger.debug(f"Created empty semantic_logits with shape: {semantic_logits.shape}")
+                if memory_logger.isEnabledFor(logging.DEBUG):
+                    memory_logger.debug(f"Created empty semantic_logits with shape: {semantic_logits.shape}")
         
         # Create the return dictionary with CLIP-style outputs
         result = {
@@ -501,7 +524,9 @@ class SemanticAwareClassifier(nn.Module):
             Dictionary containing class predictions based on text mapping
         """
         # Get model's outputs with CLIP-based approach
-        memory_logger.debug(f"Running predict_from_text with description: '{text_description}'")
+        if memory_logger.isEnabledFor(logging.DEBUG):
+            if memory_logger.isEnabledFor(logging.DEBUG):
+                memory_logger.debug(f"Running predict_from_text with description: '{text_description}'")
         
         # Process tabular data with our model
         if torch.cuda.is_available() and x.device.type == 'cuda':
@@ -520,7 +545,9 @@ class SemanticAwareClassifier(nn.Module):
             else:
                 process_device = "cpu"
                 
-            memory_logger.debug(f"Processing text on {process_device} device")
+            if memory_logger.isEnabledFor(logging.DEBUG):
+                if memory_logger.isEnabledFor(logging.DEBUG):
+                    memory_logger.debug(f"Processing text on {process_device} device")
             
             # Tokenize the input text with the CLIP tokenizer
             text_tokens = self.tokenizer(
@@ -537,18 +564,25 @@ class SemanticAwareClassifier(nn.Module):
             try:
                 # Get text embeddings from CLIP text encoder
                 text_features = self.clip_text_model(**text_tokens).pooler_output  # [1, hidden_size]
-                memory_logger.debug(f"Successfully processed text description with shape {text_features.shape}")
+                if memory_logger.isEnabledFor(logging.DEBUG):
+                    if memory_logger.isEnabledFor(logging.DEBUG):
+                        memory_logger.debug(f"Successfully processed text description with shape {text_features.shape}")
             except Exception as e:
-                memory_logger.error(f"Error processing text: {e}")
+                if memory_logger.isEnabledFor(logging.ERROR):
+                    memory_logger.error(f"Error processing text: {e}")
                 # Try with CPU as fallback
                 if process_device != 'cpu':
-                    memory_logger.debug(f"Falling back to CPU processing")
+                    if memory_logger.isEnabledFor(logging.DEBUG):
+                        if memory_logger.isEnabledFor(logging.DEBUG):
+                            memory_logger.debug(f"Falling back to CPU processing")
                     cpu_tokens = {k: v.to('cpu') for k, v in text_tokens.items()}
                     model_device = next(self.clip_text_model.parameters()).device
                     self.clip_text_model = self.clip_text_model.to('cpu')
                     text_features = self.clip_text_model(**cpu_tokens).pooler_output
                     self.clip_text_model = self.clip_text_model.to(model_device)
-                    memory_logger.debug(f"CPU fallback successful")
+                    if memory_logger.isEnabledFor(logging.DEBUG):
+                        if memory_logger.isEnabledFor(logging.DEBUG):
+                            memory_logger.debug(f"CPU fallback successful")
             
             # Extract the tokenized text for interpretability
             try:
@@ -560,7 +594,9 @@ class SemanticAwareClassifier(nn.Module):
                 token_texts = [t for t in token_texts if t not in ['<pad>', '<|startoftext|>', '<|endoftext|>']]
                 query_token_texts = token_texts[:self.num_tokens_per_class]  # Keep just the first few tokens
             except Exception as e:
-                memory_logger.debug(f"Error extracting token texts: {e}")
+                if memory_logger.isEnabledFor(logging.DEBUG):
+                    if memory_logger.isEnabledFor(logging.DEBUG):
+                        memory_logger.debug(f"Error extracting token texts: {e}")
                 # Fallback to a default value
                 query_token_texts = ["<token_error>"]
             
@@ -654,8 +690,12 @@ class SemanticAwareClassifier(nn.Module):
         dict
             Dictionary containing new class predictions based on text descriptions
         """
-        memory_logger.debug(f"=== STARTING generate_boundaries_from_text with pretrained CLIP ===")
-        memory_logger.debug(f"Processing {len(class_descriptions)} class descriptions")
+        # Only log in debug mode
+        if memory_logger.isEnabledFor(logging.DEBUG):
+            if memory_logger.isEnabledFor(logging.DEBUG):
+                memory_logger.debug(f"=== STARTING generate_boundaries_from_text with pretrained CLIP ===")
+            if memory_logger.isEnabledFor(logging.DEBUG):
+                memory_logger.debug(f"Processing {len(class_descriptions)} class descriptions")
         
         # Pass class descriptions to the forward method for processing together with tabular data
         class_texts = list(class_descriptions.values())
@@ -675,7 +715,9 @@ class SemanticAwareClassifier(nn.Module):
         class_logits = model_outputs.get('class_logits', None)
         
         # Process text descriptions with CLIP text encoder (batched processing)
-        memory_logger.debug(f"Processing class descriptions with CLIP text encoder")
+        if memory_logger.isEnabledFor(logging.DEBUG):
+            if memory_logger.isEnabledFor(logging.DEBUG):
+                memory_logger.debug(f"Processing class descriptions with CLIP text encoder")
         class_token_mappings = {}
         text_embeddings = []
         
@@ -710,7 +752,9 @@ class SemanticAwareClassifier(nn.Module):
                         token_texts = self.tokenizer.convert_ids_to_tokens(token_ids)
                         token_texts = [t for t in token_texts if t not in ['<pad>', '<|startoftext|>', '<|endoftext|>']]
                     except Exception as e:
-                        memory_logger.debug(f"Error extracting token texts: {e}")
+                        if memory_logger.isEnabledFor(logging.DEBUG):
+                            if memory_logger.isEnabledFor(logging.DEBUG):
+                                memory_logger.debug(f"Error extracting token texts: {e}")
                         token_texts = ["<token_error>"]
                     
                     # Store token mapping
@@ -820,19 +864,29 @@ class SemanticConsistencyLoss(nn.Module):
         torch.Tensor
             Combined loss value
         """
-        memory_logger.debug(f"=== SemanticConsistencyLoss.forward START ===")
-        
-        # Log input details
-        memory_logger.debug(f"Output keys: {list(outputs.keys())}")
-        memory_logger.debug(f"Target keys: {list(targets.keys())}")
+        if memory_logger.isEnabledFor(logging.DEBUG):
+            if memory_logger.isEnabledFor(logging.DEBUG):
+                memory_logger.debug(f"=== SemanticConsistencyLoss.forward START ===")
+            
+            # Log input details
+            if memory_logger.isEnabledFor(logging.DEBUG):
+                memory_logger.debug(f"Output keys: {list(outputs.keys())}")
+            if memory_logger.isEnabledFor(logging.DEBUG):
+                memory_logger.debug(f"Target keys: {list(targets.keys())}")
         
         # Get class prediction outputs
         class_logits = outputs['class_logits']
-        memory_logger.debug(f"Class logits: shape={class_logits.shape}, dtype={class_logits.dtype}")
+        
+        if memory_logger.isEnabledFor(logging.DEBUG):
+            if memory_logger.isEnabledFor(logging.DEBUG):
+                memory_logger.debug(f"Class logits: shape={class_logits.shape}, dtype={class_logits.dtype}")
         
         # Get targets for standard classification
         class_targets = targets['class_targets']
-        memory_logger.debug(f"Class targets: shape={class_targets.shape}, dtype={class_targets.dtype}")
+        
+        if memory_logger.isEnabledFor(logging.DEBUG):
+            if memory_logger.isEnabledFor(logging.DEBUG):
+                memory_logger.debug(f"Class targets: shape={class_targets.shape}, dtype={class_targets.dtype}")
         
         # Log sample of class predictions
         try:
@@ -845,21 +899,32 @@ class SemanticConsistencyLoss(nn.Module):
             total = class_targets.numel()
             accuracy = correct / total * 100
             
-            memory_logger.debug(f"Class prediction sample (first 5):")
-            for i in range(min(5, predicted_classes.shape[0])):
-                true_label = class_targets[i].item()
-                pred_label = predicted_classes[i].item()
-                confidence = class_probs[i, pred_label].item() * 100
-                memory_logger.debug(f"  Sample {i}: True={true_label}, Pred={pred_label}, Confidence={confidence:.1f}%")
+            if memory_logger.isEnabledFor(logging.DEBUG):
+                if memory_logger.isEnabledFor(logging.DEBUG):
+                    memory_logger.debug(f"Class prediction sample (first 5):")
+                for i in range(min(5, predicted_classes.shape[0])):
+                    true_label = class_targets[i].item()
+                    pred_label = predicted_classes[i].item()
+                    confidence = class_probs[i, pred_label].item() * 100
+                    if memory_logger.isEnabledFor(logging.DEBUG):
+                        memory_logger.debug(f"  Sample {i}: True={true_label}, Pred={pred_label}, Confidence={confidence:.1f}%")
             
-            memory_logger.debug(f"Batch classification accuracy: {accuracy:.2f}% ({correct}/{total})")
+            if memory_logger.isEnabledFor(logging.DEBUG):
+                if memory_logger.isEnabledFor(logging.DEBUG):
+                    memory_logger.debug(f"Batch classification accuracy: {accuracy:.2f}% ({correct}/{total})")
         except Exception as e:
-            memory_logger.debug(f"Error analyzing class predictions: {e}")
+            if memory_logger.isEnabledFor(logging.DEBUG):
+                if memory_logger.isEnabledFor(logging.DEBUG):
+                    memory_logger.debug(f"Error analyzing class predictions: {e}")
         
         # Compute standard classification loss
-        memory_logger.debug(f"Computing class_loss with criterion type: {type(self.class_loss).__name__}")
+        if memory_logger.isEnabledFor(logging.DEBUG):
+            if memory_logger.isEnabledFor(logging.DEBUG):
+                memory_logger.debug(f"Computing class_loss with criterion type: {type(self.class_loss).__name__}")
         class_loss = self.class_loss(class_logits, class_targets)
-        memory_logger.debug(f"Class loss value: {class_loss.item()}")
+        if memory_logger.isEnabledFor(logging.DEBUG):
+            if memory_logger.isEnabledFor(logging.DEBUG):
+                memory_logger.debug(f"Class loss value: {class_loss.item()}")
         
         # Initialize semantic loss
         semantic_loss = torch.tensor(0.0, device=class_loss.device)
@@ -871,60 +936,76 @@ class SemanticConsistencyLoss(nn.Module):
             targets['semantic_targets'] is not None
         )
         
-        memory_logger.debug(f"Has semantic components for loss: {has_semantic_components}")
+        if memory_logger.isEnabledFor(logging.DEBUG):
+            memory_logger.debug(f"Has semantic components for loss: {has_semantic_components}")
         
         if has_semantic_components:
             semantic_logits = outputs['semantic_logits']
             semantic_targets = targets['semantic_targets']
             
-            memory_logger.debug(f"Semantic logits: shape={semantic_logits.shape}, dtype={semantic_logits.dtype}")
-            memory_logger.debug(f"Semantic targets: shape={semantic_targets.shape}, dtype={semantic_targets.dtype}")
-            
-            # Log semantic similarity matrix
-            if semantic_logits.shape[0] < 10:  # Only for small batches
-                memory_logger.debug(f"Semantic similarity matrix (logits):")
-                for i in range(semantic_logits.shape[0]):
-                    row_vals = semantic_logits[i].detach().cpu().tolist()
-                    if len(row_vals) > 5:
-                        row_str = "[" + ", ".join([f"{x:.2f}" for x in row_vals[:5]]) + "...]"
-                    else:
-                        row_str = "[" + ", ".join([f"{x:.2f}" for x in row_vals]) + "]"
-                    memory_logger.debug(f"  Row {i}: {row_str}")
+            if memory_logger.isEnabledFor(logging.DEBUG):
+                if memory_logger.isEnabledFor(logging.DEBUG):
+                    memory_logger.debug(f"Semantic logits: shape={semantic_logits.shape}, dtype={semantic_logits.dtype}")
+                if memory_logger.isEnabledFor(logging.DEBUG):
+                    memory_logger.debug(f"Semantic targets: shape={semantic_targets.shape}, dtype={semantic_targets.dtype}")
+                
+                # Log semantic similarity matrix
+                if semantic_logits.shape[0] < 10:  # Only for small batches
+                    if memory_logger.isEnabledFor(logging.DEBUG):
+                        memory_logger.debug(f"Semantic similarity matrix (logits):")
+                    for i in range(semantic_logits.shape[0]):
+                        row_vals = semantic_logits[i].detach().cpu().tolist()
+                        if len(row_vals) > 5:
+                            row_str = "[" + ", ".join([f"{x:.2f}" for x in row_vals[:5]]) + "...]"
+                        else:
+                            row_str = "[" + ", ".join([f"{x:.2f}" for x in row_vals]) + "]"
+                        if memory_logger.isEnabledFor(logging.DEBUG):
+                            memory_logger.debug(f"  Row {i}: {row_str}")
             
             # Check if we actually have valid semantic targets in this batch
             if semantic_targets.numel() == 0:
-                memory_logger.debug("Empty semantic targets tensor - skipping semantic loss")
+                if memory_logger.isEnabledFor(logging.DEBUG):
+                    memory_logger.debug("Empty semantic targets tensor - skipping semantic loss")
                 # Skip semantic loss calculation for this batch
             else:
                 # Ensure semantic targets are long type for cross_entropy
                 if semantic_targets.dtype != torch.long:
-                    memory_logger.debug(f"Converting semantic targets from {semantic_targets.dtype} to torch.long")
+                    if memory_logger.isEnabledFor(logging.DEBUG):
+                        memory_logger.debug(f"Converting semantic targets from {semantic_targets.dtype} to torch.long")
                     semantic_targets = semantic_targets.long()
                 
                 # Get batch size
                 batch_size = semantic_logits.shape[0]
-                memory_logger.debug(f"Batch size for semantic loss: {batch_size}")
+                if memory_logger.isEnabledFor(logging.DEBUG):
+                    memory_logger.debug(f"Batch size for semantic loss: {batch_size}")
                 
                 # Log semantic logits shape and class counts
-                memory_logger.debug(f"Semantic logits shape: {semantic_logits.shape}")
+                if memory_logger.isEnabledFor(logging.DEBUG):
+                    memory_logger.debug(f"Semantic logits shape: {semantic_logits.shape}")
                 if 'text_features' in outputs and outputs['text_features'] is not None:
-                    memory_logger.debug(f"Text features shape: {outputs['text_features'].shape}")
+                    if memory_logger.isEnabledFor(logging.DEBUG):
+                        memory_logger.debug(f"Text features shape: {outputs['text_features'].shape}")
                     if outputs['text_features'].shape[0] < 100:  # Only log if reasonably small
-                        memory_logger.debug(f"Number of text classes: {outputs['text_features'].shape[0]}")
+                        if memory_logger.isEnabledFor(logging.DEBUG):
+                            memory_logger.debug(f"Number of text classes: {outputs['text_features'].shape[0]}")
                         if 'token_texts' in outputs and outputs['token_texts']:
-                            memory_logger.debug(f"Text classes: {[t.get('text', 'unknown') for t in outputs['token_texts'][:5]]}...")
+                            if memory_logger.isEnabledFor(logging.DEBUG):
+                                memory_logger.debug(f"Text classes: {[t.get('text', 'unknown') for t in outputs['token_texts'][:5]]}...")
                 else:
-                    memory_logger.debug("No text features found in model output")
+                    if memory_logger.isEnabledFor(logging.DEBUG):
+                        memory_logger.debug("No text features found in model output")
                 
                 # True CLIP-style loss uses the logits directly (already temperature-scaled in forward)
                 # Create labels for contrastive learning - diagonal of similarity matrix should be 1s
                 labels = torch.arange(batch_size, device=semantic_logits.device)
                 
                 # Log batch semantic targets stats
-                memory_logger.debug(f"Semantic targets shape: {semantic_targets.shape}, min: {semantic_targets.min().item()}, max: {semantic_targets.max().item()}")
+                if memory_logger.isEnabledFor(logging.DEBUG):
+                    memory_logger.debug(f"Semantic targets shape: {semantic_targets.shape}, min: {semantic_targets.min().item()}, max: {semantic_targets.max().item()}")
                 valid_count = (semantic_targets != -100).sum().item()
                 valid_percent = valid_count / semantic_targets.numel() * 100
-                memory_logger.debug(f"Valid targets count: {valid_count}/{semantic_targets.numel()} ({valid_percent:.1f}%)")
+                if memory_logger.isEnabledFor(logging.DEBUG):
+                    memory_logger.debug(f"Valid targets count: {valid_count}/{semantic_targets.numel()} ({valid_percent:.1f}%)")
                 
                 # Log class distribution for semantic targets
                 valid_mask = semantic_targets != -100
@@ -933,9 +1014,11 @@ class SemanticConsistencyLoss(nn.Module):
                         valid_targets = semantic_targets[valid_mask]
                         unique_classes, counts = torch.unique(valid_targets, return_counts=True)
                         class_counts = {int(cls.item()): int(count.item()) for cls, count in zip(unique_classes, counts)}
-                        memory_logger.debug(f"Semantic target class distribution: {class_counts}")
+                        if memory_logger.isEnabledFor(logging.DEBUG):
+                            memory_logger.debug(f"Semantic target class distribution: {class_counts}")
                     except Exception as e:
-                        memory_logger.debug(f"Error analyzing semantic target classes: {e}")
+                        if memory_logger.isEnabledFor(logging.DEBUG):
+                            memory_logger.debug(f"Error analyzing semantic target classes: {e}")
                 
                 # For samples with valid targets, compute contrastive loss
                 valid_mask = semantic_targets != -100
@@ -949,25 +1032,32 @@ class SemanticConsistencyLoss(nn.Module):
                     valid_targets = valid_targets.long()
                     
                     # Log contrastive loss inputs
-                    memory_logger.debug(f"Contrastive loss inputs - logits: {valid_logits.shape}, targets: {valid_targets.shape}, dtype: {valid_targets.dtype}")
-                    memory_logger.debug(f"Target class distribution: {torch.bincount(valid_targets)}")
+                    if memory_logger.isEnabledFor(logging.DEBUG):
+                        memory_logger.debug(f"Contrastive loss inputs - logits: {valid_logits.shape}, targets: {valid_targets.shape}, dtype: {valid_targets.dtype}")
+                    if memory_logger.isEnabledFor(logging.DEBUG):
+                        memory_logger.debug(f"Target class distribution: {torch.bincount(valid_targets)}")
                     
                     # For proper contrastive loss, we need valid samples
                     if valid_logits.shape[0] > 0:
                         try:
                             # Row-wise (text->tabular)
-                            memory_logger.debug("Computing text->tabular loss")
+                            if memory_logger.isEnabledFor(logging.DEBUG):
+                                memory_logger.debug("Computing text->tabular loss")
                             loss_text_to_tabular = F.cross_entropy(valid_logits, valid_targets)
-                            memory_logger.debug(f"Text->tabular loss: {loss_text_to_tabular.item()}")
+                            if memory_logger.isEnabledFor(logging.DEBUG):
+                                memory_logger.debug(f"Text->tabular loss: {loss_text_to_tabular.item()}")
                             
                             # Column-wise (tabular->text)
-                            memory_logger.debug("Computing tabular->text loss")
+                            if memory_logger.isEnabledFor(logging.DEBUG):
+                                memory_logger.debug("Computing tabular->text loss")
                             loss_tabular_to_text = F.cross_entropy(valid_logits.t(), valid_targets)
-                            memory_logger.debug(f"Tabular->text loss: {loss_tabular_to_text.item()}")
+                            if memory_logger.isEnabledFor(logging.DEBUG):
+                                memory_logger.debug(f"Tabular->text loss: {loss_tabular_to_text.item()}")
                             
                             # Symmetric loss (mean of both directions)
                             semantic_loss = (loss_text_to_tabular + loss_tabular_to_text) / 2.0
-                            memory_logger.debug(f"Combined symmetric semantic loss: {semantic_loss.item()}")
+                            if memory_logger.isEnabledFor(logging.DEBUG):
+                                memory_logger.debug(f"Combined symmetric semantic loss: {semantic_loss.item()}")
                             
                             # CLIP accuracy (diagnostic)
                             with torch.no_grad():
@@ -977,29 +1067,38 @@ class SemanticConsistencyLoss(nn.Module):
                                 text_to_tabular_correct = (text_to_tabular_preds == valid_targets).float().mean().item() * 100
                                 tabular_to_text_correct = (tabular_to_text_preds == valid_targets).float().mean().item() * 100
                                 
-                                memory_logger.debug(f"Text->tabular accuracy: {text_to_tabular_correct:.2f}%")
-                                memory_logger.debug(f"Tabular->text accuracy: {tabular_to_text_correct:.2f}%")
+                                if memory_logger.isEnabledFor(logging.DEBUG):
+                                    memory_logger.debug(f"Text->tabular accuracy: {text_to_tabular_correct:.2f}%")
+                                if memory_logger.isEnabledFor(logging.DEBUG):
+                                    memory_logger.debug(f"Tabular->text accuracy: {tabular_to_text_correct:.2f}%")
                         except Exception as e:
-                            memory_logger.debug(f"Error computing semantic loss: {e}")
+                            if memory_logger.isEnabledFor(logging.DEBUG):
+                                memory_logger.debug(f"Error computing semantic loss: {e}")
                             # Fallback to zero semantic loss
                             semantic_loss = torch.tensor(0.0, device=class_loss.device)
                 else:
-                    memory_logger.debug("No valid targets for semantic loss")
+                    if memory_logger.isEnabledFor(logging.DEBUG):
+                        memory_logger.debug("No valid targets for semantic loss")
                     # No valid targets in this batch, use zero loss
             
         # Combine losses
-        memory_logger.debug(f"Combining losses with semantic_weight={self.semantic_weight}")
-        memory_logger.debug(f"  Class loss: {class_loss.item()}")
-        memory_logger.debug(f"  Semantic loss: {semantic_loss.item()}")
+        if memory_logger.isEnabledFor(logging.DEBUG):
+            memory_logger.debug(f"Combining losses with semantic_weight={self.semantic_weight}")
+        if memory_logger.isEnabledFor(logging.DEBUG):
+            memory_logger.debug(f"  Class loss: {class_loss.item()}")
+        if memory_logger.isEnabledFor(logging.DEBUG):
+            memory_logger.debug(f"  Semantic loss: {semantic_loss.item()}")
         
         total_loss = class_loss + self.semantic_weight * semantic_loss
-        memory_logger.debug(f"Total combined loss: {total_loss.item()}")
+        if memory_logger.isEnabledFor(logging.DEBUG):
+            memory_logger.debug(f"Total combined loss: {total_loss.item()}")
         
         # Store components for debugging
         self.last_class_loss = class_loss.item()
         self.last_semantic_loss = semantic_loss.item()
         
-        memory_logger.debug(f"=== SemanticConsistencyLoss.forward END ===")
+        if memory_logger.isEnabledFor(logging.DEBUG):
+            memory_logger.debug(f"=== SemanticConsistencyLoss.forward END ===")
         return total_loss
 
 
@@ -1071,16 +1170,19 @@ def get_clip_text_embeddings(texts, clip_model, tokenizer, batch_size=5, device=
         # If the model is on CUDA or MPS, prefer that device
         if model_device.type in ['cuda', 'mps']:
             processing_device = model_device
-            memory_logger.debug(f"Using model's device {processing_device} for CLIP processing")
+            if memory_logger.isEnabledFor(logging.DEBUG):
+                memory_logger.debug(f"Using model's device {processing_device} for CLIP processing")
         
-    memory_logger.debug(f"Processing text embeddings on {processing_device} device")
+    if memory_logger.isEnabledFor(logging.DEBUG):
+        memory_logger.debug(f"Processing text embeddings on {processing_device} device")
     
     # Get model's current device for restoration later
     model_device = next(clip_model.parameters()).device
     
     # Move model to processing device if needed
     if model_device != processing_device:
-        memory_logger.debug(f"Moving CLIP model from {model_device} to {processing_device}")
+        if memory_logger.isEnabledFor(logging.DEBUG):
+            memory_logger.debug(f"Moving CLIP model from {model_device} to {processing_device}")
         clip_model = clip_model.to(processing_device)
     
     # Tokenize and encode texts in batches to save memory
@@ -1090,7 +1192,8 @@ def get_clip_text_embeddings(texts, clip_model, tokenizer, batch_size=5, device=
         for i in range(0, len(texts), batch_size):
             # Extract batch
             batch_texts = texts[i:i+batch_size]
-            memory_logger.debug(f"Processing batch {i//batch_size + 1}/{(len(texts) + batch_size - 1)//batch_size}")
+            if memory_logger.isEnabledFor(logging.DEBUG):
+                memory_logger.debug(f"Processing batch {i//batch_size + 1}/{(len(texts) + batch_size - 1)//batch_size}")
             
             try:
                 # Tokenize with CLIP tokenizer and move to device
@@ -1118,7 +1221,8 @@ def get_clip_text_embeddings(texts, clip_model, tokenizer, batch_size=5, device=
             except Exception as e:
                 memory_logger.error(f"Error processing batch of texts: {e}")
                 if processing_device != 'cpu':
-                    memory_logger.debug(f"Trying CPU fallback for problematic batch")
+                    if memory_logger.isEnabledFor(logging.DEBUG):
+                        memory_logger.debug(f"Trying CPU fallback for problematic batch")
                     try:
                         # Get tokens on CPU
                         cpu_tokens = tokenizer(
@@ -1140,19 +1244,22 @@ def get_clip_text_embeddings(texts, clip_model, tokenizer, batch_size=5, device=
                         
                         # Move model back
                         clip_model = clip_model.to(processing_device)
-                        memory_logger.debug(f"CPU fallback succeeded")
+                        if memory_logger.isEnabledFor(logging.DEBUG):
+                            memory_logger.debug(f"CPU fallback succeeded")
                     except Exception as e2:
                         memory_logger.error(f"CPU fallback also failed: {e2}")
                         # Continue with next batch
     
     # Move model back to original device if needed
     if model_device != processing_device:
-        memory_logger.debug(f"Moving CLIP model back from {processing_device} to {model_device}")
+        if memory_logger.isEnabledFor(logging.DEBUG):
+            memory_logger.debug(f"Moving CLIP model back from {processing_device} to {model_device}")
         clip_model = clip_model.to(model_device)
     
     # Concatenate all batches
     if all_embeddings:
-        memory_logger.debug(f"Concatenating {len(all_embeddings)} batches of embeddings")
+        if memory_logger.isEnabledFor(logging.DEBUG):
+            memory_logger.debug(f"Concatenating {len(all_embeddings)} batches of embeddings")
         text_embeddings = torch.cat(all_embeddings, dim=0)
         return text_embeddings
     else:

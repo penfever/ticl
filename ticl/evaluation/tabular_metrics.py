@@ -46,11 +46,30 @@ def auc_metric(target, pred, multi_class='ovo', numpy=False):
     if not numpy:
         target = torch.tensor(target) if not torch.is_tensor(target) else target
         pred = torch.tensor(pred) if not torch.is_tensor(pred) else pred
+    
+    # For multi-class classification, ensure predictions are properly normalized
     if len(lib.unique(target)) > 2:
+        # Check if predictions need normalization (sum to 1 across classes)
+        if len(pred.shape) == 2:
+            # Convert to numpy for easier manipulation
+            pred_np = pred.detach().cpu().numpy() if torch.is_tensor(pred) else pred
+            
+            # Check if predictions sum to approximately 1
+            row_sums = np.sum(pred_np, axis=1)
+            if not np.allclose(row_sums, 1.0, rtol=1e-3, atol=1e-3):
+                # Normalize predictions to sum to 1 across classes
+                pred_np = pred_np / row_sums[:, np.newaxis]
+                # Convert back to tensor if needed
+                if not numpy:
+                    pred = torch.tensor(pred_np, device=pred.device if torch.is_tensor(pred) else None)
+                else:
+                    pred = pred_np
+        
         if not numpy:
             return torch.tensor(roc_auc_score(target, pred, multi_class=multi_class))
         return roc_auc_score(target, pred, multi_class=multi_class)
     else:
+        # Binary classification
         if len(pred.shape) == 2:
             pred = pred[:, 1]
         if not numpy:
