@@ -95,6 +95,45 @@ PROMPT_TEMPLATES = {
                 Create 40-50 meaningful contrastive pairs that are semantically related to {column_name}.
                 Ensure the pairs represent a true semantic contrast or opposition relevant to the column concept.
                 If {column_name} doesn't make sense to you, create general contrasting pairs that might be relevant to tabular data.
+                """,
+                
+    'metadata_description': """
+                You are an expert data scientist who understands tabular data extremely well.
+                
+                I need a comprehensive metadata description for a column named "{column_name}" that might appear in a dataset.
+                
+                Please create a detailed metadata description that covers ALL of the following aspects:
+                
+                1. SEMANTIC MEANING:
+                   - What does this column name typically represent? (Be thorough about all possible meanings)
+                   - What information would this column likely contain?
+                   - Are there different domains or contexts where this column might have different meanings?
+                
+                2. DATA CHARACTERISTICS:
+                   - What data type(s) would you expect for this column? (int, float, string, date, categorical, etc.)
+                   - What would be the likely range, format, or units of measurement?
+                   - Are there common patterns, constraints, or special values (e.g., NULL interpretations)?
+                   - What distribution shape might this data follow? (normal, skewed, multimodal, etc.)
+                
+                3. CONTEXTUAL RELATIONSHIPS:
+                   - What other columns would likely co-occur with this column in datasets?
+                   - Which domains, industries, or fields commonly use data with this column?
+                   - What analytical questions is this column typically used to answer?
+                
+                4. DATA QUALITY CONSIDERATIONS:
+                   - What are common data quality issues for this type of column?
+                   - How might missing values be interpreted?
+                   - What validation rules would typically apply?
+                
+                5. ANALYTICAL VALUE:
+                   - How is this column typically used in analysis or modeling?
+                   - Would this column likely be a dependent or independent variable?
+                   - What transformations are commonly applied to this type of data?
+                
+                Format your response as a cohesive, detailed paragraph that integrates all these aspects.
+                Be comprehensive yet concise. Ensure your description is factually accurate and considers multiple interpretations where applicable.
+                
+                Aim for 200-300 words that would give a data scientist a thorough understanding of what this column name represents.
                 """
 }
 
@@ -129,7 +168,53 @@ class EnhancedColumnSemanticTokenizer(ColumnSemanticTokenizer):
         Returns:
             List of extracted semantic values
         """
-        if self.curation_strategy == 'conceptual_clusters':
+        if self.curation_strategy == 'metadata_description':
+            # For metadata descriptions, we're getting a paragraph, not a list
+            try:
+                # Clean the text to prepare for extraction
+                clean_text = text.replace('```', '').strip()
+                
+                # Store the raw metadata description if column_name is provided
+                if column_name is not None:
+                    self.structured_data[column_name] = clean_text
+                    # Save the description to a file if path is provided
+                    self._save_clusters_data()
+                
+                # For tokenization, split the description into meaningful chunks
+                # We'll use sentences or phrases as our "terms"
+                import re
+                
+                # Split text into sentences
+                sentences = re.split(r'(?<=[.!?])\s+', clean_text)
+                
+                # Further split long sentences on commas, semicolons, etc.
+                terms = []
+                for sentence in sentences:
+                    if len(sentence) > 80:  # If sentence is long, split it further
+                        fragments = re.split(r'(?<=[,;:])\s+', sentence)
+                        terms.extend(fragments)
+                    else:
+                        terms.append(sentence)
+                
+                # Add the column name itself and some key phrases
+                key_terms = []
+                if column_name:
+                    key_terms = [
+                        column_name,
+                        f"{column_name} data",
+                        f"{column_name} feature",
+                        f"{column_name} column",
+                        f"{column_name} field"
+                    ]
+                
+                # Combine all pieces
+                return key_terms + terms
+                
+            except Exception:
+                # Fall back to a very simple approach if parsing fails
+                return [text[:1000]] if text else []
+            
+        elif self.curation_strategy == 'conceptual_clusters':
             # Try to extract a list of dictionaries with clusters
             try:
                 # Clean the text to prepare for extraction
@@ -472,8 +557,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--clusters-save-path",
         type=str,
-        default="conceptual_clusters_raw_text_data.json",
-        help="Path to save structured data (clusters/pairs) in JSON format. Required for conceptual_clusters and contrastive_pairs strategies."
+        default=None,
+        help="Path to save structured data (clusters/pairs/metadata descriptions) in JSON format. Required for conceptual_clusters, contrastive_pairs, and metadata_description strategies."
     )
     
     args = parser.parse_args()
@@ -481,8 +566,8 @@ if __name__ == "__main__":
     # Get some example column names from Schema.org
     column_names = SCHEMA_TYPES
     
-    # Warn about missing clusters save path for relevant strategies
-    if args.curation_strategy in ['conceptual_clusters', 'contrastive_pairs'] and not args.clusters_save_path:
+    # Warn about missing save path for strategies that produce structured data
+    if args.curation_strategy in ['conceptual_clusters', 'contrastive_pairs', 'metadata_description'] and not args.clusters_save_path:
         # Set a default path in the current working directory if none provided for these strategies
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         args.clusters_save_path = os.path.join(os.getcwd(), f"{args.curation_strategy}_data_{timestamp}.json")

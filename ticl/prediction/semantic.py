@@ -145,8 +145,12 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
                 print("No semantic columns identified")
             self.has_semantic_data = False
             
-        # Convert to torch tensors and store
-        self.X_ = torch.tensor(X, device=self.device).float()
+        # Convert to torch tensors and store - ensuring proper dtype compatibility for MPS
+        if self.device == 'mps':
+            # MPS doesn't support float64, explicitly convert to float32
+            self.X_ = torch.tensor(X, dtype=torch.float32, device=self.device)
+        else:
+            self.X_ = torch.tensor(X, device=self.device).float()
         self.y_ = torch.tensor(y_encoded, device=self.device).long()
         
         # Handle feature count constraints
@@ -243,223 +247,268 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
         y_proba : array-like of shape (n_samples, n_classes)
             Class probabilities for each sample
         """
-        # Check if fit had been called
-        check_is_fitted(self, ['is_fitted_'])
-        
-        # Input validation
-        X = check_array(X, force_all_finite=False)
-        
-        # Apply feature selection if needed
-        if self.feature_indices is not None:
-            X = X[:, self.feature_indices]
-            if self.verbose:
-                print(f"Applied feature selection: {X.shape[1]} features")
-        
-        # Convert to tensors using TabPFN approach
-        if self.verbose:
-            print(f"Input shape: {X.shape}, training shape: {self.X_.shape}")
-            
-        # Concatenate training and test data
-        if torch.is_tensor(self.X_) and torch.is_tensor(X):
-            # Both are already tensors
-            X_full = torch.cat((self.X_, torch.tensor(X, device=self.device)), dim=0).float().unsqueeze(1).to(self.device)
-        else:
-            # Convert both to tensors
-            X_full = np.concatenate([self.X_, X], axis=0)
-            X_full = torch.tensor(X_full, device=self.device).float().unsqueeze(1)
-            
-        # Create targets tensor
-        y_full = np.concatenate([self.y_.cpu().numpy() if torch.is_tensor(self.y_) else self.y_, 
-                                 np.zeros(shape=X.shape[0])], axis=0)
-        y_full = torch.tensor(y_full, device=self.device).float().unsqueeze(1)
-        
-        # Position for evaluation
-        eval_pos = len(self.X_)
-        
-        # Use the class descriptions if provided, otherwise use stored ones
-        descriptions = class_descriptions or self.semantic_class_descriptions
-        
-        # Detect if we should use zero-padding from config (TabPFN approach)
         try:
-            if hasattr(self.model.base_model, 'c') and 'prior' in self.model.base_model.c:
-                extend_features = self.model.base_model.c['prior']['classification'].get('pad_zeros', True)
-            elif hasattr(self.model, 'c') and 'prior' in self.model.c:
-                extend_features = self.model.c['prior']['classification'].get('pad_zeros', True)
-            elif hasattr(self.config, 'get') and 'prior' in self.config:
-                extend_features = self.config['prior']['classification'].get('pad_zeros', True)
+            # Set up error logging and debugging
+            if self.verbose:
+                print(f"Starting predict_proba with input shape: {X.shape}")
+                print(f"Model device: {self.device}, Data type: {type(X)}")
+                if torch.is_tensor(self.X_):
+                    print(f"Training data: shape={self.X_.shape}, device={self.X_.device}, dtype={self.X_.dtype}")
+                if torch.is_tensor(self.y_):
+                    print(f"Training labels: shape={self.y_.shape}, device={self.y_.device}, dtype={self.y_.dtype}")
+                
+            # Check if fit had been called
+            check_is_fitted(self, ['is_fitted_'])
+            
+            # Input validation
+            X = check_array(X, force_all_finite=False)
+            
+            # Apply feature selection if needed
+            if self.feature_indices is not None:
+                X = X[:, self.feature_indices]
+                if self.verbose:
+                    print(f"Applied feature selection: {X.shape[1]} features")
+            
+            # Convert to tensors using TabPFN approach
+            if self.verbose:
+                print(f"Input shape: {X.shape}, training shape: {self.X_.shape}")
+                
+            # Concatenate training and test data
+            if torch.is_tensor(X):
+                # Both are already tensors
+                X_test = X.to(self.device)
             else:
-                extend_features = True
-        except (KeyError, AttributeError):
-            extend_features = True
-            
-        if self.verbose:
-            print(f"Feature extension enabled: {extend_features}")
-            
-        # Get maximum number of features the model supports
-        max_features = self.max_num_features
-        if self.verbose:
-            print(f"Max features: {max_features}")
-        
-        # Prepare prediction configurations
-        preprocess_transform = 'none' if getattr(self, 'no_preprocess_mode', False) else 'mix'
-        preprocess_transform_configurations = ['none', 'power_all'] if preprocess_transform == 'mix' else [preprocess_transform]
-        
-        # Determine categorical features (semantic features should be treated as categorical)
-        categorical_feats = self.semantic_column_indices or []
-        
-        # Set random seed
-        if self.seed is not None:
-            torch.manual_seed(self.seed)
-            random.seed(self.seed)
-            np.random.seed(self.seed)
-            
-        # Create ensemble configurations (following TabPFN approach)
-        feature_shift_configurations = torch.randperm(X_full.shape[2]) if getattr(self, 'feature_shift_decoder', True) else [0]
-        class_shift_configurations = torch.randperm(len(torch.unique(y_full[:eval_pos]))) if getattr(self, 'multiclass_decoder', 'permutation') == 'permutation' else [0]
-        
-        ensemble_configurations = list(itertools.product(class_shift_configurations, feature_shift_configurations))
-        
-        # Shuffle configurations
-        rng = random.Random(self.seed)
-        rng.shuffle(ensemble_configurations)
-        ensemble_configurations = list(itertools.product(ensemble_configurations, preprocess_transform_configurations))
-        ensemble_configurations = ensemble_configurations[0:self.N_ensemble_configurations]
-        
-        if self.verbose:
-            print(f"Using {len(ensemble_configurations)} ensemble configurations")
-            
-        # Start ensemble prediction
-        output = None
-        X_transformed = {}
-        inputs, labels = [], []
-        
-        for ensemble_configuration in ensemble_configurations:
-            (class_shift_configuration, feature_shift_configuration), preprocess_transform_configuration = ensemble_configuration
-            
-            X_, y_ = X_full.clone(), y_full.clone()
-            
-            # Check if we have already transformed this configuration
-            if preprocess_transform_configuration in X_transformed:
-                X_ = X_transformed[preprocess_transform_configuration].clone()
-            else:
-                # Use TabPFN's preprocess_input function with our semantic column awareness
-                X_ = self._preprocess_input(
-                    X_, 
-                    y_full[:eval_pos], 
-                    preprocess_transform=preprocess_transform_configuration, 
-                    max_features=max_features,
-                    normalize_with_test=normalize_with_test, 
-                    eval_position=eval_pos, 
-                    categorical_feats=categorical_feats,
-                    scale=getattr(self, 'scale', True), 
-                    normalize_by_used_features=extend_features
-                )
-                X_transformed[preprocess_transform_configuration] = X_
-                
-            # Apply class shift (label permutation)
-            y_ = ((y_[:eval_pos] + class_shift_configuration) % len(self.classes_)).float()
-            
-            # Apply feature shift
-            X_ = torch.cat([X_[..., feature_shift_configuration:], X_[..., :feature_shift_configuration]], dim=-1)
-            
-            # Extend features if needed (zero padding)
-            if extend_features and X_.shape[2] < max_features:
-                X_ = torch.cat(
-                    [X_, torch.zeros((X_.shape[0], X_.shape[1], max_features - X_.shape[2])).to(self.device)], -1)
-                
-            inputs += [X_]
-            labels += [y_]
-            
-        # Combine all configurations into batches
-        inputs = torch.cat(inputs, 1)
-        inputs = torch.split(inputs, self.batch_size, dim=1)
-        labels = torch.cat(labels, 1)
-        labels = torch.split(labels, self.batch_size, dim=1)
-        
-        # Run prediction on batches
-        outputs = []
-        num_classes = len(self.classes_)
-        softmax_temperature = getattr(self, 'temperature', torch.log(torch.tensor([0.8], device=self.device)))
-
-        # Process each batch
-        with torch.no_grad():
-            for batch_input, batch_label in zip(inputs, labels):
-                # Get model prediction
-                # Run the model in evaluation mode
-                self.model.eval()
-                
-                # Handle case where the model yields different outputs
-                if hasattr(self.model, 'generate_boundaries_from_text') and descriptions and len(descriptions) > 0:
-                    # Use text-based boundary generation if available
-                    model_output = self.model.generate_boundaries_from_text(
-                        (batch_input, batch_label.float()), 
-                        class_descriptions=descriptions
-                    )
-                    if isinstance(model_output, dict) and 'class_logits' in model_output:
-                        output_batch = model_output['class_logits']
-                    else:
-                        # Get predictions from other fields if class_logits not available
-                        output_batch = model_output.get('logits', model_output.get('class_preds', None))
-                        if output_batch is None:
-                            raise ValueError("Could not extract predictions from model output")
+                # Convert test data to tensor with proper dtype for device
+                if self.device == 'mps':
+                    # MPS doesn't support float64, explicitly convert to float32
+                    X_test = torch.tensor(X, dtype=torch.float32, device=self.device)
                 else:
-                    # Standard forward pass
-                    output = self.model(
-                        (batch_input, batch_label.float()),
-                        single_eval_pos=eval_pos
-                    )
-                    
-                    # Handle different output formats
-                    if isinstance(output, dict) and 'class_logits' in output:
-                        output_batch = output['class_logits']
-                    elif isinstance(output, dict) and 'logits' in output:
-                        output_batch = output['logits']
-                    else:
-                        # Direct tensor output (base model pass-through)
-                        output_batch = output
-                
-                # Apply temperature scaling if needed
-                output_batch = output_batch[:, :, 0:num_classes] / torch.exp(softmax_temperature)
-                outputs.append(output_batch)
-        
-        # Combine all batch outputs
-        if outputs:
-            outputs = torch.cat(outputs, 1)
+                    X_test = torch.tensor(X, device=self.device).float()
             
-            # Process each ensemble configuration
-            output = None
-            for i, ensemble_configuration in enumerate(ensemble_configurations):
-                (class_shift_configuration, feature_shift_configuration), preprocess_transform_configuration = ensemble_configuration
-                output_ = outputs[:, i:i+1, :]
+            # Ensure X_full is properly constructed on the correct device
+            if self.verbose:
+                print(f"Training data device: {self.X_.device}, test data device: {X_test.device}")
                 
-                # Reverse class shift
-                output_ = torch.cat([output_[..., class_shift_configuration:], output_[..., :class_shift_configuration]], dim=-1)
+            # Make sure both tensors are on the same device
+            if self.X_.device != X_test.device:
+                X_test = X_test.to(self.X_.device)
                 
-                # Average or convert to probabilities
-                if not return_logits:
-                    # Apply softmax to convert to probabilities
-                    output_ = torch.nn.functional.softmax(output_, dim=-1)
-                
-                # Add to ensemble output
-                output = output_ if output is None else output + output_
+            X_full = torch.cat((self.X_, X_test), dim=0).float().unsqueeze(1)
             
-            # Average ensemble outputs
-            output = output / len(ensemble_configurations)
+            if self.verbose:
+                print(f"Combined data shape: {X_full.shape}, device: {X_full.device}")
+                
+            # Create targets tensor - being careful with device
+            if torch.is_tensor(self.y_):
+                # If y is a tensor, we need to move it to CPU before converting to numpy
+                y_train_np = self.y_.cpu().numpy()
+            else:
+                # It's already a numpy array
+                y_train_np = self.y_
+                
+            # Create y for test samples (zeros)
+            y_test_np = np.zeros(shape=X.shape[0])
             
-            # Apply final softmax if needed
-            if not return_logits:
-                # Already applied softmax to each configuration
+            # Combine and convert to tensor on correct device
+            y_full_np = np.concatenate([y_train_np, y_test_np], axis=0)
+            y_full = torch.tensor(y_full_np, device=self.device).float().unsqueeze(1)
+            
+            # Position for evaluation
+            eval_pos = len(self.X_)
+            
+            # Use the class descriptions if provided, otherwise use stored ones
+            descriptions = class_descriptions or self.semantic_class_descriptions
+            
+            # Detect if we should use zero-padding from config (TabPFN approach)
+            extend_features = True
+            try:
+                if hasattr(self.model.base_model, 'c') and 'prior' in self.model.base_model.c:
+                    extend_features = self.model.base_model.c['prior']['classification'].get('pad_zeros', True)
+                elif hasattr(self.model, 'c') and 'prior' in self.model.c:
+                    extend_features = self.model.c['prior']['classification'].get('pad_zeros', True)
+                elif hasattr(self.config, 'get') and 'prior' in self.config:
+                    extend_features = self.config['prior']['classification'].get('pad_zeros', True)
+            except (KeyError, AttributeError):
                 pass
+                
+            if self.verbose:
+                print(f"Feature extension enabled: {extend_features}")
+                
+            # Get maximum number of features the model supports
+            max_features = self.max_num_features
+            if self.verbose:
+                print(f"Max features: {max_features}")
             
-            # Get test set predictions (transpose to match sklearn format)
-            output = torch.transpose(output, 0, 1)
-            prediction = output.detach().cpu().numpy()
+            # Prepare prediction configurations
+            preprocess_transform = 'none' if getattr(self, 'no_preprocess_mode', False) else 'mix'
+            preprocess_transform_configurations = ['none', 'power_all'] if preprocess_transform == 'mix' else [preprocess_transform]
             
-            # Return prediction probabilities for all classes
-            return prediction
-        else:
-            # Fallback if no predictions could be generated
-            return np.zeros((X.shape[0], len(self.classes_)))
+            # Determine categorical features (semantic features should be treated as categorical)
+            categorical_feats = self.semantic_column_indices or []
+            
+            # Set random seed
+            if self.seed is not None:
+                torch.manual_seed(self.seed)
+                random.seed(self.seed)
+                np.random.seed(self.seed)
+                
+            # Create ensemble configurations (following TabPFN approach)
+            feature_shift_configurations = torch.randperm(X_full.shape[2]) if getattr(self, 'feature_shift_decoder', True) else [0]
+            class_shift_configurations = torch.randperm(len(torch.unique(y_full[:eval_pos]))) if getattr(self, 'multiclass_decoder', 'permutation') == 'permutation' else [0]
+            
+            ensemble_configurations = list(itertools.product(class_shift_configurations, feature_shift_configurations))
+            
+            # Shuffle configurations
+            rng = random.Random(self.seed)
+            rng.shuffle(ensemble_configurations)
+            ensemble_configurations = list(itertools.product(ensemble_configurations, preprocess_transform_configurations))
+            ensemble_configurations = ensemble_configurations[0:self.N_ensemble_configurations]
+            
+            if self.verbose:
+                print(f"Using {len(ensemble_configurations)} ensemble configurations")
+                
+            # Start ensemble prediction
+            output = None
+            X_transformed = {}
+            inputs, labels = [], []
+            
+            for ensemble_configuration in ensemble_configurations:
+                (class_shift_configuration, feature_shift_configuration), preprocess_transform_configuration = ensemble_configuration
+                
+                X_, y_ = X_full.clone(), y_full.clone()
+                
+                # Check if we have already transformed this configuration
+                if preprocess_transform_configuration in X_transformed:
+                    X_ = X_transformed[preprocess_transform_configuration].clone()
+                else:
+                    # Use TabPFN's preprocess_input function with our semantic column awareness
+                    X_ = self._preprocess_input(
+                        X_, 
+                        y_full[:eval_pos], 
+                        preprocess_transform=preprocess_transform_configuration, 
+                        max_features=max_features,
+                        normalize_with_test=normalize_with_test, 
+                        eval_position=eval_pos, 
+                        categorical_feats=categorical_feats,
+                        scale=getattr(self, 'scale', True), 
+                        normalize_by_used_features=extend_features
+                    )
+                    X_transformed[preprocess_transform_configuration] = X_
+                    
+                # Apply class shift (label permutation)
+                y_ = ((y_[:eval_pos] + class_shift_configuration) % len(self.classes_)).float()
+                
+                # Apply feature shift
+                X_ = torch.cat([X_[..., feature_shift_configuration:], X_[..., :feature_shift_configuration]], dim=-1)
+                
+                # Extend features if needed (zero padding)
+                if extend_features and X_.shape[2] < max_features:
+                    X_ = torch.cat(
+                        [X_, torch.zeros((X_.shape[0], X_.shape[1], max_features - X_.shape[2])).to(self.device)], -1)
+                    
+                inputs += [X_]
+                labels += [y_]
+                
+            # Combine all configurations into batches
+            inputs = torch.cat(inputs, 1)
+            inputs = torch.split(inputs, self.batch_size, dim=1)
+            labels = torch.cat(labels, 1)
+            labels = torch.split(labels, self.batch_size, dim=1)
+            
+            # Run prediction on batches
+            outputs = []
+            num_classes = len(self.classes_)
+            softmax_temperature = getattr(self, 'temperature', torch.log(torch.tensor([0.8], device=self.device)))
+    
+            # Process each batch
+            with torch.no_grad():
+                for batch_input, batch_label in zip(inputs, labels):
+                    # Get model prediction
+                    # Run the model in evaluation mode
+                    self.model.eval()
+                    
+                    # Handle case where the model yields different outputs
+                    if hasattr(self.model, 'generate_boundaries_from_text') and descriptions and len(descriptions) > 0:
+                        # Use text-based boundary generation if available
+                        model_output = self.model.generate_boundaries_from_text(
+                            (batch_input, batch_label.float()), 
+                            class_descriptions=descriptions
+                        )
+                        if isinstance(model_output, dict) and 'class_logits' in model_output:
+                            output_batch = model_output['class_logits']
+                        else:
+                            # Get predictions from other fields if class_logits not available
+                            output_batch = model_output.get('logits', model_output.get('class_preds', None))
+                            if output_batch is None:
+                                raise ValueError("Could not extract predictions from model output")
+                    else:
+                        # Standard forward pass
+                        output = self.model(
+                            (batch_input, batch_label.float()),
+                            single_eval_pos=eval_pos
+                        )
+                        
+                        # Handle different output formats
+                        if isinstance(output, dict) and 'class_logits' in output:
+                            output_batch = output['class_logits']
+                        elif isinstance(output, dict) and 'logits' in output:
+                            output_batch = output['logits']
+                        else:
+                            # Direct tensor output (base model pass-through)
+                            output_batch = output
+                    
+                    # Apply temperature scaling if needed
+                    output_batch = output_batch[:, :, 0:num_classes] / torch.exp(softmax_temperature)
+                    outputs.append(output_batch)
+            
+            # Combine all batch outputs
+            if outputs:
+                outputs = torch.cat(outputs, 1)
+                
+                # Process each ensemble configuration
+                output = None
+                for i, ensemble_configuration in enumerate(ensemble_configurations):
+                    (class_shift_configuration, feature_shift_configuration), preprocess_transform_configuration = ensemble_configuration
+                    output_ = outputs[:, i:i+1, :]
+                    
+                    # Reverse class shift
+                    output_ = torch.cat([output_[..., class_shift_configuration:], output_[..., :class_shift_configuration]], dim=-1)
+                    
+                    # Average or convert to probabilities
+                    if not return_logits:
+                        # Apply softmax to convert to probabilities
+                        output_ = torch.nn.functional.softmax(output_, dim=-1)
+                    
+                    # Add to ensemble output
+                    output = output_ if output is None else output + output_
+                
+                # Average ensemble outputs
+                output = output / len(ensemble_configurations)
+                
+                # Apply final softmax if needed
+                if not return_logits:
+                    # Already applied softmax to each configuration
+                    pass
+                
+                # Get test set predictions (transpose to match sklearn format)
+                output = torch.transpose(output, 0, 1)
+                prediction = output.detach().cpu().numpy()
+                
+                # Return prediction probabilities for all classes
+                return prediction
+            else:
+                # Fallback if no predictions could be generated
+                return np.zeros((X.shape[0], len(self.classes_)))
+                
+        except Exception as e:
+            # Log the error and return a fallback prediction
+            if self.verbose:
+                print(f"Error during prediction: {str(e)}")
+                import traceback
+                traceback.print_exc()
+            
+            # Return zero probabilities as fallback
+            return np.zeros((len(X), len(self.classes_)))
             
     def _preprocess_input(self, eval_xs, eval_ys, preprocess_transform, max_features, 
                          normalize_with_test, eval_position, categorical_feats, 
@@ -616,8 +665,12 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
                 # Apply transformation
                 eval_xs[:, col:col + 1] = trans
                 
-            # Convert back to torch tensor
-            eval_xs = torch.tensor(eval_xs, device=device).float()
+            # Convert back to torch tensor with proper dtype for device
+            if device == 'mps':
+                # MPS doesn't support float64, explicitly convert to float32
+                eval_xs = torch.tensor(eval_xs, dtype=torch.float32, device=device)
+            else:
+                eval_xs = torch.tensor(eval_xs, device=device).float()
             
         # Reset warning filter
         warnings.simplefilter('default')
@@ -774,8 +827,12 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
         if self.feature_indices is not None:
             X = X[:, self.feature_indices]
         
-        # Convert to torch tensor
-        X_test = torch.tensor(X, device=self.device).float()
+        # Convert to torch tensor with proper dtype for device
+        if self.device == 'mps':
+            # MPS doesn't support float64, explicitly convert to float32
+            X_test = torch.tensor(X, dtype=torch.float32, device=self.device)
+        else:
+            X_test = torch.tensor(X, device=self.device).float()
         
         # Check expected feature dimensions from model
         if hasattr(self.model.base_model, 'encoder') and hasattr(self.model.base_model.encoder, 'weight'):
@@ -809,7 +866,18 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
         
         # Combine training and test data for in-context learning
         X_full = torch.cat([X_train, X_test], dim=0).unsqueeze(1)
-        y_full = torch.cat([self.y_, torch.zeros(len(X_test), dtype=torch.long, device=self.device)], dim=0).unsqueeze(1)
+        
+        # Create zeros tensor for test labels with appropriate device
+        test_zeros = torch.zeros(len(X_test), dtype=torch.long, device=self.device)
+        
+        # Ensure y labels are on the correct device
+        if self.y_.device != self.device:
+            y_train = self.y_.to(self.device)
+        else:
+            y_train = self.y_
+            
+        # Combine train and test labels
+        y_full = torch.cat([y_train, test_zeros], dim=0).unsqueeze(1)
         
         # Call the model's text-based prediction method
         results = self.model.predict_from_text((X_full, y_full), text_description)
