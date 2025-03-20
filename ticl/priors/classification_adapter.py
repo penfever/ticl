@@ -1019,6 +1019,8 @@ class ClassificationAdapter:
                                     quant_75 = feat_min + range_val * 0.75
                                 
                                 # Process each row for each batch
+                                # Get sample size from input tensor shape
+                                sample_size = x.shape[0]
                                 for b in range(batch_size):
                                     # For each sample/row in this batch
                                     for s in range(sample_size):
