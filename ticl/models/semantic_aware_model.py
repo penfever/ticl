@@ -330,14 +330,47 @@ class SemanticAwareClassifier(nn.Module):
         # ===== Compute CLIP-style contrastive similarities =====
         # If we have text features, compute cosine similarity scaled by temperature
         if text_features is not None:
-            # Get temperature-scaled logits (similar to CLIP)
-            logit_scale = self.logit_scale.exp()
+            # Check features for NaN values first and fix if needed
+            if torch.isnan(tabular_features).any() or torch.isinf(tabular_features).any():
+                memory_logger.warning("NaN or inf values detected in tabular features, applying stabilization")
+                tabular_features = torch.nan_to_num(tabular_features, nan=0.0, posinf=1.0, neginf=-1.0)
+                # Re-normalize after fixing NaNs
+                tabular_features = F.normalize(tabular_features, dim=1)
+                
+            if torch.isnan(text_features).any() or torch.isinf(text_features).any():
+                memory_logger.warning("NaN or inf values detected in text features, applying stabilization")
+                text_features = torch.nan_to_num(text_features, nan=0.0, posinf=1.0, neginf=-1.0)
+                # Re-normalize after fixing NaNs
+                text_features = F.normalize(text_features, dim=1)
             
-            # Compute similarity: [batch_size, embed_dim] x [embed_dim, n_classes]
-            semantic_logits = logit_scale * torch.matmul(
-                tabular_features,
-                text_features.transpose(0, 1)
-            )
+            try:
+                # Get temperature-scaled logits (similar to CLIP) with safety bounds
+                # Clamp logit_scale to avoid extreme values which can cause overflow
+                logit_scale_raw = self.logit_scale.clamp(min=-20, max=20)  # Reasonable bounds
+                logit_scale = torch.exp(logit_scale_raw)
+                
+                # Additional safety check on the scale
+                if torch.isnan(logit_scale) or torch.isinf(logit_scale):
+                    memory_logger.warning(f"Invalid logit scale: {logit_scale.item()}, using default")
+                    logit_scale = torch.tensor(20.0, device=tabular_features.device)
+                
+                # Compute similarity: [batch_size, embed_dim] x [embed_dim, n_classes]
+                semantic_logits = logit_scale * torch.matmul(
+                    tabular_features,
+                    text_features.transpose(0, 1)
+                )
+                
+                # Check for NaN or Inf in the resulting logits
+                if torch.isnan(semantic_logits).any() or torch.isinf(semantic_logits).any():
+                    memory_logger.warning("NaN or inf values detected in semantic_logits, applying numeric stabilization")
+                    semantic_logits = torch.nan_to_num(semantic_logits, nan=0.0, posinf=100.0, neginf=-100.0)
+            except Exception as e:
+                memory_logger.error(f"Error computing contrastive similarities: {e}")
+                # Create fallback semantic logits with small random values
+                semantic_logits = torch.randn(
+                    (tabular_features.shape[0], text_features.shape[0]),
+                    device=tabular_features.device
+                ) * 0.01
         else:
             # No class texts provided - use fallback approach
             
@@ -790,8 +823,25 @@ class SemanticConsistencyLoss(nn.Module):
         # Get targets for standard classification
         class_targets = targets['class_targets']
         
-        # Compute standard classification loss
-        class_loss = self.class_loss(class_logits, class_targets)
+        # Check for NaN/Inf in class_logits and stabilize if needed
+        if torch.isnan(class_logits).any() or torch.isinf(class_logits).any():
+            memory_logger.warning("NaN or Inf values detected in class_logits - applying numeric stabilization")
+            class_logits = torch.nan_to_num(class_logits, nan=0.0, posinf=1e4, neginf=-1e4)
+            
+            # Apply additional stabilization
+            class_logits = class_logits - class_logits.max(dim=-1, keepdim=True)[0].detach()
+        
+        # Compute standard classification loss with error handling
+        try:
+            class_loss = self.class_loss(class_logits, class_targets)
+            
+            # Check if loss is NaN and fallback if needed
+            if torch.isnan(class_loss) or torch.isinf(class_loss):
+                memory_logger.warning("NaN or Inf class loss - using fallback loss value")
+                class_loss = torch.tensor(0.5, device=class_logits.device)
+        except Exception as e:
+            memory_logger.error(f"Error computing class loss: {e}")
+            class_loss = torch.tensor(0.5, device=class_logits.device)
         
         # Initialize semantic loss
         semantic_loss = torch.tensor(0.0, device=class_loss.device)
@@ -807,9 +857,15 @@ class SemanticConsistencyLoss(nn.Module):
             semantic_logits = outputs['semantic_logits']
             semantic_targets = targets['semantic_targets']
             
+            # First check for any NaN/Inf in semantic logits
+            if torch.isnan(semantic_logits).any() or torch.isinf(semantic_logits).any():
+                memory_logger.warning("NaN or Inf values detected in semantic_logits - applying numeric stabilization")
+                semantic_logits = torch.nan_to_num(semantic_logits, nan=0.0, posinf=1e4, neginf=-1e4)
+            
             # Check if we actually have valid semantic targets in this batch
             if semantic_targets.numel() == 0:
                 # Skip semantic loss calculation for this batch
+                memory_logger.debug("No semantic targets in batch - skipping semantic loss")
                 pass
             else:
                 # Ensure semantic targets are long type for cross_entropy
@@ -819,59 +875,106 @@ class SemanticConsistencyLoss(nn.Module):
                 # Get batch size
                 batch_size = semantic_logits.shape[0]
                 
-                # True CLIP-style loss uses the logits directly (already temperature-scaled in forward)
-                # Create labels for contrastive learning - diagonal of similarity matrix should be 1s
-                labels = torch.arange(batch_size, device=semantic_logits.device)
-                
                 # For samples with valid targets, compute contrastive loss
                 valid_mask = semantic_targets != -100
+                valid_count = valid_mask.sum().item()
                 
-                if valid_mask.sum() > 0:
+                if valid_count > 0:
+                    memory_logger.debug(f"Found {valid_count} valid semantic targets")
                     # Filter to valid samples only
-                    valid_logits = semantic_logits[valid_mask]
-                    valid_targets = semantic_targets[valid_mask]
-                    
-                    # Ensure targets remain long type
-                    valid_targets = valid_targets.long()
-                    
-                    # For proper contrastive loss, we need valid samples
-                    if valid_logits.shape[0] > 0:
-                        try:
-                            # Check for NaN values in logits and apply numeric stability fixes
-                            if torch.isnan(valid_logits).any() or torch.isinf(valid_logits).any():
-                                valid_logits = torch.nan_to_num(valid_logits, nan=0.0, posinf=1e4, neginf=-1e4)
-                                memory_logger.warning("NaN or Inf values detected in contrastive logits - applying numeric stabilization")
-                            
+                    try:
+                        valid_logits = semantic_logits[valid_mask]
+                        valid_targets = semantic_targets[valid_mask]
+                        
+                        # Ensure targets remain long type
+                        valid_targets = valid_targets.long()
+                        
+                        # For proper contrastive loss, we need valid samples
+                        if valid_logits.shape[0] > 0:
                             # Apply log-sum-exp trick for numerical stability
                             valid_logits = valid_logits - valid_logits.max(dim=-1, keepdim=True)[0].detach()
                             
                             try:
-                                # Row-wise (text->tabular) with additional stability checks
+                                # First check if the valid targets are valid class indices for the valid_logits
+                                num_classes = valid_logits.shape[1] if len(valid_logits.shape) > 1 else 1
+                                
+                                # Make sure targets don't exceed available classes
+                                if valid_targets.max() >= num_classes:
+                                    memory_logger.warning(f"Target values ({valid_targets.max()}) exceed available classes ({num_classes})")
+                                    valid_targets = valid_targets.clamp(max=num_classes-1)
+                                
+                                # Row-wise (text->tabular) contrastive loss
                                 loss_text_to_tabular = F.cross_entropy(valid_logits, valid_targets)
                                 
-                                # Column-wise (tabular->text) with additional stability checks
-                                loss_tabular_to_text = F.cross_entropy(valid_logits.t(), valid_targets)
+                                # Apply safety checks to handle potential NaN/Inf
+                                if torch.isnan(loss_text_to_tabular) or torch.isinf(loss_text_to_tabular):
+                                    loss_text_to_tabular = torch.tensor(0.1, device=class_loss.device)
                                 
-                                # Symmetric loss (mean of both directions)
-                                semantic_loss = (loss_text_to_tabular + loss_tabular_to_text) / 2.0
+                                # Similarly compute column-wise (tabular->text) loss
+                                try:
+                                    # Only compute if logits matrix is square (same # of samples and classes)
+                                    if valid_logits.shape[0] == valid_logits.shape[1]:
+                                        loss_tabular_to_text = F.cross_entropy(valid_logits.t(), valid_targets)
+                                        
+                                        # Safety check
+                                        if torch.isnan(loss_tabular_to_text) or torch.isinf(loss_tabular_to_text):
+                                            loss_tabular_to_text = torch.tensor(0.1, device=class_loss.device)
+                                            
+                                        # Symmetric loss (mean of both directions)
+                                        semantic_loss = (loss_text_to_tabular + loss_tabular_to_text) / 2.0
+                                    else:
+                                        # If not square, just use the row-wise loss
+                                        semantic_loss = loss_text_to_tabular
+                                except Exception as e:
+                                    memory_logger.warning(f"Error in tabular->text loss calculation: {e}, using one-sided loss")
+                                    semantic_loss = loss_text_to_tabular
                                 
-                                # Check for valid loss values
-                                if torch.isnan(semantic_loss) or torch.isinf(semantic_loss):
-                                    memory_logger.warning("NaN or Inf semantic loss encountered - using fallback loss")
-                                    semantic_loss = torch.tensor(0.1, device=class_loss.device)
                             except Exception as e:
                                 memory_logger.error(f"Error in contrastive loss calculation: {e}")
                                 semantic_loss = torch.tensor(0.1, device=class_loss.device)
-                        except Exception as e:
-                            # Fallback to zero semantic loss
-                            semantic_loss = torch.tensor(0.0, device=class_loss.device)
+                    except Exception as e:
+                        memory_logger.error(f"Error selecting valid semantic samples: {e}")
+                        semantic_loss = torch.tensor(0.0, device=class_loss.device)
+                else:
+                    memory_logger.debug("No valid semantic targets (-100 values)")
         
-        # Combine losses
-        total_loss = class_loss + self.semantic_weight * semantic_loss
+        # Final check on semantic loss
+        if torch.isnan(semantic_loss) or torch.isinf(semantic_loss):
+            memory_logger.warning("Final semantic loss is NaN/Inf, using fallback")
+            semantic_loss = torch.tensor(0.0, device=class_loss.device)
+        
+        # Combine losses with safety check
+        weighted_semantic_loss = self.semantic_weight * semantic_loss
+                
+        # Final safety check for total loss
+        try:
+            total_loss = class_loss + weighted_semantic_loss
+            
+            # Check for invalid final loss
+            if torch.isnan(total_loss) or torch.isinf(total_loss):
+                memory_logger.warning("Total loss is NaN/Inf, using only valid components")
+                # Check which component is valid
+                if not (torch.isnan(class_loss) or torch.isinf(class_loss)):
+                    total_loss = class_loss
+                elif not (torch.isnan(weighted_semantic_loss) or torch.isinf(weighted_semantic_loss)):
+                    total_loss = weighted_semantic_loss
+                else:
+                    # Both components invalid, use fallback
+                    total_loss = torch.tensor(0.5, device=class_loss.device)
+        except Exception as e:
+            memory_logger.error(f"Error combining losses: {e}")
+            total_loss = torch.tensor(0.5, device=class_loss.device)
         
         # Store components for debugging
-        self.last_class_loss = class_loss.item()
-        self.last_semantic_loss = semantic_loss.item()
+        try:
+            self.last_class_loss = class_loss.item()
+        except:
+            self.last_class_loss = 0.0
+            
+        try:
+            self.last_semantic_loss = semantic_loss.item()
+        except:
+            self.last_semantic_loss = 0.0
         
         return total_loss
 

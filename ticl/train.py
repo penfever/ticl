@@ -67,17 +67,77 @@ def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
                 memory_logger.debug(f"Model output['{k}']: shape={v.shape}, dtype={v.dtype}")
                 if k == 'class_logits':
                     # Log more details about class predictions
-                    class_probs = torch.softmax(v, dim=-1)
-                    predicted_classes = torch.argmax(class_probs, dim=-1)
-                    memory_logger.debug(f"Predicted classes: {predicted_classes}")
-                    memory_logger.debug(f"Max class probability: {torch.max(class_probs, dim=-1)[0]}")
+                    # Check for NaN values in logits first
+                    if torch.isnan(v).any() or torch.isinf(v).any():
+                        memory_logger.warning(f"NaN or Inf values detected in class logits before softmax - applying numeric stabilization")
+                        v_stable = torch.nan_to_num(v, nan=0.0, posinf=1e4, neginf=-1e4)
+                    else:
+                        v_stable = v
+                    
+                    # Apply numerical stability techniques before softmax
+                    # 1. Subtract max value for numerical stability (log-sum-exp trick)
+                    v_stable = v_stable - v_stable.max(dim=-1, keepdim=True)[0].detach()
+                    
+                    try:
+                        # 2. Apply softmax with the stabilized values
+                        class_probs = torch.softmax(v_stable, dim=-1)
+                        
+                        # Check if softmax produced valid probabilities
+                        if torch.isnan(class_probs).any() or torch.isinf(class_probs).any():
+                            memory_logger.warning("Softmax produced NaN/Inf probabilities, using fallback approach")
+                            # Fallback: use a very simple approach - uniform distribution
+                            num_classes = v.shape[-1]
+                            class_probs = torch.ones_like(v) / num_classes
+                        
+                        predicted_classes = torch.argmax(class_probs, dim=-1)
+                        memory_logger.debug(f"Predicted classes: {predicted_classes}")
+                        
+                        # Safe max calculation with error check
+                        try:
+                            max_probs = torch.max(class_probs, dim=-1)[0]
+                            memory_logger.debug(f"Max class probability: {max_probs}")
+                        except Exception as e:
+                            memory_logger.warning(f"Error calculating max probability: {e}")
+                    except Exception as e:
+                        memory_logger.error(f"Error in probability calculation: {e}")
+                        # Complete fallback in case of catastrophic failure
+                        num_classes = v.shape[-1]
+                        class_probs = torch.ones_like(v) / num_classes
+                        predicted_classes = torch.zeros_like(v[..., 0], dtype=torch.long)
+                        memory_logger.debug("Using uniform probabilities as complete fallback")
     else:
         memory_logger.debug(f"Model output: shape={output.shape}, dtype={output.dtype}")
         # Log class predictions for standard output
         if len(output.shape) > 1 and output.shape[-1] > 1:  # Multi-class case
-            class_probs = torch.softmax(output, dim=-1)
-            predicted_classes = torch.argmax(class_probs, dim=-1)
-            memory_logger.debug(f"Predicted classes: {predicted_classes}")
+            # Check for NaN values in logits first
+            if torch.isnan(output).any() or torch.isinf(output).any():
+                memory_logger.warning(f"NaN or Inf values detected in standard output logits - applying numeric stabilization")
+                output_stable = torch.nan_to_num(output, nan=0.0, posinf=1e4, neginf=-1e4)
+            else:
+                output_stable = output
+            
+            # Apply numerical stability techniques
+            output_stable = output_stable - output_stable.max(dim=-1, keepdim=True)[0].detach()
+            
+            try:
+                # Apply softmax with stabilized values
+                class_probs = torch.softmax(output_stable, dim=-1)
+                
+                # Check if softmax produced valid probabilities
+                if torch.isnan(class_probs).any() or torch.isinf(class_probs).any():
+                    memory_logger.warning("Softmax produced NaN/Inf probabilities in standard output, using fallback")
+                    # Fallback to uniform distribution
+                    num_classes = output.shape[-1]
+                    class_probs = torch.ones_like(output) / num_classes
+                
+                predicted_classes = torch.argmax(class_probs, dim=-1)
+                memory_logger.debug(f"Predicted classes: {predicted_classes}")
+            except Exception as e:
+                memory_logger.error(f"Error in standard output probability calculation: {e}")
+                num_classes = output.shape[-1]
+                class_probs = torch.ones_like(output) / num_classes
+                predicted_classes = torch.zeros_like(output[..., 0], dtype=torch.long)
+                memory_logger.debug("Using uniform probabilities for standard output as fallback")
     
     # Log batch_info if present
     if batch_info is not None:
