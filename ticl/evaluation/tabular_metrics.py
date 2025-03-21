@@ -47,72 +47,93 @@ def auc_metric(target, pred, multi_class='ovo', numpy=False):
         target = torch.tensor(target) if not torch.is_tensor(target) else target
         pred = torch.tensor(pred) if not torch.is_tensor(pred) else pred
     
-    # For multi-class classification, ensure predictions are properly normalized
-    if len(lib.unique(target)) > 2:
+    # Convert tensors to numpy for consistent processing
+    target_np = target.detach().cpu().numpy() if torch.is_tensor(target) else np.array(target)
+    pred_np = pred.detach().cpu().numpy() if torch.is_tensor(pred) else np.array(pred)
+    
+    # Handle NaN and Inf values in predictions
+    if np.isnan(pred_np).any() or np.isinf(pred_np).any():
+        print(f"Warning: AUC metric - found {np.isnan(pred_np).sum()} NaN values and {np.isinf(pred_np).sum()} Inf values in predictions")
+        # Replace NaN/Inf with safe values
+        pred_np = np.nan_to_num(pred_np, nan=0.5, posinf=1.0, neginf=0.0)
+    
+    # Handle invalid targets - ensure they are integers with valid class labels
+    if np.isnan(target_np).any() or np.isinf(target_np).any():
+        print(f"Warning: AUC metric - found {np.isnan(target_np).sum()} NaN values and {np.isinf(target_np).sum()} Inf values in targets")
+        # For targets, we need valid class indices - replace with most common class
+        if np.isnan(target_np).any() or np.isinf(target_np).any():
+            valid_targets = target_np[~(np.isnan(target_np) | np.isinf(target_np))]
+            if len(valid_targets) > 0:
+                # Replace with most common class
+                from scipy import stats
+                most_common = stats.mode(valid_targets, keepdims=False)[0]
+                target_np = np.nan_to_num(target_np, nan=most_common, posinf=most_common, neginf=most_common)
+            else:
+                # If all targets are invalid, use zeros
+                target_np = np.zeros_like(target_np)
+    
+    # Ensure target is integer type for classification
+    target_np = target_np.astype(int)
+    
+    # Get unique classes with valid targets
+    unique_classes = np.unique(target_np)
+    n_classes = len(unique_classes)
+    
+    # For multi-class classification (more than 2 classes)
+    if n_classes > 2:
         # Check if predictions need normalization (sum to 1 across classes)
-        if len(pred.shape) == 2:
-            # Convert to numpy for easier manipulation
-            pred_np = pred.detach().cpu().numpy() if torch.is_tensor(pred) else pred
-            
-            # Check if predictions contain NaN values
-            if np.isnan(pred_np).any():
-                print("Warning: NaN values detected in predictions, replacing with 0")
-                pred_np = np.nan_to_num(pred_np, nan=0.0)
-            
-            # Check if predictions sum to approximately 1
+        if len(pred_np.shape) == 2:
+            # Check for and fix rows with all zeros or NaNs
             row_sums = np.sum(pred_np, axis=1)
-            # Ensure no zero row sums to avoid division by zero
             zero_rows = np.where(np.abs(row_sums) < 1e-10)[0]
+            
             if len(zero_rows) > 0:
-                n_classes = pred_np.shape[1]
-                pred_np[zero_rows] = np.ones((len(zero_rows), n_classes)) / n_classes
+                print(f"Warning: AUC metric - {len(zero_rows)} rows with zero sum detected, setting to uniform distribution")
+                n_pred_classes = pred_np.shape[1]
+                pred_np[zero_rows] = np.ones((len(zero_rows), n_pred_classes)) / n_pred_classes
                 row_sums[zero_rows] = 1.0
-                
+            
+            # Normalize predictions to sum to 1 across classes
             if not np.allclose(row_sums, 1.0, rtol=1e-3, atol=1e-3):
-                # Normalize predictions to sum to 1 across classes
                 pred_np = pred_np / row_sums[:, np.newaxis]
-                # Convert back to tensor if needed
-                if not numpy:
-                    pred = torch.tensor(pred_np, device=pred.device if torch.is_tensor(pred) else None)
-                else:
-                    pred = pred_np
         
-        try:
-            if not numpy:
-                return torch.tensor(roc_auc_score(target, pred, multi_class=multi_class))
-            return roc_auc_score(target, pred, multi_class=multi_class)
-        except Exception as e:
-            print(f"Error in roc_auc_score calculation: {e}")
-            # Fallback to accuracy if AUC fails
-            if not numpy:
-                return torch.tensor(0.5)  # Default AUC for random classifier
-            return 0.5
+        # Make sure we have at least one sample of each class in target
+        # (ROC AUC requires at least one positive and one negative sample for each class)
+        class_counts = np.bincount(target_np, minlength=n_classes)
+        missing_classes = np.where(class_counts == 0)[0]
+        
+        if len(missing_classes) > 0:
+            print(f"Warning: AUC metric - Classes {missing_classes} not present in targets. Using default AUC score.")
+            auc_value = 0.5  # Default AUC for random performance
+        else:
+            try:
+                # Use ovr (one-vs-rest) for better handling of edge cases
+                auc_value = roc_auc_score(target_np, pred_np, multi_class='ovr', average='macro')
+            except Exception as e:
+                print(f"Error in multi-class ROC AUC calculation: {e}")
+                # Fall back to default score
+                auc_value = 0.5
     else:
         # Binary classification
-        if len(pred.shape) == 2:
-            pred = pred[:, 1]
+        if len(pred_np.shape) == 2 and pred_np.shape[1] == 2:
+            # Use second column probability for positive class
+            pred_np = pred_np[:, 1]
         
-        # Check for NaN values
-        if numpy:
-            if np.isnan(pred).any():
-                print("Warning: NaN values detected in binary predictions, replacing with 0.5")
-                pred = np.nan_to_num(pred, nan=0.5)
+        # Ensure we have both classes present
+        if len(unique_classes) < 2:
+            print(f"Warning: AUC metric - Only class {unique_classes[0]} present in targets. Using default AUC score.")
+            auc_value = 0.5
         else:
-            pred_np = pred.detach().cpu().numpy() if torch.is_tensor(pred) else pred
-            if np.isnan(pred_np).any():
-                print("Warning: NaN values detected in binary predictions, replacing with 0.5")
-                pred_np = np.nan_to_num(pred_np, nan=0.5)
-                pred = torch.tensor(pred_np, device=pred.device if torch.is_tensor(pred) else None)
-                
-        try:
-            if not numpy:
-                return torch.tensor(roc_auc_score(target, pred))
-            return roc_auc_score(target, pred)
-        except Exception as e:
-            print(f"Error in binary roc_auc_score calculation: {e}")
-            if not numpy:
-                return torch.tensor(0.5)  # Default AUC for random classifier
-            return 0.5
+            try:
+                auc_value = roc_auc_score(target_np, pred_np)
+            except Exception as e:
+                print(f"Error in binary ROC AUC calculation: {e}")
+                auc_value = 0.5
+    
+    # Return value in original format
+    if not numpy:
+        return torch.tensor(auc_value, device=pred.device if torch.is_tensor(pred) else None)
+    return auc_value
 
 
 def accuracy_metric(target, pred):

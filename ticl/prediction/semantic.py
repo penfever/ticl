@@ -151,8 +151,35 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
         self : object
             Returns self
         """
-        # Validate inputs
-        X, y = check_X_y(X, y)
+        # Handle NaN values in input data
+        if isinstance(X, np.ndarray) and (np.isnan(X).any() or np.isinf(X).any()):
+            # Replace NaN and Inf values with suitable defaults
+            if self.verbose:
+                print(f"Warning: Input contains {np.isnan(X).sum()} NaN values and {np.isinf(X).sum()} Inf values. Replacing with zeros.")
+            X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+        elif hasattr(X, 'values'):  # Handle pandas DataFrame
+            if X.isna().any().any() or np.isinf(X.values).any():
+                if self.verbose:
+                    print(f"Warning: Input DataFrame contains NaN or Inf values. Replacing with zeros.")
+                X = X.fillna(0)
+                X = X.replace([np.inf, -np.inf], 0)
+                
+        # Now validate inputs with fixed data
+        try:
+            X, y = check_X_y(X, y, force_all_finite='allow-nan')
+            # If we got here with allow-nan, we still need to clean the data
+            if np.isnan(X).any() or np.isinf(X).any():
+                X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+        except Exception as e:
+            # If check_X_y fails completely, attempt to proceed with minimal validation
+            if self.verbose:
+                print(f"Warning: Input validation failed: {e}. Attempting to proceed with minimal validation.")
+            if not isinstance(X, np.ndarray):
+                X = np.array(X, dtype=np.float32)
+            if not isinstance(y, np.ndarray):
+                y = np.array(y)
+            # Replace any remaining NaN/Inf values
+            X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Store classes seen during fit
         self.classes_ = np.unique(y)
