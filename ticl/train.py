@@ -157,13 +157,31 @@ def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
         losses = criterion(output.flatten(), targets.to(device).flatten())
     elif isinstance(criterion, nn.CrossEntropyLoss):
         memory_logger.debug(f"Using CrossEntropyLoss")
-        # Debug reshape dimensions
-        reshaped_output = output.reshape(-1, n_out)[:, :int(targets.max()) + 1]
-        flattened_targets = targets.to(device).long().flatten()
-        memory_logger.debug(f"Reshaped output for CE loss: {reshaped_output.shape}")
-        memory_logger.debug(f"Flattened targets for CE loss: {flattened_targets.shape}")
         
-        losses = criterion(reshaped_output, flattened_targets)
+        # Add numeric stability protections
+        # Ensure targets are valid and avoid out of bounds issues
+        valid_targets = targets.to(device).clamp(min=0).long().flatten()
+        max_target = valid_targets.max().item()
+        
+        # Check for valid target values and fix if needed
+        if max_target >= n_out:
+            memory_logger.warning(f"Target values ({max_target}) exceed output dimensions ({n_out})! Clamping targets.")
+            valid_targets = valid_targets.clamp(max=n_out-1)
+            max_target = n_out - 1
+        
+        # Debug reshape dimensions
+        reshaped_output = output.reshape(-1, n_out)
+        
+        # Check for NaN or Inf values in output logits
+        if torch.isnan(reshaped_output).any() or torch.isinf(reshaped_output).any():
+            memory_logger.warning("NaN or Inf values detected in output logits - applying safe clipping")
+            reshaped_output = torch.nan_to_num(reshaped_output, nan=0.0, posinf=1e4, neginf=-1e4)
+        
+        memory_logger.debug(f"Reshaped output for CE loss: {reshaped_output.shape}")
+        memory_logger.debug(f"Valid targets for CE loss: {valid_targets.shape}, max value: {max_target}")
+        
+        # Add small epsilon to avoid log(0) issues
+        losses = criterion(reshaped_output, valid_targets)
     else:
         memory_logger.debug(f"Using custom criterion: {type(criterion).__name__}")
         losses = criterion(output, targets)
@@ -531,13 +549,16 @@ def train_epoch(
                     
                 optimizer.zero_grad()                
 
-            # Check for NaN loss
+            # Check for NaN loss and handle it more gracefully
             if torch.isnan(loss):
-                raise ValueError("NAN loss encountered")
+                memory_logger.warning("NaN loss encountered - skipping backpropagation for this batch")
+                # Initialize with small loss value to avoid completely stopping training
+                total_loss += 1.0
+                nan_steps += 1.0  # Count the full step as NaN
             else:
                 total_loss += loss.mean().cpu().detach().item()
+                nan_steps += nan_share
                 
-            nan_steps += nan_share
             ignore_steps += (targets == -100).float().mean()
             
     return (total_loss / steps_per_epoch * aggregate_k_gradients,

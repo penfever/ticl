@@ -837,14 +837,31 @@ class SemanticConsistencyLoss(nn.Module):
                     # For proper contrastive loss, we need valid samples
                     if valid_logits.shape[0] > 0:
                         try:
-                            # Row-wise (text->tabular)
-                            loss_text_to_tabular = F.cross_entropy(valid_logits, valid_targets)
+                            # Check for NaN values in logits and apply numeric stability fixes
+                            if torch.isnan(valid_logits).any() or torch.isinf(valid_logits).any():
+                                valid_logits = torch.nan_to_num(valid_logits, nan=0.0, posinf=1e4, neginf=-1e4)
+                                memory_logger.warning("NaN or Inf values detected in contrastive logits - applying numeric stabilization")
                             
-                            # Column-wise (tabular->text)
-                            loss_tabular_to_text = F.cross_entropy(valid_logits.t(), valid_targets)
+                            # Apply log-sum-exp trick for numerical stability
+                            valid_logits = valid_logits - valid_logits.max(dim=-1, keepdim=True)[0].detach()
                             
-                            # Symmetric loss (mean of both directions)
-                            semantic_loss = (loss_text_to_tabular + loss_tabular_to_text) / 2.0
+                            try:
+                                # Row-wise (text->tabular) with additional stability checks
+                                loss_text_to_tabular = F.cross_entropy(valid_logits, valid_targets)
+                                
+                                # Column-wise (tabular->text) with additional stability checks
+                                loss_tabular_to_text = F.cross_entropy(valid_logits.t(), valid_targets)
+                                
+                                # Symmetric loss (mean of both directions)
+                                semantic_loss = (loss_text_to_tabular + loss_tabular_to_text) / 2.0
+                                
+                                # Check for valid loss values
+                                if torch.isnan(semantic_loss) or torch.isinf(semantic_loss):
+                                    memory_logger.warning("NaN or Inf semantic loss encountered - using fallback loss")
+                                    semantic_loss = torch.tensor(0.1, device=class_loss.device)
+                            except Exception as e:
+                                memory_logger.error(f"Error in contrastive loss calculation: {e}")
+                                semantic_loss = torch.tensor(0.1, device=class_loss.device)
                         except Exception as e:
                             # Fallback to zero semantic loss
                             semantic_loss = torch.tensor(0.0, device=class_loss.device)

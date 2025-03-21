@@ -196,6 +196,7 @@ mothernet/results
 *.pickle
 *.prof
 *.pt
+*.json
 mothernet/joblib_cache
 mothernet/catboost_info
 mothernet/mlruns
