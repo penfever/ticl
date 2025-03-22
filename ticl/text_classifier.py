@@ -9,14 +9,9 @@ import torch
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Union, Tuple, Optional
-import logging
 
 from ticl.models.semantic_aware_model import SemanticAwareClassifier
 from ticl.semantic_text_mapper import SemanticTextMapper
-from ticl.utils import log_gpu_memory, log_tensor_info, track_tensors_memory
-
-# Set up logging for memory profiling
-memory_logger = logging.getLogger("memory_profiling")
 
 
 class TextualClassifier:
@@ -49,60 +44,32 @@ class TextualClassifier:
         use_mixed_precision : bool
             Whether to use mixed precision (FP16) for inference to save memory
         """
-        memory_logger.debug("Initializing TextualClassifier")
-        log_gpu_memory("Before TextualClassifier init")
-        
-        # Profile incoming semantic data
-        memory_logger.debug(f"Incoming semantic data: shape={semantic_data.shape}, dtype={semantic_data.dtype}, " 
-                         f"device={semantic_data.device}")
-        tensor_size_mb = semantic_data.element_size() * semantic_data.nelement() / (1024 * 1024)
-        memory_logger.debug(f"Semantic data size: {tensor_size_mb:.2f} MB")
-        
         # Determine device
         if device is None:
             self.device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
         else:
             self.device = device
         
-        memory_logger.debug(f"Using device: {self.device}")
-        
         # Enable mixed precision for memory efficiency (CUDA only)
         self.use_mixed_precision = use_mixed_precision and torch.cuda.is_available() and self.device == "cuda"
-        memory_logger.debug(f"Mixed precision enabled: {self.use_mixed_precision}")
             
         # Store model and semantic data (keep semantic data on CPU to save GPU memory)
-        memory_logger.debug(f"Moving model to {self.device}")
-        log_gpu_memory("Before moving model to device")
         self.model = model.to(self.device)
         self.model.eval()
-        log_gpu_memory("After moving model to device")
         
         # Ensure semantic data is int32 to save memory and stays on CPU
-        memory_logger.debug("Processing semantic data")
         if semantic_data.dtype != torch.int32 and semantic_data.dtype != torch.int64:
-            memory_logger.debug(f"Converting semantic data from {semantic_data.dtype} to int32")
             semantic_data = semantic_data.to(dtype=torch.int32)
         
         # IMPORTANT: Always keep semantic data on CPU
-        memory_logger.debug("Moving semantic data to CPU")
         self.semantic_data = semantic_data.to("cpu")
         
-        # Check semantic data shape and total size
-        memory_logger.debug(f"Final semantic data: shape={self.semantic_data.shape}, "
-                         f"dtype={self.semantic_data.dtype}, device={self.semantic_data.device}")
-        semantic_size_mb = self.semantic_data.element_size() * self.semantic_data.nelement() / (1024 * 1024)
-        memory_logger.debug(f"Final semantic data size: {semantic_size_mb:.2f} MB")
-        
         # Initialize text mapper - keep on CPU for text processing
-        memory_logger.debug("Initializing text mapper on CPU")
         self.text_mapper = SemanticTextMapper(device="cpu")
         
         # Clean up GPU memory after initialization
-        memory_logger.debug("Cleaning up GPU memory")
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            
-        log_gpu_memory("After TextualClassifier init")
         
     def preprocess_data(
         self, 
@@ -165,34 +132,18 @@ class TextualClassifier:
         Tuple[torch.Tensor, float]
             Tuple of (class_predictions, similarity_score)
         """
-        memory_logger.debug(f"=== STARTING classify_with_text ===")
-        memory_logger.debug(f"Text description: '{text_description}'")
-        log_gpu_memory("Before classify_with_text")
-        
         # Preprocess data
-        memory_logger.debug("Preprocessing input data")
         x = self.preprocess_data(data)
-        memory_logger.debug(f"Preprocessed data shape: {x.shape}, device: {x.device}")
-        
-        # IMPORTANT: Don't load all semantic data to GPU at once - the model actually 
-        # doesn't use it directly. For backward compatibility, we still pass it,
-        # but keep it on CPU where it's actually accessed.
-        memory_logger.debug(f"Semantic data shape: {self.semantic_data.shape}, device: {self.semantic_data.device}")
         
         # Verify the semantic data is still on CPU
         if self.semantic_data.device.type != 'cpu':
-            memory_logger.warning(f"ALERT: Semantic data found on {self.semantic_data.device} - moving back to CPU")
             self.semantic_data = self.semantic_data.to('cpu')
         
         # Get predictions based on text - use mixed precision if enabled
         try:
-            log_gpu_memory("Before model.predict_from_text")
-            memory_logger.debug("Running prediction with text description")
-            
             with torch.no_grad():
                 if self.use_mixed_precision and torch.cuda.is_available() and x.device.type == 'cuda':
                     # CUDA with mixed precision
-                    memory_logger.debug("Using mixed precision (FP16)")
                     with torch.cuda.amp.autocast():
                         results = self.model.predict_from_text(
                             x, 
@@ -202,7 +153,6 @@ class TextualClassifier:
                         )
                 else:
                     # Standard precision for MPS/CPU or when mixed precision is disabled
-                    memory_logger.debug(f"Using standard precision on {x.device}")
                     results = self.model.predict_from_text(
                         x, 
                         text_description, 
@@ -210,28 +160,15 @@ class TextualClassifier:
                         self.text_mapper
                     )
                 
-            memory_logger.debug("Prediction completed")
-            log_gpu_memory("After model.predict_from_text")
-                
         finally:
             # Explicit cleanup after prediction
-            memory_logger.debug("Cleaning up tensors after prediction")
             if x.device.type != 'cpu':
-                memory_logger.debug(f"Moving input tensor from {x.device} to CPU")
                 x = x.cpu()
                 del x
             
-            # Check result devices (should be CPU)
-            if 'class_preds' in results:
-                memory_logger.debug(f"Results class_preds: shape={results['class_preds'].shape}, "
-                                  f"device={results['class_preds'].device}")
-            
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            
-            log_gpu_memory("After cleanup")
         
-        memory_logger.debug(f"=== ENDING classify_with_text ===")
         return results['class_preds'], results['similarity']
     
     def classify_with_descriptions(
@@ -257,10 +194,6 @@ class TextualClassifier:
         """
         # Preprocess data
         x = self.preprocess_data(data)
-        
-        # IMPORTANT: Don't load all semantic data to GPU at once - the model actually 
-        # doesn't use it directly. For backward compatibility, we still pass it,
-        # but keep it on CPU where it's actually accessed.
         
         # Generate boundaries and classify - use mixed precision if enabled
         try:

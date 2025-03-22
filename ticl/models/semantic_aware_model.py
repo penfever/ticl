@@ -93,7 +93,6 @@ class SemanticAwareClassifier(nn.Module):
             min_val = -3.0
             current_val = self.logit_scale.data
             if current_val > max_val or current_val < min_val:
-                memory_logger.warning(f"Clamping logit_scale from {current_val.item():.4f} to range [{min_val}, {max_val}]")
                 self.logit_scale.data.clamp_(min=min_val, max=max_val)
             return grad
         
@@ -202,7 +201,6 @@ class SemanticAwareClassifier(nn.Module):
         
         # Check features for extreme or NaN values before projection
         if torch.isnan(features).any() or torch.isinf(features).any():
-            memory_logger.warning("NaN or Inf values detected in features before projection, applying stabilization")
             features = torch.nan_to_num(features, nan=0.0, posinf=1.0, neginf=-1.0)
             
             # Detect if values are very large, which could indicate instability
@@ -227,7 +225,6 @@ class SemanticAwareClassifier(nn.Module):
                 projected_features = projected_features + torch.randn_like(projected_features) * 0.01
         except Exception as e:
             # Create fallback projected features with detailed error logging
-            memory_logger.error(f"Feature projection failed: {e}")
             transformer_dim = self.clip_text_model.config.hidden_size
             projected_features = torch.zeros((features.shape[0] if len(features.shape) > 1 else 1, transformer_dim), 
                                             device=features.device)
@@ -334,7 +331,6 @@ class SemanticAwareClassifier(nn.Module):
                             except Exception as e2:
                                 memory_logger.error(f"CPU fallback also failed: {e2}")
                                 # Return empty features as ultimate fallback
-                                memory_logger.warning(f"Skipping CLIP processing for this batch")
                                 continue
                     
                     # Store token information for interpretability
@@ -414,10 +410,6 @@ class SemanticAwareClassifier(nn.Module):
                 # Clamp logit_scale to avoid extreme values which can cause overflow
                 logit_scale_raw = self.logit_scale.clamp(min=-5, max=5)  # Much tighter bounds
                 
-                # Print diagnostic info about the logit scale parameter
-                print(f"FORWARD DIAGNOSTIC: logit_scale parameter value: {self.logit_scale.item():.6f}")
-                print(f"FORWARD DIAGNOSTIC: clamped logit_scale value: {logit_scale_raw.item():.6f}")
-                
                 # Use a fixed small scale value for the first few epochs to stabilize training
                 # After training stabilizes, we can switch to using the learned parameter
                 epoch_count = getattr(self, '_epoch_count', 0)
@@ -426,11 +418,9 @@ class SemanticAwareClassifier(nn.Module):
                 if epoch_count < warmup_epochs:
                     # Use fixed small scale during warmup 
                     logit_scale = torch.tensor(5.0, device=tabular_features.device)
-                    print(f"FORWARD DIAGNOSTIC: Using warmup fixed scale: {logit_scale.item():.6f} (epoch {epoch_count}/{warmup_epochs})")
                 else:
                     # Exponential moving average to smooth scale changes
                     logit_scale = torch.exp(logit_scale_raw)
-                    print(f"FORWARD DIAGNOSTIC: Using learned scale: {logit_scale.item():.6f}")
                 
                 # Additional safety check on the scale
                 if torch.isnan(logit_scale) or torch.isinf(logit_scale) or logit_scale > 100:
@@ -446,7 +436,6 @@ class SemanticAwareClassifier(nn.Module):
                 
                 # Print diagnostic info about the raw similarity values
                 raw_max = raw_similarity.abs().max().item()
-                print(f"FORWARD DIAGNOSTIC: raw_similarity stats - max abs: {raw_max:.6f}")
                 
                 # Apply a hard safety cap on the scale when raw values are already high
                 if raw_max > 0.5:  # If raw cosine similarity is already high

@@ -38,124 +38,6 @@ def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
     tuple
         (Loss, NaN share)
     """
-    # Debug logging for input data
-    memory_logger.debug(f"Loss inputs - targets shape: {targets.shape}, dtype: {targets.dtype}")
-    memory_logger.debug(f"Target values: min={targets.min().item()}, max={targets.max().item()}")
-    
-    # Try to get class distribution if targets are integers
-    try:
-        if torch.is_floating_point(targets):
-            # For float targets, bincount won't work directly
-            memory_logger.debug("Targets are float type - likely regression task")
-        else:
-            # For integer targets, we can use bincount if there are valid samples
-            try:
-                # Stricter filtering for bincount - must be non-negative integers in a reasonable range
-                valid_mask = (targets >= 0) & (targets < 1000) & (targets == targets.floor())
-                valid_targets = targets[valid_mask].long()  # Ensure long type for bincount
-                
-                if valid_targets.numel() > 0:  # Only proceed if we have valid targets
-                    # Double-check values are valid for bincount
-                    if torch.all(valid_targets >= 0):
-                        memory_logger.debug(f"Target classes distribution: {torch.bincount(valid_targets)}")
-                    else:
-                        memory_logger.debug(f"Target values not suitable for distribution analysis")
-                else:
-                    memory_logger.debug("No valid targets found for distribution analysis")
-            except Exception as e:
-                # Completely suppress this error - it's just for logging
-                memory_logger.debug(f"Skipped target distribution analysis: {e}")
-    except Exception as e:
-        memory_logger.debug(f"Could not compute target distribution: {e}")
-    
-    # Log output structure
-    if isinstance(output, dict):
-        for k, v in output.items():
-            if isinstance(v, torch.Tensor):
-                memory_logger.debug(f"Model output['{k}']: shape={v.shape}, dtype={v.dtype}")
-                if k == 'class_logits':
-                    # Log more details about class predictions
-                    # Check for NaN values in logits first
-                    if torch.isnan(v).any() or torch.isinf(v).any():
-                        memory_logger.warning(f"NaN or Inf values detected in class logits before softmax - applying numeric stabilization")
-                        v_stable = torch.nan_to_num(v, nan=0.0, posinf=1e4, neginf=-1e4)
-                    else:
-                        v_stable = v
-                    
-                    # Apply numerical stability techniques before softmax
-                    # 1. Subtract max value for numerical stability (log-sum-exp trick)
-                    v_stable = v_stable - v_stable.max(dim=-1, keepdim=True)[0].detach()
-                    
-                    try:
-                        # 2. Apply softmax with the stabilized values
-                        class_probs = torch.softmax(v_stable, dim=-1)
-                        
-                        # Check if softmax produced valid probabilities
-                        if torch.isnan(class_probs).any() or torch.isinf(class_probs).any():
-                            memory_logger.warning("Softmax produced NaN/Inf probabilities, using fallback approach")
-                            # Fallback: use a very simple approach - uniform distribution
-                            num_classes = v.shape[-1]
-                            class_probs = torch.ones_like(v) / num_classes
-                        
-                        predicted_classes = torch.argmax(class_probs, dim=-1)
-                        memory_logger.debug(f"Predicted classes: {predicted_classes}")
-                        
-                        # Safe max calculation with error check
-                        try:
-                            max_probs = torch.max(class_probs, dim=-1)[0]
-                            memory_logger.debug(f"Max class probability: {max_probs}")
-                        except Exception as e:
-                            memory_logger.warning(f"Error calculating max probability: {e}")
-                    except Exception as e:
-                        memory_logger.error(f"Error in probability calculation: {e}")
-                        # Complete fallback in case of catastrophic failure
-                        num_classes = v.shape[-1]
-                        class_probs = torch.ones_like(v) / num_classes
-                        predicted_classes = torch.zeros_like(v[..., 0], dtype=torch.long)
-                        memory_logger.debug("Using uniform probabilities as complete fallback")
-    else:
-        memory_logger.debug(f"Model output: shape={output.shape}, dtype={output.dtype}")
-        # Log class predictions for standard output
-        if len(output.shape) > 1 and output.shape[-1] > 1:  # Multi-class case
-            # Check for NaN values in logits first
-            if torch.isnan(output).any() or torch.isinf(output).any():
-                memory_logger.warning(f"NaN or Inf values detected in standard output logits - applying numeric stabilization")
-                output_stable = torch.nan_to_num(output, nan=0.0, posinf=1e4, neginf=-1e4)
-            else:
-                output_stable = output
-            
-            # Apply numerical stability techniques
-            output_stable = output_stable - output_stable.max(dim=-1, keepdim=True)[0].detach()
-            
-            try:
-                # Apply softmax with stabilized values
-                class_probs = torch.softmax(output_stable, dim=-1)
-                
-                # Check if softmax produced valid probabilities
-                if torch.isnan(class_probs).any() or torch.isinf(class_probs).any():
-                    memory_logger.warning("Softmax produced NaN/Inf probabilities in standard output, using fallback")
-                    # Fallback to uniform distribution
-                    num_classes = output.shape[-1]
-                    class_probs = torch.ones_like(output) / num_classes
-                
-                predicted_classes = torch.argmax(class_probs, dim=-1)
-                memory_logger.debug(f"Predicted classes: {predicted_classes}")
-            except Exception as e:
-                memory_logger.error(f"Error in standard output probability calculation: {e}")
-                num_classes = output.shape[-1]
-                class_probs = torch.ones_like(output) / num_classes
-                predicted_classes = torch.zeros_like(output[..., 0], dtype=torch.long)
-                memory_logger.debug("Using uniform probabilities for standard output as fallback")
-    
-    # Log batch_info if present
-    if batch_info is not None:
-        memory_logger.debug(f"batch_info keys: {list(batch_info.keys())}")
-        if 'semantic_targets' in batch_info:
-            sem_targets = batch_info['semantic_targets']
-            memory_logger.debug(f"Semantic targets: shape={sem_targets.shape}, dtype={sem_targets.dtype}")
-            if sem_targets.numel() > 0:
-                memory_logger.debug(f"Semantic target values: min={sem_targets.min().item()}, max={sem_targets.max().item()}")
-    
     # Check if this is a semantic model with dictionary output
     is_semantic_model = isinstance(output, dict) and 'class_logits' in output and 'semantic_logits' in output
     
@@ -171,48 +53,25 @@ def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
             if batch_info is not None:
                 if 'semantic_targets' in batch_info:
                     semantic_targets = batch_info['semantic_targets'].to(device)
-                    memory_logger.debug(f"Semantic targets moved to device: {device}")
                     has_semantic_features = True
-                elif 'semantic_feature_p' in batch_info:
-                    # This batch was generated with semantic features disabled 
-                    # (determined by semantic_feature_p probability)
-                    memory_logger.debug(f"This batch has no semantic targets (semantic_feature_p: {batch_info.get('semantic_feature_p', 0.0)})")
                     
-            # Log semantic feature presence
-            if not has_semantic_features:
-                memory_logger.debug("No semantic targets in this batch - normal with probability (1-semantic_feature_p)")
-                
             # Create target dictionary
             target_dict = {
                 'class_targets': targets.to(device).long(),
                 'semantic_targets': semantic_targets
             }
             
-            # Log targets dictionary
-            memory_logger.debug(f"Target dict - class_targets: {target_dict['class_targets'].shape}")
-            if semantic_targets is not None:
-                memory_logger.debug(f"Target dict - semantic_targets: {target_dict['semantic_targets'].shape}")
-                
-                # Check for valid semantic targets
-                valid_count = (semantic_targets != -100).sum().item()
-                if valid_count == 0:
-                    memory_logger.debug("WARNING: Semantic targets present but all are -100 (ignored)")
-            
             # Compute loss
-            memory_logger.debug("Computing loss with SemanticConsistencyLoss")
             loss = criterion(output, target_dict)
-            memory_logger.debug(f"Loss value: {loss.item()}")
             
             # Return loss as a tensor for compatibility
             return loss.unsqueeze(0).unsqueeze(0), 0.0
         else:
             # Fallback to just using class logits with standard loss
-            memory_logger.debug("Using standard loss with semantic model class_logits output")
             output = output['class_logits']
     
     # Standard loss functions
     if isinstance(criterion, nn.GaussianNLLLoss):
-        memory_logger.debug(f"Using GaussianNLLLoss")
         assert output.shape[-1] == 2, \
             'need to write a little bit of code to handle multiple regression targets at once'
 
@@ -220,20 +79,14 @@ def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
         var_pred = output[..., 1].abs()
         losses = criterion(mean_pred.flatten(), targets.to(device).flatten(), var=var_pred.flatten())
     elif isinstance(criterion, (nn.MSELoss, nn.BCEWithLogitsLoss)):
-        loss_name = 'MSELoss' if isinstance(criterion, nn.MSELoss) else 'BCEWithLogitsLoss'
-        memory_logger.debug(f"Using {loss_name}")
         losses = criterion(output.flatten(), targets.to(device).flatten())
     elif isinstance(criterion, nn.CrossEntropyLoss):
-        memory_logger.debug(f"Using CrossEntropyLoss")
-        
-        # Add numeric stability protections
         # Ensure targets are valid and avoid out of bounds issues
         valid_targets = targets.to(device).clamp(min=0).long().flatten()
         max_target = valid_targets.max().item()
         
         # Check for valid target values and fix if needed
         if max_target >= n_out:
-            memory_logger.warning(f"Target values ({max_target}) exceed output dimensions ({n_out})! Clamping targets.")
             valid_targets = valid_targets.clamp(max=n_out-1)
             max_target = n_out - 1
         
@@ -242,25 +95,14 @@ def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
         
         # Check for NaN or Inf values in output logits
         if torch.isnan(reshaped_output).any() or torch.isinf(reshaped_output).any():
-            memory_logger.warning("NaN or Inf values detected in output logits - applying safe clipping")
             reshaped_output = torch.nan_to_num(reshaped_output, nan=0.0, posinf=1e4, neginf=-1e4)
         
-        memory_logger.debug(f"Reshaped output for CE loss: {reshaped_output.shape}")
-        memory_logger.debug(f"Valid targets for CE loss: {valid_targets.shape}, max value: {max_target}")
-        
-        # Add small epsilon to avoid log(0) issues
         losses = criterion(reshaped_output, valid_targets)
     else:
-        memory_logger.debug(f"Using custom criterion: {type(criterion).__name__}")
         losses = criterion(output, targets)
-    
-    # Log final loss values
-    if isinstance(losses, torch.Tensor):
-        memory_logger.debug(f"Raw loss tensor: shape={losses.shape}, mean={losses.mean().item()}")
     
     losses = losses.view(*output.shape[0:2])
     loss_mean, nan_share = utils.torch_nanmean(losses.mean(0), return_nanshare=True)
-    memory_logger.debug(f"Final loss: {loss_mean.item()}, nan_share: {nan_share}")
     
     return loss_mean, nan_share
 
@@ -300,31 +142,22 @@ def train_epoch(
     batch_loss_history = []
     
     for batch, batch_data in enumerate(dl):
-        # Debug log batch information
-        memory_logger.debug(f"Processing batch {batch}/{steps_per_epoch}")
-        memory_logger.debug(f"Batch data type: {type(batch_data)}, length: {len(batch_data)}")
-        
         # Unpack batch data - could now include info dict for semantic features
         if len(batch_data) == 3:
             # Standard format: (data, targets, single_eval_pos)
             data, targets, single_eval_pos = batch_data
             batch_info = None
-            memory_logger.debug("Standard batch format (no semantic info)")
         elif len(batch_data) == 4:
             # Extended format: (data, targets, single_eval_pos, info)
             data, targets, single_eval_pos, batch_info = batch_data
-            memory_logger.debug(f"Extended batch format with semantic info: {list(batch_info.keys() if batch_info else [])}")
         else:
             raise ValueError(f"Unexpected batch format with {len(batch_data)} elements")
         
         # For semantic models, the data may be a tuple containing (info, x, y)
         # Let's check and extract the correct components
         if isinstance(data, tuple) and len(data) == 3:
-            memory_logger.debug(f"Data is tuple with {len(data)} elements")
-            
             # Check if the first element is a dictionary (info)
             if isinstance(data[0], dict):
-                memory_logger.debug("Found nested batch_info in data tuple")
                 # The nested info may have the class token patterns
                 nested_info, x, y = data
                 
@@ -334,50 +167,10 @@ def train_epoch(
                 elif nested_info is not None:
                     # Create a new dict to avoid modifying the original
                     batch_info = {**batch_info, **nested_info}
-                    memory_logger.debug(f"Merged batch_info, now contains: {list(batch_info.keys())}")
                 
                 # Set data to just the tensor part
                 data = (x, y)
             
-            # Log each tensor component
-            for i, item in enumerate(data):
-                if torch.is_tensor(item):
-                    memory_logger.debug(f"  data[{i}]: shape={item.shape}, dtype={item.dtype}")
-        elif isinstance(data, torch.Tensor):
-            memory_logger.debug(f"Data shape: {data.shape}, dtype: {data.dtype}")
-            
-        memory_logger.debug(f"Raw targets shape: {targets.shape}, dtype: {targets.dtype}")
-        memory_logger.debug(f"single_eval_pos: {single_eval_pos}")
-        
-        # Log semantic targets if present
-        if batch_info is not None and 'semantic_targets' in batch_info:
-            sem_targets = batch_info['semantic_targets']
-            memory_logger.debug(f"Semantic targets: shape={sem_targets.shape}, dtype={sem_targets.dtype}")
-            if sem_targets.numel() > 0:
-                try:
-                    memory_logger.debug(f"Semantic target values: min={sem_targets.min().item()}, max={sem_targets.max().item()}")
-                    
-                    # Only try to compute distribution if integer type
-                    if not torch.is_floating_point(sem_targets):
-                        try:
-                            # Stricter filtering for bincount - must be non-negative integers in a reasonable range
-                            valid_mask = (sem_targets >= 0) & (sem_targets < 1000) & (sem_targets == sem_targets.floor())
-                            valid_sem_targets = sem_targets[valid_mask].long()
-                            
-                            if valid_sem_targets.numel() > 0:  # Check if we have any valid targets
-                                # Double-check values are valid for bincount
-                                if torch.all(valid_sem_targets >= 0):
-                                    memory_logger.debug(f"Semantic target distribution: {torch.bincount(valid_sem_targets)}")
-                                else:
-                                    memory_logger.debug("Semantic target values not suitable for distribution analysis")
-                            else:
-                                memory_logger.debug("No valid semantic targets found for distribution analysis")
-                        except Exception as e:
-                            # Completely suppress this error - it's just for logging
-                            memory_logger.debug(f"Skipped semantic target distribution analysis: {e}")
-                except Exception as e:
-                    memory_logger.debug(f"Could not calculate semantic target stats: {e}")
-        
         # Get GPU utilization if available
         if is_cuda:
             try:
@@ -431,53 +224,27 @@ def train_epoch(
                 # At this point, we should have a clean data tuple or tensor
                 if isinstance(data, tuple):
                     device_data = tuple(e.to(device) if torch.is_tensor(e) else e for e in data)
-                    memory_logger.debug(f"Moved tuple data to device: {device}")
                 else:
                     device_data = data.to(device)
-                    memory_logger.debug(f"Moved tensor data to device: {device}")
                 
                 # Forward pass
-                memory_logger.debug(f"Running model forward pass with single_eval_pos={single_eval_pos}")
-                
                 # Check if we have semantic information to pass to the model
                 class_texts = None
-                
-                # Debug the batch_info contents
-                if batch_info is not None:
-                    memory_logger.debug(f"batch_info contains: {list(batch_info.keys())}")
-                    if 'semantic_feature_p' in batch_info:
-                        memory_logger.debug(f"semantic_feature_p = {batch_info['semantic_feature_p']}")
-                    if 'semantic_targets' in batch_info:
-                        memory_logger.debug(f"semantic_targets shape: {batch_info['semantic_targets'].shape}")
-                else:
-                    memory_logger.debug("batch_info is None")
                 
                 if batch_info is not None and 'class_token_patterns' in batch_info:
                     # Extract class texts from token patterns
                     class_token_patterns = batch_info['class_token_patterns']
-                    memory_logger.debug(f"Found class_token_patterns for {len(class_token_patterns)} classes")
-                    
-                    # Debug the token patterns
-                    for class_idx in sorted(class_token_patterns.keys())[:2]:  # Look at first few
-                        pattern = class_token_patterns[class_idx]
-                        memory_logger.debug(f"Class {class_idx} pattern keys: {list(pattern.keys())}")
-                        if 'tokens' in pattern:
-                            memory_logger.debug(f"Class {class_idx} tokens: {pattern['tokens'].shape} - Type: {type(pattern['tokens'])}")
-                    
-                    # Generate text descriptions from the class token patterns
-                    class_texts = []
                     
                     # Try to import CLIP tokenizer for token decoding
                     try:
                         from transformers import CLIPTokenizerFast
                         tokenizer = CLIPTokenizerFast.from_pretrained("openai/clip-vit-base-patch32")
                         has_tokenizer = True
-                        memory_logger.debug("Using CLIP tokenizer to decode tokens for class descriptions")
                     except (ImportError, Exception):
                         has_tokenizer = False
-                        memory_logger.debug("CLIP tokenizer not available, using simplified class descriptions")
                     
                     # Generate meaningful descriptions for each class
+                    class_texts = []
                     for class_idx in sorted(class_token_patterns.keys()):
                         pattern = class_token_patterns[class_idx]
                         semantic_class = pattern.get('semantic_class', 0)
@@ -487,11 +254,9 @@ def train_epoch(
                             # Format it more nicely by removing underscores and adding spaces
                             col_name = pattern['column_name'].replace('_', ' ').title()
                             text = f"Data with {col_name}"
-                            memory_logger.debug(f"Using real column name: {text}")
                         # Fall back to class_name if available
                         elif 'class_name' in pattern:
                             text = pattern['class_name']
-                            memory_logger.debug(f"Using class_name from pattern: {text}")
                         # Otherwise, try to create a more descriptive text if we have token information and tokenizer
                         elif 'tokens' in pattern and has_tokenizer and len(pattern['tokens']) > 0:
                             try:
@@ -504,65 +269,37 @@ def train_epoch(
                                     text = f"Data class {class_idx}: {token_texts}"
                                 else:
                                     text = f"Data class {class_idx} from semantic class {semantic_class}"
-                            except Exception as e:
-                                memory_logger.debug(f"Error decoding tokens: {e}")
+                            except Exception:
                                 text = f"Data class {class_idx} from semantic class {semantic_class}"
                         else:
                             # Fallback to simple description
                             text = f"Data class {class_idx} from semantic class {semantic_class}"
                             
-                        memory_logger.debug(f"Class {class_idx} text: '{text}'")
-                            
                         class_texts.append(text)
-                        
-                    memory_logger.debug(f"Generated {len(class_texts)} class text descriptions: {class_texts[:3]}...")
                 
                 # Pass class_texts to the model's forward method if available
                 output = model(device_data, single_eval_pos=single_eval_pos, class_texts=class_texts)
-                
-                # Log model output details
-                if isinstance(output, dict):
-                    memory_logger.debug(f"Model output is dictionary with keys: {list(output.keys())}")
-                    for k, v in output.items():
-                        if isinstance(v, torch.Tensor):
-                            memory_logger.debug(f"Output['{k}']: shape={v.shape}, dtype={v.dtype}")
-                else:
-                    memory_logger.debug(f"Model output: shape={output.shape}, dtype={output.dtype}")
 
                 # Process targets for evaluation 
-                memory_logger.debug(f"Pre-filtered targets shape: {targets.shape}")
                 if single_eval_pos is not None:
                     targets = targets[single_eval_pos:]
-                    memory_logger.debug(f"Filtered targets with single_eval_pos={single_eval_pos}, new shape: {targets.shape}")
                     
                     # Also adjust semantic targets if present
                     if batch_info is not None and 'semantic_targets' in batch_info:
-                        orig_shape = batch_info['semantic_targets'].shape
                         batch_info['semantic_targets'] = batch_info['semantic_targets'][single_eval_pos:]
-                        memory_logger.debug(f"Filtered semantic targets from {orig_shape} to {batch_info['semantic_targets'].shape}")
                         
                         # Ensure semantic targets are long tensor type (for bincount and loss functions)
                         if batch_info['semantic_targets'].dtype != torch.long:
-                            memory_logger.debug(f"Converting semantic targets from {batch_info['semantic_targets'].dtype} to torch.long")
                             batch_info['semantic_targets'] = batch_info['semantic_targets'].long()
 
                 # Check for valid labels
                 valid_labels = targets != -100
                 valid_count = valid_labels.sum().item()
-                memory_logger.debug(f"Valid labels: {valid_count}/{targets.numel()} ({valid_count/targets.numel()*100:.1f}%)")
                 
                 if valid_count == 0:
-                    memory_logger.debug("Skipping batch due to no valid labels")
                     continue
 
                 # Calculate loss
-                memory_logger.debug(f"Calculating loss with criterion: {type(criterion).__name__}")
-                memory_logger.debug(f"Criterion details: {criterion}")
-                
-                # Log any special criterion properties
-                if hasattr(criterion, 'semantic_weight'):
-                    memory_logger.debug(f"Semantic weight in loss: {criterion.semantic_weight}")
-                
                 loss, nan_share = eval_criterion(
                     criterion, 
                     targets, 
@@ -575,7 +312,6 @@ def train_epoch(
                 # Scale loss for gradient accumulation
                 original_loss = loss.item()
                 loss = loss / aggregate_k_gradients
-                memory_logger.debug(f"Original loss: {original_loss}, scaled for accumulation: {loss.item()}")
 
             # Get current batch loss value and log it
             current_batch_loss = loss.mean().cpu().detach().item() * aggregate_k_gradients
@@ -596,9 +332,6 @@ def train_epoch(
             else:
                 loss.backward()
 
-            # print("LOSS")
-            # print(loss.mean().cpu().detach().item() * aggregate_k_gradients)
-
             # Update weights after accumulating gradients
             if batch % aggregate_k_gradients == aggregate_k_gradients - 1:
                 # Enhanced gradient clipping with more aggressive threshold and backend-specific handling
@@ -613,11 +346,40 @@ def train_epoch(
                         grad_norm += param_norm ** 2
                 grad_norm = grad_norm ** 0.5
                 
-                # Print the gradient norm to stdout for visibility
+                # Enhanced gradient diagnostics for debugging stability issues
                 print(f"GRAD DIAGNOSTIC: Gradient norm before clipping: {grad_norm:.4f}")
                 
-                if grad_norm > 10.0:  # Very large gradient norm
-                    memory_logger.warning(f"Extremely large gradient norm detected: {grad_norm:.4f} - applying strict clipping")
+                # Add per-layer gradient analysis for extreme cases
+                if grad_norm > 10.0:
+                    if grad_norm > 100.0:  # More detailed info for very large gradients
+                        print(f"DETAILED GRADIENT ANALYSIS:")
+                        largest_grad_param = None
+                        largest_grad_norm = 0.0
+                        largest_grad_name = ""
+                        
+                        # Find the parameter with the largest gradient
+                        for name, p in model.named_parameters():
+                            if p.grad is not None:
+                                param_norm = p.grad.data.norm(2).item()
+                                if param_norm > largest_grad_norm:
+                                    largest_grad_norm = param_norm
+                                    largest_grad_param = p
+                                    largest_grad_name = name
+                        
+                        if largest_grad_param is not None:
+                            # Report detailed statistics about the largest gradient contributor
+                            print(f"  - Largest gradient: {largest_grad_name} with norm {largest_grad_norm:.4f}")
+                            if 'semantic' in largest_grad_name.lower():
+                                print(f"  - WARNING: Largest gradient is in semantic component!")
+                            
+                            # Additional stats about this parameter's gradient
+                            try:
+                                max_val = largest_grad_param.grad.data.abs().max().item()
+                                mean_val = largest_grad_param.grad.data.abs().mean().item()
+                                print(f"  - Gradient stats: max={max_val:.4f}, mean={mean_val:.4f}, shape={largest_grad_param.shape}")
+                            except:
+                                pass
+                    
                     max_norm = 0.1  # Even stricter clipping for extreme cases
                     
                     # EMERGENCY FIX: If we have SemanticAwareClassifier, completely disable semantic loss
@@ -637,23 +399,11 @@ def train_epoch(
                                 print(f"Setting semantic_weight to 0.0 on {name}")
                                 submodule.semantic_weight = 0.0
                 
-                # 'foreach=True' is not supported on MPS (Apple Silicon) in some PyTorch versions
-                if device == 'mps':
-                    try:
-                        # Try first with foreach (newer PyTorch versions may support it)
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm, foreach=True)
-                    except (RuntimeError, TypeError):
-                        # Fallback to standard gradient clipping without foreach
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm, foreach=False)
-                        if batch == 0:  # Only print warning once
-                            print(f"Note: Using slower gradient clipping method for MPS device with max_norm={max_norm}")
-                else:
-                    # For CUDA, CPU, ROCm, use the faster foreach version
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm, foreach=True)
-                
-                # Log clipping info for debugging
-                if batch % 20 == 0:  # Only log occasionally to reduce verbosity
-                    memory_logger.debug(f"Gradient norm: {grad_norm:.4f}, clipped with max_norm={max_norm}")
+                # Always use foreach=False for more stable gradient clipping behavior
+                # This matches the more numerically stable approach used on MPS devices
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm, foreach=False)
+                if batch == 0:  # Only print warning once
+                    print(f"Note: Using slower but more stable gradient clipping method with max_norm={max_norm}")
                 
                 # Use mixed precision optimizer step if enabled
                 if scaler is not None and (is_cuda or is_mps):
@@ -666,7 +416,6 @@ def train_epoch(
 
             # Check for NaN loss and handle it more gracefully
             if torch.isnan(loss):
-                memory_logger.warning("NaN loss encountered - skipping backpropagation for this batch")
                 # Initialize with small loss value to avoid completely stopping training
                 total_loss += 1.0
                 nan_steps += 1.0  # Count the full step as NaN
