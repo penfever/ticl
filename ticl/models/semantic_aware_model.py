@@ -954,8 +954,9 @@ class SemanticConsistencyLoss(nn.Module):
             else:
                 normalized_loss = torch.tensor(0.0, device=raw_logits.device, requires_grad=True)
         
+        breakpoint()
         #NOTE: make this weighting a hyperparameter, not hardcoded
-        total_loss = (0.1 * normalized_loss) + class_loss
+        total_loss = (0.2 * normalized_loss) + class_loss
         return total_loss
 
 
