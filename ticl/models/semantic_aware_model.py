@@ -915,8 +915,10 @@ class SemanticConsistencyLoss(nn.Module):
         
         # Note: These are already normalized vectors, so this is cosine similarity
         # Reduced multiplier factor from 4.5 to 2.0 to improve numerical stability
+        self.eps = 1e-3
+
         raw_similarity = torch.matmul(tabular_features, text_features.t())
-        
+        raw_similarity = raw_similarity / (raw_similarity.abs().max() + self.eps)
         # Scale with a smaller factor and apply clamping to prevent extreme values
         raw_logits = raw_similarity * 2.0
         
@@ -979,7 +981,7 @@ class SemanticConsistencyLoss(nn.Module):
                 normalized_loss = total_loss / total_rows
             else:
                 normalized_loss = torch.tensor(0.0, device=raw_logits.device, requires_grad=True)
-        
+
         # Use the configured semantic weight
         total_loss = (self.semantic_weight * normalized_loss) + class_loss
         return total_loss
