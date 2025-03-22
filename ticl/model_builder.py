@@ -28,11 +28,14 @@ except ImportError:
     cache = lru_cache(maxsize=None)
 
 
-def get_criterion(max_num_classes, use_semantic_loss=False):
+def get_criterion(max_num_classes, use_semantic_loss=False, semantic_weight=0.2, statistical_weight=0.1):
     if use_semantic_loss:
         # Use the semantic consistency loss for models with semantic heads
         from ticl.models.semantic_aware_model import SemanticConsistencyLoss
-        loss = SemanticConsistencyLoss(semantic_weight=0.5)
+        loss = SemanticConsistencyLoss(
+            semantic_weight=semantic_weight,
+            statistical_weight=statistical_weight
+        )
     else:
         # Standard losses for regular models
         if max_num_classes == 0:
@@ -219,9 +222,15 @@ def get_model(
     if has_semantic_features:
         logger.info("Using SemanticConsistencyLoss due to semantic features being enabled")
     
+    # Get loss weights for semantic and statistical components
+    semantic_weight = config.get('semantic_weight', 0.2)
+    statistical_weight = config.get('statistical_weight', 0.1)
+    
     criterion = get_criterion(
         config['prior']['classification']['max_num_classes'],
-        use_semantic_loss=has_semantic_features  # Use semantic flag that considers both indicators
+        use_semantic_loss=has_semantic_features,  # Use semantic flag that considers both indicators
+        semantic_weight=semantic_weight,
+        statistical_weight=statistical_weight
     )
 
 

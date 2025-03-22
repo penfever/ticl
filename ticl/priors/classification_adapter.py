@@ -610,13 +610,60 @@ class ClassificationAdapter:
             x[:, :, feat] = semantic_feature_tensor[:, :, i]
         
         # MODIFICATION: Fill the reserved features with statistical information tokens
-        # Create info dictionary with semantic information
-        semantic_info = {
-            'class_token_patterns': self.class_token_patterns,
-            'semantic_targets': semantic_targets,
-            'causal_features_map': causal_features_map,
-            'reserved_feature_indices': reserved_indices  # Store reserved feature indices
-        }
+        # Add statistical feature encoding for the reserved features
+        try:
+            # Import statistical feature encoding utilities
+            from ticl.datasets.statistical_feature_encoding import (
+                calculate_feature_statistics,
+                encode_numerical_features_as_tokens,
+                get_numeric_feature_indices
+            )
+            
+            # Identify likely numeric features
+            numeric_indices = get_numeric_feature_indices(x)
+            
+            # Calculate statistics for all numeric features
+            feature_stats = calculate_feature_statistics(
+                x, 
+                numeric_indices=numeric_indices,
+                return_quantiles=True
+            )
+            
+            # Encode numerical features as tokens
+            if reserved_indices:
+                # This modifies x in-place to add statistical tokens
+                x, token_mapping = encode_numerical_features_as_tokens(
+                    x,
+                    feature_stats,
+                    reserved_indices
+                )
+                
+                # Create info dictionary with semantic information and statistical mapping
+                semantic_info = {
+                    'class_token_patterns': self.class_token_patterns,
+                    'semantic_targets': semantic_targets,
+                    'causal_features_map': causal_features_map,
+                    'reserved_feature_indices': reserved_indices,
+                    'stat_token_mapping': token_mapping,
+                    'feature_stats': feature_stats
+                }
+            else:
+                # No reserved features available for statistical tokens
+                semantic_info = {
+                    'class_token_patterns': self.class_token_patterns,
+                    'semantic_targets': semantic_targets,
+                    'causal_features_map': causal_features_map,
+                    'reserved_feature_indices': reserved_indices
+                }
+        except Exception as e:
+            # Log the error and continue without statistical encoding
+            print(f"Warning: Could not add statistical encoding - {e}")
+            semantic_info = {
+                'class_token_patterns': self.class_token_patterns,
+                'semantic_targets': semantic_targets,
+                'causal_features_map': causal_features_map,
+                'reserved_feature_indices': reserved_indices
+            }
         
         return x, semantic_info
 

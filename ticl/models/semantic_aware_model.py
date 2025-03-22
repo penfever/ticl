@@ -862,20 +862,24 @@ class SemanticConsistencyLoss(nn.Module):
     """
     CLIP-style contrastive loss for aligning text descriptions with tabular features.
     This implements the InfoNCE/NT-Xent contrastive loss from the CLIP paper, combined
-    with standard classification loss.
+    with standard classification loss and statistical feature alignment.
     """
     
-    def __init__(self, semantic_weight=0.2):  # Reduced weight to 0.1 (from 0.5)
+    def __init__(self, semantic_weight=0.2, statistical_weight=0.1):
         """
         Initialize the loss function.
         
         Parameters:
         -----------
         semantic_weight : float
-            Weight for the semantic contrastive loss component. Default is 0.1.
+            Weight for the semantic contrastive loss component. Default is 0.2.
+        statistical_weight : float
+            Weight for the statistical feature alignment component. Default is 0.1.
         """
         super().__init__()
         self.semantic_weight = semantic_weight
+        self.statistical_weight = statistical_weight
+        self.eps = 1e-5  # Epsilon for numerical stability
         
         # Main classification loss
         self.class_loss = nn.CrossEntropyLoss()
@@ -883,6 +887,7 @@ class SemanticConsistencyLoss(nn.Module):
         # Component loss values for logging
         self.last_class_loss = 0.0
         self.last_semantic_loss = 0.0
+        self.last_statistical_loss = 0.0
         
     def forward(self, outputs, targets):
         """
@@ -982,8 +987,83 @@ class SemanticConsistencyLoss(nn.Module):
             else:
                 normalized_loss = torch.tensor(0.0, device=raw_logits.device, requires_grad=True)
 
-        # Use the configured semantic weight
-        total_loss = (self.semantic_weight * normalized_loss) + class_loss
+        # Save semantic loss for logging
+        self.last_semantic_loss = normalized_loss.item()
+        
+        # ----- Statistical Feature Alignment Component -----
+        
+        statistical_loss = torch.tensor(0.0, device=raw_logits.device, requires_grad=True)
+        
+        # Check if we have statistical token mapping information
+        if 'stat_token_mapping' in targets and self.statistical_weight > 0:
+            mapping = targets['stat_token_mapping']
+            
+            # Initialize masks for different value ranges
+            low_mask = torch.zeros_like(semantic_targets, dtype=torch.bool)
+            med_mask = torch.zeros_like(semantic_targets, dtype=torch.bool)
+            high_mask = torch.zeros_like(semantic_targets, dtype=torch.bool)
+            
+            # Fill masks for different value tokens
+            for token in mapping.get('low_tokens', []):
+                low_mask |= (semantic_targets == token)
+            for token in mapping.get('med_tokens', []):
+                med_mask |= (semantic_targets == token)
+            for token in mapping.get('high_tokens', []):
+                high_mask |= (semantic_targets == token)
+            
+            # Check if we have enough statistical tokens for alignment
+            if low_mask.any() or med_mask.any() or high_mask.any():
+                # Prepare centroids for different value ranges
+                batch_indices = torch.arange(tabular_features.size(0), device=tabular_features.device)
+                
+                # Extract features for each statistical group
+                low_indices = batch_indices[low_mask.any(dim=1)]
+                med_indices = batch_indices[med_mask.any(dim=1)]
+                high_indices = batch_indices[high_mask.any(dim=1)]
+                
+                # Calculate centroids for non-empty groups
+                centroids = []
+                if low_indices.numel() > 0:
+                    low_centroid = tabular_features[low_indices].mean(dim=0, keepdim=True)
+                    centroids.append(('low', low_centroid))
+                if med_indices.numel() > 0:
+                    med_centroid = tabular_features[med_indices].mean(dim=0, keepdim=True)
+                    centroids.append(('med', med_centroid))
+                if high_indices.numel() > 0:
+                    high_centroid = tabular_features[high_indices].mean(dim=0, keepdim=True)
+                    centroids.append(('high', high_centroid))
+                
+                # If we have at least two centroids, compute statistical alignment loss
+                if len(centroids) >= 2:
+                    # Compute separation loss between centroids (they should be distinct)
+                    centroid_loss = 0.0
+                    centroid_count = 0
+                    
+                    # Compute pairwise distances between centroids
+                    for i in range(len(centroids)):
+                        for j in range(i+1, len(centroids)):
+                            name_i, centroid_i = centroids[i]
+                            name_j, centroid_j = centroids[j]
+                            
+                            # Calculate cosine similarity
+                            sim = F.cosine_similarity(centroid_i, centroid_j)
+                            
+                            # We want the centroids to be distinct (lower similarity)
+                            # Use 1 - sim as the loss component (higher for more similar centroids)
+                            centroid_loss += (1.0 - torch.abs(sim - 0.5))
+                            centroid_count += 1
+                    
+                    # Normalize by number of pairs
+                    if centroid_count > 0:
+                        centroid_loss = centroid_loss / centroid_count
+                        
+                        # Add to total statistical loss
+                        statistical_loss = centroid_loss
+        
+        self.last_statistical_loss = statistical_loss.item()
+        
+        # Combine all loss components
+        total_loss = class_loss + (self.semantic_weight * normalized_loss) + (self.statistical_weight * statistical_loss)
         return total_loss
 
 
