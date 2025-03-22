@@ -931,15 +931,15 @@ class SemanticConsistencyLoss(nn.Module):
         # For each batch item
         for i in range(batch_size):
             # Get logits for this batch item [n_classes]
-            batch_logits = raw_logits[i]  # [10]
+            batch_logits = raw_logits[i]  # [n_classes]
 
             # Get all target rows for this batch item [n_rows]
-            batch_targets = targets_transposed[i]  # [302]
+            batch_targets = targets_transposed[i]  # [n_rows]
             n_rows = batch_targets.shape[0]
 
             if n_rows > 0:  # Handle case where some batch items might have zero rows
                 # Compute cross-entropy for this batch item
-                batch_loss = F.cross_entropy(
+                batch_loss = self.class_loss(
                     batch_logits.unsqueeze(0).expand(n_rows, -1),
                     batch_targets
                 )
@@ -954,7 +954,6 @@ class SemanticConsistencyLoss(nn.Module):
             else:
                 normalized_loss = torch.tensor(0.0, device=raw_logits.device, requires_grad=True)
         
-        breakpoint()
         #NOTE: make this weighting a hyperparameter, not hardcoded
         total_loss = (self.semantic_weight * normalized_loss) + class_loss
         return total_loss
