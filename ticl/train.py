@@ -213,11 +213,19 @@ def train_epoch(
             
         with cm:
             
-            autocast_context = get_autocast_context(
-                device=device,
-                dtype=None,
-                scaler=scaler,
-            )
+            # Force full precision (float32) for CUDA to match MPS behavior
+            # This should help with gradient stability issues
+            if is_cuda:
+                # Disable mixed precision on CUDA even if requested
+                print("PRECISION DIAGNOSTIC: Using full precision (float32) for CUDA to match MPS behavior")
+                autocast_context = nullcontext()
+            else:
+                # Use normal autocast context for other devices
+                autocast_context = get_autocast_context(
+                    device=device,
+                    dtype=None,
+                    scaler=scaler,
+                )
                 
             with autocast_context:
                 # Move data to the appropriate device
@@ -349,6 +357,19 @@ def train_epoch(
                 # Enhanced gradient diagnostics for debugging stability issues
                 print(f"GRAD DIAGNOSTIC: Gradient norm before clipping: {grad_norm:.4f}")
                 
+                # Log first batch gradients for debugging
+                if batch == 0:
+                    print(f"FIRST BATCH GRADIENT SAMPLES:")
+                    # Sample a few parameters to track
+                    param_count = 0
+                    for name, p in model.named_parameters():
+                        if p.grad is not None and param_count < 3:  # Just check first 3 parameters
+                            param_norm = p.grad.data.norm(2).item()
+                            max_val = p.grad.data.abs().max().item() if p.grad.numel() > 0 else 0
+                            print(f"  - Param: {name[:40]}...")
+                            print(f"    Norm: {param_norm:.6f}, Max: {max_val:.6f}, Shape: {p.shape}")
+                            param_count += 1
+                
                 # Add per-layer gradient analysis for extreme cases
                 if grad_norm > 10.0:
                     if grad_norm > 100.0:  # More detailed info for very large gradients
@@ -405,8 +426,8 @@ def train_epoch(
                 if batch == 0:  # Only print warning once
                     print(f"Note: Using slower but more stable gradient clipping method with max_norm={max_norm}")
                 
-                # Use mixed precision optimizer step if enabled
-                if scaler is not None and (is_cuda or is_mps):
+                # Use mixed precision optimizer step if enabled, but not for CUDA (we're using full precision there)
+                if scaler is not None and is_mps:  # Only use scaler for MPS, not CUDA
                     scaler.step(optimizer)
                     scaler.update()
                 else:
