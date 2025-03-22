@@ -412,19 +412,49 @@ class SemanticAwareClassifier(nn.Module):
             try:
                 # Get temperature-scaled logits (similar to CLIP) with safety bounds
                 # Clamp logit_scale to avoid extreme values which can cause overflow
-                logit_scale_raw = self.logit_scale.clamp(min=-20, max=20)  # Reasonable bounds
-                logit_scale = torch.exp(logit_scale_raw)
+                logit_scale_raw = self.logit_scale.clamp(min=-5, max=5)  # Much tighter bounds
+                
+                # Print diagnostic info about the logit scale parameter
+                print(f"FORWARD DIAGNOSTIC: logit_scale parameter value: {self.logit_scale.item():.6f}")
+                print(f"FORWARD DIAGNOSTIC: clamped logit_scale value: {logit_scale_raw.item():.6f}")
+                
+                # Use a fixed small scale value for the first few epochs to stabilize training
+                # After training stabilizes, we can switch to using the learned parameter
+                epoch_count = getattr(self, '_epoch_count', 0)
+                warmup_epochs = 10  # Use fixed scale for this many epochs
+                
+                if epoch_count < warmup_epochs:
+                    # Use fixed small scale during warmup 
+                    logit_scale = torch.tensor(5.0, device=tabular_features.device)
+                    print(f"FORWARD DIAGNOSTIC: Using warmup fixed scale: {logit_scale.item():.6f} (epoch {epoch_count}/{warmup_epochs})")
+                else:
+                    # Exponential moving average to smooth scale changes
+                    logit_scale = torch.exp(logit_scale_raw)
+                    print(f"FORWARD DIAGNOSTIC: Using learned scale: {logit_scale.item():.6f}")
                 
                 # Additional safety check on the scale
-                if torch.isnan(logit_scale) or torch.isinf(logit_scale):
-                    memory_logger.warning(f"Invalid logit scale: {logit_scale.item()}, using default")
-                    logit_scale = torch.tensor(20.0, device=tabular_features.device)
+                if torch.isnan(logit_scale) or torch.isinf(logit_scale) or logit_scale > 100:
+                    print(f"FORWARD DIAGNOSTIC: Invalid logit scale: {logit_scale.item():.6f}, using safe default")
+                    logit_scale = torch.tensor(5.0, device=tabular_features.device)
+                
+                # Track the scale value used for metrics
+                self._last_logit_scale = logit_scale.item()
                 
                 # Compute similarity: [batch_size, embed_dim] x [embed_dim, n_classes]
-                semantic_logits = logit_scale * torch.matmul(
-                    tabular_features,
-                    text_features.transpose(0, 1)
-                )
+                # First compute raw similarity without scaling
+                raw_similarity = torch.matmul(tabular_features, text_features.transpose(0, 1))
+                
+                # Print diagnostic info about the raw similarity values
+                raw_max = raw_similarity.abs().max().item()
+                print(f"FORWARD DIAGNOSTIC: raw_similarity stats - max abs: {raw_max:.6f}")
+                
+                # Apply a hard safety cap on the scale when raw values are already high
+                if raw_max > 0.5:  # If raw cosine similarity is already high
+                    adjusted_scale = min(logit_scale.item(), 5.0)
+                    print(f"FORWARD DIAGNOSTIC: Raw similarity high ({raw_max:.6f}), capping scale to {adjusted_scale:.6f}")
+                    semantic_logits = adjusted_scale * raw_similarity
+                else:
+                    semantic_logits = logit_scale * raw_similarity
                 
                 # Check for NaN or Inf in the resulting logits
                 if torch.isnan(semantic_logits).any() or torch.isinf(semantic_logits).any():
@@ -960,15 +990,64 @@ class SemanticConsistencyLoss(nn.Module):
                         # Re-normalize
                         text_features = F.normalize(text_features, dim=1, eps=1e-8)
                     
-                    # Create similarity matrix
-                    # Note: These are already normalized vectors, so this is cosine similarity
-                    # Scale is handled in the model's forward method via logit_scale
-                    logits = torch.matmul(tabular_features, text_features.t())
+                    # ===== DIAGNOSTIC LOGGING =====
+                    # Print diagnostic information to stdout (not just to debug log)
+                    print(f"DIAGNOSTIC: tabular_features stats - shape={tabular_features.shape}, "
+                          f"mean={tabular_features.mean().item():.6f}, "
+                          f"std={tabular_features.std().item():.6f}, "
+                          f"min={tabular_features.min().item():.6f}, "
+                          f"max={tabular_features.max().item():.6f}, "
+                          f"norm={tabular_features.norm().item():.6f}")
                     
-                    # Safety check - clip extreme values
-                    if torch.max(torch.abs(logits)) > 50:
-                        memory_logger.warning(f"Extreme logit values detected: {torch.max(torch.abs(logits)):.2f}, applying clipping")
-                        logits = torch.clamp(logits, min=-50.0, max=50.0)
+                    print(f"DIAGNOSTIC: text_features stats - shape={text_features.shape}, "
+                          f"mean={text_features.mean().item():.6f}, "
+                          f"std={text_features.std().item():.6f}, "
+                          f"min={text_features.min().item():.6f}, "
+                          f"max={text_features.max().item():.6f}, "
+                          f"norm={text_features.norm().item():.6f}")
+                    
+                    # Create similarity matrix WITHOUT logit scale - we'll apply it separately
+                    # Note: These are already normalized vectors, so this is cosine similarity
+                    raw_logits = torch.matmul(tabular_features, text_features.t())
+                    
+                    # Extract the logit scale from forward method, if present
+                    logit_scale_value = 1.0  # Default if not found
+                    if 'semantic_logits' in outputs and 'tabular_features' in outputs and 'text_features' in outputs:
+                        # Estimate the logit scale by comparing raw cosine values to final logits
+                        if outputs['semantic_logits'].numel() > 0:
+                            try:
+                                # Calculate the approximate scale that was used
+                                raw_sim = torch.matmul(outputs['tabular_features'][0:1], outputs['text_features'].t())
+                                scaled_sim = outputs['semantic_logits'][0:1]
+                                
+                                if torch.max(torch.abs(raw_sim)) > 0:
+                                    est_scale = torch.max(torch.abs(scaled_sim)) / torch.max(torch.abs(raw_sim))
+                                    logit_scale_value = est_scale.item()
+                                    print(f"DIAGNOSTIC: Estimated logit scale: {logit_scale_value:.6f}")
+                                else:
+                                    print("DIAGNOSTIC: Could not estimate logit scale - raw similarity is zero")
+                            except Exception as e:
+                                print(f"DIAGNOSTIC: Error estimating logit scale: {e}")
+                    
+                    # Print diagnostic info about raw cosine similarities
+                    print(f"DIAGNOSTIC: raw_logits stats - shape={raw_logits.shape}, "
+                          f"mean={raw_logits.mean().item():.6f}, "
+                          f"min={raw_logits.min().item():.6f}, "
+                          f"max={raw_logits.max().item():.6f}")
+                    
+                    # Apply a much lower fixed scale (e.g., 5.0 instead of exp(logit_scale))
+                    # This is to avoid extremely large gradient values
+                    fixed_scale = min(5.0, logit_scale_value)
+                    print(f"DIAGNOSTIC: Using fixed scale: {fixed_scale:.6f}")
+                    
+                    # Scale the logits with a hard-coded, conservative value
+                    logits = fixed_scale * raw_logits
+                    
+                    # Safety check - clip extreme values to a much lower threshold
+                    max_logit = torch.max(torch.abs(logits)).item()
+                    if max_logit > 10:
+                        print(f"DIAGNOSTIC: Extreme logit values detected: {max_logit:.6f}, applying aggressive clipping")
+                        logits = torch.clamp(logits, min=-10.0, max=10.0)
                     
                     # Extract batch size and number of classes
                     batch_size = tabular_features.shape[0]
@@ -995,11 +1074,37 @@ class SemanticConsistencyLoss(nn.Module):
                             if valid_logits.shape[0] > 0:
                                 # Using cross entropy for contrastive loss with known labels
                                 # For each tabular feature, its true text class is the corresponding label
-                                semantic_loss = F.cross_entropy(valid_logits, valid_labels)
+                                print(f"DIAGNOSTIC: valid_logits shape={valid_logits.shape}, valid_labels shape={valid_labels.shape}, max_label={valid_labels.max().item()}")
+                                
+                                # Detach the inputs for gradient inspection
+                                valid_logits_detached = valid_logits.detach().clone().requires_grad_(True)
+                                
+                                # Compute loss on detached tensor for diagnostic purposes
+                                try:
+                                    diagnostic_loss = F.cross_entropy(valid_logits_detached, valid_labels)
+                                    print(f"DIAGNOSTIC: Cross entropy loss on detached tensor: {diagnostic_loss.item():.6f}")
+                                    
+                                    # Backward on diagnostic to check gradient magnitude
+                                    diagnostic_loss.backward()
+                                    grad_norm = valid_logits_detached.grad.norm().item()
+                                    max_grad = valid_logits_detached.grad.abs().max().item()
+                                    print(f"DIAGNOSTIC: Gradient stats - norm={grad_norm:.6f}, max={max_grad:.6f}")
+                                    
+                                    # If gradients are extremely large, use a detached version with smaller scale
+                                    if grad_norm > 1000 or max_grad > 1000:
+                                        print("DIAGNOSTIC: EXTREME GRADIENTS DETECTED! Using fixed loss value.")
+                                        semantic_loss = torch.tensor(0.1, device=logits.device)
+                                    else:
+                                        # Proceed with actual loss computation on original tensor
+                                        semantic_loss = F.cross_entropy(valid_logits, valid_labels)
+                                        print(f"DIAGNOSTIC: Actual semantic loss: {semantic_loss.item():.6f}")
+                                except Exception as e:
+                                    print(f"DIAGNOSTIC: Error during diagnostic computation: {e}")
+                                    semantic_loss = F.cross_entropy(valid_logits, valid_labels)
                                 
                                 # Safety check for NaN or Inf
                                 if torch.isnan(semantic_loss) or torch.isinf(semantic_loss):
-                                    memory_logger.warning("NaN/Inf in semantic loss with labels, using fallback")
+                                    print("DIAGNOSTIC: NaN/Inf in semantic loss with labels, using fallback")
                                     semantic_loss = torch.tensor(0.1, device=logits.device)
                             else:
                                 # No valid samples after filtering

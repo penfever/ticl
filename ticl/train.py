@@ -613,9 +613,29 @@ def train_epoch(
                         grad_norm += param_norm ** 2
                 grad_norm = grad_norm ** 0.5
                 
+                # Print the gradient norm to stdout for visibility
+                print(f"GRAD DIAGNOSTIC: Gradient norm before clipping: {grad_norm:.4f}")
+                
                 if grad_norm > 10.0:  # Very large gradient norm
                     memory_logger.warning(f"Extremely large gradient norm detected: {grad_norm:.4f} - applying strict clipping")
                     max_norm = 0.1  # Even stricter clipping for extreme cases
+                    
+                    # EMERGENCY FIX: If we have SemanticAwareClassifier, completely disable semantic loss
+                    if grad_norm > 1000.0:  # Catastrophically large gradient
+                        print("EMERGENCY FIX: Disabling semantic loss component due to exploding gradients")
+                        # First try unwrapped model
+                        if hasattr(model, 'semantic_weight') and hasattr(model, 'SemanticConsistencyLoss'):
+                            print("Setting semantic_weight to 0.0 on base model")
+                            model.semantic_weight = 0.0
+                        # Try with DDP wrapper
+                        elif hasattr(model, 'module') and hasattr(model.module, 'semantic_weight'):
+                            print("Setting semantic_weight to 0.0 on module")
+                            model.module.semantic_weight = 0.0
+                        # Try finding the loss function itself
+                        for name, submodule in model.named_modules():
+                            if isinstance(submodule, nn.Module) and hasattr(submodule, 'semantic_weight'):
+                                print(f"Setting semantic_weight to 0.0 on {name}")
+                                submodule.semantic_weight = 0.0
                 
                 # 'foreach=True' is not supported on MPS (Apple Silicon) in some PyTorch versions
                 if device == 'mps':
@@ -944,6 +964,19 @@ def train(dl, model, criterion, optimizer_state=None, scheduler=None,
                 model.learning_rates.append(last_lr)
                 model.losses.append(total_loss)
                 model.wallclock_times.append(time.time() - model.start_time)
+                
+                # Store the current epoch count in the model for use by components like SemanticAwareClassifier
+                # This enables epoch-dependent behaviors like warmup schedules
+                if hasattr(model, 'module'):  # Handle DistributedDataParallel wrapping
+                    if hasattr(model.module, '_epoch_count'):
+                        model.module._epoch_count = epoch
+                else:
+                    if hasattr(model, '_epoch_count'):
+                        model._epoch_count = epoch
+                    else:
+                        # Add the attribute if it doesn't exist
+                        setattr(model, '_epoch_count', epoch)
+                
                 output = epoch_callback(model, optimizer, scheduler, epoch)
                 if output: 
                     inference_time.append(output)
