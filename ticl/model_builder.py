@@ -1,5 +1,6 @@
 import os, pdb
 import subprocess as sp
+import logging
 
 import torch, wandb
 from torch import nn
@@ -16,6 +17,9 @@ from ticl.models.gamformer import GAMformer
 from ticl.models.mothernet import MotherNet
 from ticl.config_utils import nested_dict
 from ticl.utils import IGNORE_INDEX
+
+# Configure logger
+logger = logging.getLogger(__name__)
 
 try:
     from functools import cache
@@ -206,10 +210,18 @@ def get_model(
     config['verbose'] = verbose_prior
 
     # Use semantic loss if semantic features are enabled
-    use_semantic_loss = config.get('semantic_prediction', False)
+    # This should be determined by model type, not by a config flag that could be inconsistent
+    has_semantic_features = (
+        config.get('semantic_prediction', False) or 
+        config['prior']['classification'].get('semantic_feature_p', 0.0) > 0.0
+    )
+    
+    if has_semantic_features:
+        logger.info("Using SemanticConsistencyLoss due to semantic features being enabled")
+    
     criterion = get_criterion(
         config['prior']['classification']['max_num_classes'],
-        use_semantic_loss=use_semantic_loss
+        use_semantic_loss=has_semantic_features  # Use semantic flag that considers both indicators
     )
 
 

@@ -889,7 +889,6 @@ class SemanticConsistencyLoss(nn.Module):
         Compute the combined loss with true CLIP-style contrastive learning.
         This implements symmetric cross-entropy loss over the similarity matrix
         using the InfoNCE formulation from the CLIP paper.
-        
         Parameters:
         -----------
         outputs : dict
@@ -897,284 +896,65 @@ class SemanticConsistencyLoss(nn.Module):
             'tabular_features', and 'text_features'
         targets : dict
             Target values containing 'class_targets' and 'semantic_targets'
-            
+            semantic targets are semantic feature types (age, name)
+            there can be more or fewer semantic targets than class targets
         Returns:
         --------
         torch.Tensor
             Combined loss value
         """
-        # Get class prediction outputs
-        class_logits = outputs['class_logits']
-        
+        # Get class prediction outputs (?, batch_size, n_classes)
+        class_logits = outputs['class_logits'].permute(1, 2, 0)
         # Get targets for standard classification
-        class_targets = targets['class_targets']
+        class_targets = targets['class_targets'].permute(1, 0)
+        class_loss = self.class_loss(class_logits, class_targets)
         
-        # Check for NaN/Inf in class_logits and stabilize if needed
-        if torch.isnan(class_logits).any() or torch.isinf(class_logits).any():
-            memory_logger.warning("NaN or Inf values detected in class_logits - applying numeric stabilization")
-            class_logits = torch.nan_to_num(class_logits, nan=0.0, posinf=1e4, neginf=-1e4)
-            
-            # Apply additional stabilization
-            class_logits = class_logits - class_logits.max(dim=-1, keepdim=True)[0].detach()
+        # Get normalized feature vectors
+        tabular_features = outputs['tabular_features']
+        text_features = outputs['text_features']
         
-        # Compute standard classification loss with error handling
-        try:
-            class_loss = self.class_loss(class_logits, class_targets)
-            
-            # Check if loss is NaN and fallback if needed
-            if torch.isnan(class_loss) or torch.isinf(class_loss):
-                memory_logger.warning("NaN or Inf class loss - using fallback loss value")
-                class_loss = torch.tensor(0.5, device=class_logits.device)
-        except Exception as e:
-            memory_logger.error(f"Error computing class loss: {e}")
-            class_loss = torch.tensor(0.5, device=class_logits.device)
+        # Note: These are already normalized vectors, so this is cosine similarity
+        raw_logits = torch.matmul(tabular_features, text_features.t()) * 4.5
         
-        # Initialize semantic loss
-        semantic_loss = torch.tensor(0.0, device=class_loss.device)
+        # Get semantic targets
+        semantic_targets = targets['semantic_targets']
         
-        # Compute CLIP-style contrastive loss if we have the necessary components
-        # We need BOTH tabular_features and text_features for proper CLIP loss
-        has_semantic_components = (
-            'tabular_features' in outputs and 
-            'text_features' in outputs and
-            outputs['text_features'] is not None and
-            outputs['tabular_features'] is not None
-        )
-        
-        if has_semantic_components:
-            # Get normalized feature vectors
-            tabular_features = outputs['tabular_features']  # Should be [batch_size, embed_dim]
-            text_features = outputs['text_features']        # Should be [n_classes, embed_dim]
-            
-            # Double-check both feature types are available and non-empty
-            if tabular_features is None or text_features is None or tabular_features.shape[0] == 0 or text_features.shape[0] == 0:
-                memory_logger.warning("Missing or empty feature tensors for contrastive loss - skipping")
+         # Transpose targets to [batch_size, n_rows]
+        targets_transposed = semantic_targets.permute(1, 0)  # [4, 302]
+
+        batch_size = targets_transposed.shape[0]
+
+        # Initialize loss
+        total_loss = 0
+        total_rows = 0
+
+        # For each batch item
+        for i in range(batch_size):
+            # Get logits for this batch item [n_classes]
+            batch_logits = raw_logits[i]  # [10]
+
+            # Get all target rows for this batch item [n_rows]
+            batch_targets = targets_transposed[i]  # [302]
+            n_rows = batch_targets.shape[0]
+
+            if n_rows > 0:  # Handle case where some batch items might have zero rows
+                # Compute cross-entropy for this batch item
+                batch_loss = F.cross_entropy(
+                    batch_logits.unsqueeze(0).expand(n_rows, -1),
+                    batch_targets
+                )
+
+                # Add to total loss, weighted by number of rows
+                total_loss += batch_loss * n_rows
+                total_rows += n_rows
+
+            # Normalize loss by total number of rows across all batch items
+            if total_rows > 0:
+                normalized_loss = total_loss / total_rows
             else:
-                try:
-                    # CLIP contrastive loss implementation
-                    # ----------------------------------
-                    # This is a rewrite of the InfoNCE loss from the CLIP paper
-                    # The core concept is to treat this as a retrieval problem:
-                    # Each tabular embedding should match its corresponding text embedding 
-                    
-                    # Check shapes and normalize if needed (fallback safety)
-                    if len(tabular_features.shape) != 2 or len(text_features.shape) != 2:
-                        memory_logger.warning(f"Unexpected feature shapes: tab={tabular_features.shape}, text={text_features.shape}")
-                        # Try to reshape if possible, otherwise skip
-                        if len(tabular_features.shape) == 1:
-                            tabular_features = tabular_features.unsqueeze(0)
-                        if len(text_features.shape) == 1:
-                            text_features = text_features.unsqueeze(0)
-                    
-                    # Check and handle NaN values
-                    if torch.isnan(tabular_features).any() or torch.isinf(tabular_features).any():
-                        memory_logger.warning("NaN or Inf in tabular_features, applying stabilization")
-                        tabular_features = torch.nan_to_num(tabular_features, nan=0.0, posinf=1.0, neginf=-1.0)
-                        # Re-normalize
-                        tabular_features = F.normalize(tabular_features, dim=1, eps=1e-8)
-                        
-                    if torch.isnan(text_features).any() or torch.isinf(text_features).any():
-                        memory_logger.warning("NaN or Inf in text_features, applying stabilization")
-                        text_features = torch.nan_to_num(text_features, nan=0.0, posinf=1.0, neginf=-1.0)
-                        # Re-normalize
-                        text_features = F.normalize(text_features, dim=1, eps=1e-8)
-                    
-                    # ===== DIAGNOSTIC LOGGING =====
-                    # Print diagnostic information to stdout (not just to debug log)
-                    print(f"DIAGNOSTIC: tabular_features stats - shape={tabular_features.shape}, "
-                          f"mean={tabular_features.mean().item():.6f}, "
-                          f"std={tabular_features.std().item():.6f}, "
-                          f"min={tabular_features.min().item():.6f}, "
-                          f"max={tabular_features.max().item():.6f}, "
-                          f"norm={tabular_features.norm().item():.6f}")
-                    
-                    print(f"DIAGNOSTIC: text_features stats - shape={text_features.shape}, "
-                          f"mean={text_features.mean().item():.6f}, "
-                          f"std={text_features.std().item():.6f}, "
-                          f"min={text_features.min().item():.6f}, "
-                          f"max={text_features.max().item():.6f}, "
-                          f"norm={text_features.norm().item():.6f}")
-                    
-                    # Create similarity matrix WITHOUT logit scale - we'll apply it separately
-                    # Note: These are already normalized vectors, so this is cosine similarity
-                    raw_logits = torch.matmul(tabular_features, text_features.t())
-                    
-                    # Extract the logit scale from forward method, if present
-                    logit_scale_value = 1.0  # Default if not found
-                    if 'semantic_logits' in outputs and 'tabular_features' in outputs and 'text_features' in outputs:
-                        # Estimate the logit scale by comparing raw cosine values to final logits
-                        if outputs['semantic_logits'].numel() > 0:
-                            try:
-                                # Calculate the approximate scale that was used
-                                raw_sim = torch.matmul(outputs['tabular_features'][0:1], outputs['text_features'].t())
-                                scaled_sim = outputs['semantic_logits'][0:1]
-                                
-                                if torch.max(torch.abs(raw_sim)) > 0:
-                                    est_scale = torch.max(torch.abs(scaled_sim)) / torch.max(torch.abs(raw_sim))
-                                    logit_scale_value = est_scale.item()
-                                    print(f"DIAGNOSTIC: Estimated logit scale: {logit_scale_value:.6f}")
-                                else:
-                                    print("DIAGNOSTIC: Could not estimate logit scale - raw similarity is zero")
-                            except Exception as e:
-                                print(f"DIAGNOSTIC: Error estimating logit scale: {e}")
-                    
-                    # Print diagnostic info about raw cosine similarities
-                    print(f"DIAGNOSTIC: raw_logits stats - shape={raw_logits.shape}, "
-                          f"mean={raw_logits.mean().item():.6f}, "
-                          f"min={raw_logits.min().item():.6f}, "
-                          f"max={raw_logits.max().item():.6f}")
-                    
-                    # Apply a much lower fixed scale (e.g., 5.0 instead of exp(logit_scale))
-                    # This is to avoid extremely large gradient values
-                    fixed_scale = min(5.0, logit_scale_value)
-                    print(f"DIAGNOSTIC: Using fixed scale: {fixed_scale:.6f}")
-                    
-                    # Scale the logits with a hard-coded, conservative value
-                    logits = fixed_scale * raw_logits
-                    
-                    # Safety check - clip extreme values to a much lower threshold
-                    max_logit = torch.max(torch.abs(logits)).item()
-                    if max_logit > 10:
-                        print(f"DIAGNOSTIC: Extreme logit values detected: {max_logit:.6f}, applying aggressive clipping")
-                        logits = torch.clamp(logits, min=-10.0, max=10.0)
-                    
-                    # Extract batch size and number of classes
-                    batch_size = tabular_features.shape[0]
-                    num_classes = text_features.shape[0]
-                    
-                    # For proper InfoNCE contrastive loss, we need label information
-                    # We'll check for semantic_targets, or default to assuming each sample
-                    # corresponds to a class index
-                    if 'semantic_targets' in targets and targets['semantic_targets'] is not None:
-                        labels = targets['semantic_targets']
-                        
-                        # Filter to only include non-negative values
-                        valid_mask = (labels >= 0) & (labels < num_classes)
-                        
-                        if valid_mask.sum() == 0:
-                            # No valid labels, default to standard contrastive loss
-                            memory_logger.debug("No valid semantic targets, using default contrastive loss")
-                            labels = None
-                        else:
-                            # Keep only valid samples and corresponding labels
-                            valid_logits = logits[valid_mask]
-                            valid_labels = labels[valid_mask].long()
-                            
-                            if valid_logits.shape[0] > 0:
-                                # Using cross entropy for contrastive loss with known labels
-                                # For each tabular feature, its true text class is the corresponding label
-                                print(f"DIAGNOSTIC: valid_logits shape={valid_logits.shape}, valid_labels shape={valid_labels.shape}, max_label={valid_labels.max().item()}")
-                                
-                                # Detach the inputs for gradient inspection
-                                valid_logits_detached = valid_logits.detach().clone().requires_grad_(True)
-                                
-                                # Compute loss on detached tensor for diagnostic purposes
-                                try:
-                                    diagnostic_loss = F.cross_entropy(valid_logits_detached, valid_labels)
-                                    print(f"DIAGNOSTIC: Cross entropy loss on detached tensor: {diagnostic_loss.item():.6f}")
-                                    
-                                    # Backward on diagnostic to check gradient magnitude
-                                    diagnostic_loss.backward()
-                                    grad_norm = valid_logits_detached.grad.norm().item()
-                                    max_grad = valid_logits_detached.grad.abs().max().item()
-                                    print(f"DIAGNOSTIC: Gradient stats - norm={grad_norm:.6f}, max={max_grad:.6f}")
-                                    
-                                    # If gradients are extremely large, use a detached version with smaller scale
-                                    if grad_norm > 1000 or max_grad > 1000:
-                                        print("DIAGNOSTIC: EXTREME GRADIENTS DETECTED! Using fixed loss value.")
-                                        semantic_loss = torch.tensor(0.1, device=logits.device)
-                                    else:
-                                        # Proceed with actual loss computation on original tensor
-                                        semantic_loss = F.cross_entropy(valid_logits, valid_labels)
-                                        print(f"DIAGNOSTIC: Actual semantic loss: {semantic_loss.item():.6f}")
-                                except Exception as e:
-                                    print(f"DIAGNOSTIC: Error during diagnostic computation: {e}")
-                                    semantic_loss = F.cross_entropy(valid_logits, valid_labels)
-                                
-                                # Safety check for NaN or Inf
-                                if torch.isnan(semantic_loss) or torch.isinf(semantic_loss):
-                                    print("DIAGNOSTIC: NaN/Inf in semantic loss with labels, using fallback")
-                                    semantic_loss = torch.tensor(0.1, device=logits.device)
-                            else:
-                                # No valid samples after filtering
-                                semantic_loss = torch.tensor(0.0, device=logits.device)
-                    else:
-                        # No semantic targets provided - use default contrastive setup
-                        # Create label indices for the contrastive task
-                        # We're aligning the diagonal of the similarity matrix - each item with itself
-                        # For CLIP, we want the diagonal to be high and off-diagonals to be low
-                        if batch_size <= num_classes:
-                            # If batch size <= number of classes, we can use row indices as labels
-                            # This assumes each batch item i corresponds to class i
-                            labels = torch.arange(batch_size, device=logits.device)
-                            
-                            # Use cross entropy for contrastive loss (standard InfoNCE formulation)
-                            semantic_loss = F.cross_entropy(logits, labels)
-                        else:
-                            # If batch size > number of classes, we need a different approach
-                            # Use a simpler NxN contrastive approach on a subset
-                            max_samples = min(batch_size, num_classes)
-                            reduced_logits = logits[:max_samples, :max_samples]
-                            reduced_labels = torch.arange(max_samples, device=logits.device)
-                            semantic_loss = F.cross_entropy(reduced_logits, reduced_labels)
-                        
-                        # Safety check for NaN or Inf
-                        if torch.isnan(semantic_loss) or torch.isinf(semantic_loss):
-                            memory_logger.warning("NaN/Inf in default contrastive loss, using fallback")
-                            semantic_loss = torch.tensor(0.1, device=logits.device)
-                except Exception as e:
-                    memory_logger.error(f"Error in CLIP contrastive loss calculation: {e}")
-                    semantic_loss = torch.tensor(0.0, device=class_loss.device)
+                normalized_loss = torch.tensor(0.0, device=raw_logits.device, requires_grad=True)
         
-        # Final check on semantic loss - add a small minimum to ensure stable gradients when needed
-        if torch.isnan(semantic_loss) or torch.isinf(semantic_loss) or semantic_loss < 1e-8:
-            memory_logger.warning(f"Invalid semantic loss: {semantic_loss.item() if not torch.isnan(semantic_loss) else 'NaN'}, using fallback")
-            semantic_loss = torch.tensor(1e-8, device=class_loss.device)  # Small positive value
-        
-        # Scale semantic loss by weight factor (now smaller at 0.1)
-        # The scaled weight factor helps prevent the contrastive loss from dominating
-        weighted_semantic_loss = self.semantic_weight * semantic_loss
-                
-        # Final safety check for total loss
-        try:
-            # Make sure semantic loss is detached if zero to prevent gradient issues
-            if weighted_semantic_loss < 1e-7:
-                weighted_semantic_loss = weighted_semantic_loss.detach()
-                
-            # Combine losses - the class_loss is the primary term
-            total_loss = class_loss + weighted_semantic_loss
-            
-            # Check for invalid final loss
-            if torch.isnan(total_loss) or torch.isinf(total_loss):
-                memory_logger.warning("Total loss is NaN/Inf, using only valid components")
-                # Check which component is valid
-                if not (torch.isnan(class_loss) or torch.isinf(class_loss)):
-                    total_loss = class_loss
-                else:
-                    # Class loss is invalid, use a fallback value
-                    total_loss = torch.tensor(0.5, device=class_loss.device)
-        except Exception as e:
-            memory_logger.error(f"Error combining losses: {e}")
-            total_loss = torch.tensor(0.5, device=class_loss.device)
-        
-        # Store components for debugging
-        try:
-            self.last_class_loss = class_loss.item()
-        except:
-            self.last_class_loss = 0.0
-            
-        try:
-            self.last_semantic_loss = semantic_loss.item()
-        except:
-            self.last_semantic_loss = 0.0
-        
-        # Final grad clipping - experimental technique to prevent instability
-        # This is a safety net beyond the standard gradient clipping in train.py
-        total_loss = torch.clamp(total_loss, max=100.0)
-        
-        # Log final loss value
-        memory_logger.debug(f"Final loss values - class: {self.last_class_loss:.4f}, semantic: {self.last_semantic_loss:.4f}, total: {total_loss.item():.4f}")
-        
+        total_loss = normalized_loss + class_loss
         return total_loss
 
 

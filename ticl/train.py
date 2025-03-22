@@ -40,7 +40,6 @@ def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
     """
     # Check if this is a semantic model with dictionary output
     is_semantic_model = isinstance(output, dict) and 'class_logits' in output and 'semantic_logits' in output
-    
     if is_semantic_model:
         # For semantic models with our custom loss
         from ticl.models.semantic_aware_model import SemanticConsistencyLoss
@@ -54,6 +53,20 @@ def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
                 if 'semantic_targets' in batch_info:
                     semantic_targets = batch_info['semantic_targets'].to(device)
                     has_semantic_features = True
+            
+            # FAIL WITH INFORMATIVE ERROR if we're using SemanticConsistencyLoss but no semantic features
+            if not has_semantic_features:
+                error_msg = (
+                    "ERROR: Missing semantic features in batch but using SemanticConsistencyLoss. "
+                    "This typically happens when semantic features are not properly configured. "
+                    "Possible causes: \n"
+                    "1. Dataloader doesn't include semantic_targets in batch_info\n"
+                    "2. Using a non-semantic prior with a semantic model\n"
+                    "3. Mixed-precision setting is affecting feature generation\n"
+                    "Try using --train-mixed-precision False or check dataloader configuration."
+                )
+                logging.error(error_msg)
+                raise ValueError(error_msg)
                     
             # Create target dictionary
             target_dict = {
@@ -125,7 +138,6 @@ def train_epoch(
     ignore_steps = torch.tensor(0., device = device)
     steps_per_epoch = len(dl)
     assert len(dl) % aggregate_k_gradients == 0, 'Please set the number of steps per epoch s.t. `aggregate_k_gradients` divides it.'
-    
     # Detect device type for backend-specific operations
     is_cuda = device.startswith('cuda')
     is_mps = device == 'mps'
@@ -210,22 +222,19 @@ def train_epoch(
             cm = model.no_sync()
         else:
             cm = nullcontext()
-            
+
         with cm:
             
-            # Force full precision (float32) for CUDA to match MPS behavior
-            # This should help with gradient stability issues
-            if is_cuda:
-                # Disable mixed precision on CUDA even if requested
-                print("PRECISION DIAGNOSTIC: Using full precision (float32) for CUDA to match MPS behavior")
-                autocast_context = nullcontext()
-            else:
-                # Use normal autocast context for other devices
-                autocast_context = get_autocast_context(
-                    device=device,
-                    dtype=None,
-                    scaler=scaler,
-                )
+            # Get appropriate autocast context based on device type
+            # The issue is that scaler can be active but autocast returns nullcontext
+            autocast_context = get_autocast_context(
+                device=device,
+                dtype=None,
+                scaler=scaler,
+            )
+                
+            # Additional check to ensure we don't try to use scaler with nullcontext
+            use_scaler = (scaler is not None and autocast_context is not nullcontext())
                 
             with autocast_context:
                 # Move data to the appropriate device
@@ -335,7 +344,8 @@ def train_epoch(
                 dl.set_postfix(loss=f"{avg_loss:.4f}", refresh=True)
             
             # Backward pass with scaler if applicable
-            if scaler is not None:
+            # Only use scaler if it's not None AND we're using a compatible autocast context
+            if use_scaler:
                 scaler.scale(loss).backward()
             else:
                 loss.backward()
@@ -355,25 +365,12 @@ def train_epoch(
                 grad_norm = grad_norm ** 0.5
                 
                 # Enhanced gradient diagnostics for debugging stability issues
-                print(f"GRAD DIAGNOSTIC: Gradient norm before clipping: {grad_norm:.4f}")
-                
-                # Log first batch gradients for debugging
-                if batch == 0:
-                    print(f"FIRST BATCH GRADIENT SAMPLES:")
-                    # Sample a few parameters to track
-                    param_count = 0
-                    for name, p in model.named_parameters():
-                        if p.grad is not None and param_count < 3:  # Just check first 3 parameters
-                            param_norm = p.grad.data.norm(2).item()
-                            max_val = p.grad.data.abs().max().item() if p.grad.numel() > 0 else 0
-                            print(f"  - Param: {name[:40]}...")
-                            print(f"    Norm: {param_norm:.6f}, Max: {max_val:.6f}, Shape: {p.shape}")
-                            param_count += 1
+                # print(f"GRAD DIAGNOSTIC: Gradient norm before clipping: {grad_norm:.4f}")
                 
                 # Add per-layer gradient analysis for extreme cases
                 if grad_norm > 10.0:
                     if grad_norm > 100.0:  # More detailed info for very large gradients
-                        print(f"DETAILED GRADIENT ANALYSIS:")
+                        print(f"DETAILED LARGE GRADIENT ANALYSIS:")
                         largest_grad_param = None
                         largest_grad_norm = 0.0
                         largest_grad_name = ""
@@ -426,8 +423,10 @@ def train_epoch(
                 if batch == 0:  # Only print warning once
                     print(f"Note: Using slower but more stable gradient clipping method with max_norm={max_norm}")
                 
-                # Use mixed precision optimizer step if enabled, but not for CUDA (we're using full precision there)
-                if scaler is not None and is_mps:  # Only use scaler for MPS, not CUDA
+                # Use mixed precision optimizer step if enabled
+                # Be more explicit about when to use scaler
+                if use_scaler and (is_cuda or is_mps):
+                    # Only use scaler if we used it in backward pass
                     scaler.step(optimizer)
                     scaler.update()
                 else:
