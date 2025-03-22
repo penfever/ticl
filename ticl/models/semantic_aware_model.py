@@ -208,7 +208,7 @@ class SemanticAwareClassifier(nn.Module):
             if max_val > 100.0:
                 memory_logger.warning(f"Very large feature values detected (max={max_val:.2f}), applying normalization")
                 # Apply feature-wise normalization to bring values to reasonable range
-                features = features / (features.norm(dim=-1, keepdim=True) + 1e-6)
+                features = features / (features.norm(dim=-1, keepdim=True) + 1e-4)
         
         # Project features to CLIP text model dimension with enhanced error handling
         try:
@@ -263,7 +263,7 @@ class SemanticAwareClassifier(nn.Module):
         
         # Normalize feature vectors to enable proper cosine similarity
         # Use a small epsilon to prevent division by zero
-        tabular_features = F.normalize(tabular_features, dim=1, eps=1e-5)
+        tabular_features = F.normalize(tabular_features, dim=1, eps=1e-3)
         
         # ===== Process class texts with CLIP text encoder =====
         text_features = None
@@ -865,7 +865,7 @@ class SemanticConsistencyLoss(nn.Module):
     with standard classification loss.
     """
     
-    def __init__(self, semantic_weight=0.1):  # Reduced weight to 0.1 (from 0.5)
+    def __init__(self, semantic_weight=0.2):  # Reduced weight to 0.1 (from 0.5)
         """
         Initialize the loss function.
         
@@ -956,7 +956,7 @@ class SemanticConsistencyLoss(nn.Module):
         
         breakpoint()
         #NOTE: make this weighting a hyperparameter, not hardcoded
-        total_loss = (0.2 * normalized_loss) + class_loss
+        total_loss = (self.semantic_weight * normalized_loss) + class_loss
         return total_loss
 
 

@@ -199,7 +199,7 @@ class LinearAttention(Module):
     The above can be computed in O(N D^2) complexity where D is the
     dimensionality of Q, K and V and N is the sequence length.
     """
-    def __init__(self, query_dimensions, feature_map=None, eps=1e-6):
+    def __init__(self, query_dimensions, feature_map=None, eps=1e-4):
         super(LinearAttention, self).__init__()
         self.feature_map = (
             feature_map(query_dimensions) if feature_map else

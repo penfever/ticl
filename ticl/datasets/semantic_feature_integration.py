@@ -175,7 +175,7 @@ class SemanticFeatureIntegrator:
             weights = [1.0 / len(feature_files)] * len(feature_files)
         elif len(weights) != len(feature_files):
             raise ValueError(f"Number of weights ({len(weights)}) doesn't match number of feature files ({len(feature_files)})")
-        elif abs(sum(weights) - 1.0) > 1e-6:
+        elif abs(sum(weights) - 1.0) > 1e-4:
             print(f"Warning: Weights sum to {sum(weights)}, normalizing to 1.0")
             weights = [w / sum(weights) for w in weights]
         
