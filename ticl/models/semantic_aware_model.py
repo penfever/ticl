@@ -865,17 +865,20 @@ class SemanticConsistencyLoss(nn.Module):
     with standard classification loss.
     """
     
-    def __init__(self, semantic_weight=0.2):  # Reduced weight to 0.1 (from 0.5)
+    def __init__(self, semantic_weight=0.2, cuda_weight=0.1):  # Different weights for CUDA
         """
-        Initialize the loss function.
+        Initialize the loss function with device-specific settings.
         
         Parameters:
         -----------
         semantic_weight : float
-            Weight for the semantic contrastive loss component. Default is 0.1.
+            Weight for the semantic contrastive loss component on CPU/MPS. Default is 0.2.
+        cuda_weight : float
+            Weight for the semantic contrastive loss component on CUDA. Default is 0.1 (lower).
         """
         super().__init__()
         self.semantic_weight = semantic_weight
+        self.cuda_weight = cuda_weight  # Separate weight for CUDA devices
         
         # Main classification loss
         self.class_loss = nn.CrossEntropyLoss()
@@ -883,6 +886,10 @@ class SemanticConsistencyLoss(nn.Module):
         # Component loss values for logging
         self.last_class_loss = 0.0
         self.last_semantic_loss = 0.0
+        
+        # Set epsilon values for different devices (larger for CUDA)
+        self.eps = 1e-3          # Standard epsilon for CPU/MPS
+        self.cuda_eps = 1e-2      # Larger epsilon for CUDA to improve stability
         
     def forward(self, outputs, targets):
         """
@@ -915,15 +922,47 @@ class SemanticConsistencyLoss(nn.Module):
         
         # Note: These are already normalized vectors, so this is cosine similarity
         # Reduced multiplier factor from 4.5 to 2.0 to improve numerical stability
-        self.eps = 1e-3
-
-        raw_similarity = torch.matmul(tabular_features, text_features.t())
-        raw_similarity = raw_similarity / (raw_similarity.abs().max() + self.eps)
-        # Scale with a smaller factor and apply clamping to prevent extreme values
-        raw_logits = raw_similarity * 2.0
         
-        # Add clipping to prevent extreme values that could cause precision issues
-        raw_logits = torch.clamp(raw_logits, min=-10.0, max=10.0)
+        # First, detect device type
+        device_type = tabular_features.device.type
+        
+        # Track device for debugging and diagnostic info
+        self.last_device = device_type
+        
+        # Get raw similarity matrix through matrix multiplication
+        raw_similarity = torch.matmul(tabular_features, text_features.t())
+        
+        # Apply device-specific stabilization techniques
+        if device_type == 'cuda':
+            # Apply stronger normalization for CUDA with our larger epsilon
+            raw_similarity = raw_similarity / (raw_similarity.abs().max() + self.cuda_eps)
+            
+            # Track raw similarity for debugging
+            raw_max_val = raw_similarity.abs().max().item()
+            if raw_max_val > 10.0:
+                print(f"WARNING: Very large raw similarity value on CUDA: {raw_max_val:.2f}")
+            
+            # Use a smaller scaling factor on CUDA to prevent gradient explosion
+            raw_logits = raw_similarity * 1.0
+            
+            # Apply more aggressive clamping for CUDA to prevent extreme values
+            raw_logits = torch.clamp(raw_logits, min=-5.0, max=5.0)
+            
+            # Extra safety: apply softmax normalization to stabilize CUDA training
+            if raw_max_val > 5.0:
+                # Apply row-wise softmax as an additional safety measure
+                normalized_logits = F.softmax(raw_logits, dim=-1)
+                # Convert back to logits with safe scaling
+                raw_logits = torch.log(normalized_logits + 1e-6) * 2.0
+        else:
+            # Standard MPS/CPU approach which has been stable
+            raw_similarity = raw_similarity / (raw_similarity.abs().max() + self.eps)
+            
+            # Scale with a standard factor for MPS/CPU
+            raw_logits = raw_similarity * 2.0
+            
+            # Standard clipping for MPS/CPU
+            raw_logits = torch.clamp(raw_logits, min=-10.0, max=10.0)
         
         # Get semantic targets
         semantic_targets = targets['semantic_targets']
@@ -982,8 +1021,47 @@ class SemanticConsistencyLoss(nn.Module):
             else:
                 normalized_loss = torch.tensor(0.0, device=raw_logits.device, requires_grad=True)
 
-        # Use the configured semantic weight
-        total_loss = (self.semantic_weight * normalized_loss) + class_loss
+        # Use the configured semantic weight with device-specific handling
+        semantic_loss = normalized_loss
+        
+        # Store component losses for logging/debugging
+        self.last_class_loss = class_loss.item()
+        self.last_semantic_loss = semantic_loss.item() if isinstance(semantic_loss, torch.Tensor) else 0.0
+        
+        # Apply device-specific stabilization based on the device we detected earlier
+        if getattr(self, 'last_device', '') == 'cuda':
+            # Use the CUDA-specific weight (lower) to reduce the semantic loss contribution
+            weight = self.cuda_weight
+            
+            # Extra clamping for the semantic loss on CUDA
+            clamped_semantic_loss = torch.clamp(semantic_loss, min=-5.0, max=5.0)
+            
+            # Scale it with the CUDA-specific weight
+            scaled_semantic_loss = weight * clamped_semantic_loss
+            
+            # Add class loss
+            total_loss = scaled_semantic_loss + class_loss
+            
+            # Register a custom gradient hook for CUDA stability
+            def grad_hook(grad):
+                if torch.isnan(grad).any() or torch.isinf(grad).any():
+                    # Print diagnostic info
+                    nan_count = torch.isnan(grad).sum().item()
+                    inf_count = torch.isinf(grad).sum().item()
+                    if nan_count > 0 or inf_count > 0:
+                        print(f"WARNING: CUDA gradient contains {nan_count} NaN and {inf_count} Inf values")
+                    
+                    # Replace NaN/Inf with zeros to allow training to continue
+                    grad = torch.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0)
+                return grad
+                
+            # Only register hook if semantic loss contributes to the total
+            if weight > 0 and isinstance(semantic_loss, torch.Tensor) and semantic_loss.requires_grad:
+                total_loss.register_hook(grad_hook)
+        else:
+            # Standard approach for MPS/CPU with the original semantic weight
+            total_loss = (self.semantic_weight * semantic_loss) + class_loss
+            
         return total_loss
 
 

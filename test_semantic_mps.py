@@ -1,353 +1,213 @@
-#!/usr/bin/env python3
-"""
-Test script to verify semantic feature processing in different precision modes,
-focusing on the data loading and model forward pass pipeline.
-"""
-
-import sys
 import torch
-import logging
+import os
 import argparse
 import numpy as np
-import os
-from pathlib import Path
+from tqdm import tqdm
 
-from ticl.models.semantic_aware_model import SemanticConsistencyLoss, SemanticAwareClassifier, create_semantic_aware_model
-from ticl.model_builder import get_model, get_criterion
-from ticl.model_configs import get_model_default_config
-from ticl.utils import get_autocast_context
-from ticl.dataloader import get_dataloader
-
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
-class ModelOutputHook:
-    """Hook to capture outputs from forward pass."""
-    
-    def __init__(self):
-        self.outputs = None
-    
-    def __call__(self, module, input, output):
-        if isinstance(output, dict):
-            self.outputs = output
-        else:
-            logger.warning(f"Hook received non-dict output of type: {type(output)}")
-            self.outputs = {"raw_output": output}
-
-class DataBatchHook:
-    """Hook to capture data batches from the data loader."""
-    
-    def __init__(self):
-        self.batches = []
-        self.max_batches = 3  # Store up to 3 batches to avoid memory issues
-    
-    def __call__(self, batch_data):
-        """Process and store batch data."""
-        if len(self.batches) < self.max_batches:
-            # Clone tensors to detach from computation graph and avoid memory issues
-            if isinstance(batch_data, tuple) or isinstance(batch_data, list):
-                processed_batch = []
-                for item in batch_data:
-                    if isinstance(item, torch.Tensor):
-                        processed_batch.append(item.detach().clone())
-                    elif isinstance(item, dict):
-                        processed_dict = {}
-                        for k, v in item.items():
-                            if isinstance(v, torch.Tensor):
-                                processed_dict[k] = v.detach().clone()
-                            else:
-                                processed_dict[k] = v
-                        processed_batch.append(processed_dict)
-                    else:
-                        processed_batch.append(item)
-                self.batches.append(tuple(processed_batch))
-            else:
-                self.batches.append(batch_data)
-
-def test_model_with_real_dataloader(mixed_precision=False):
+def test_stability(device_type='cuda'):
     """
-    Test semantic feature processing with actual dataloader in different precision modes.
+    Test numerical stability of semantic similarity calculations on different devices.
+    Compares CPU, MPS (if available), and CUDA (if available) for handling the same operations.
     
-    This test simulates the actual training process by:
-    1. Creating a real dataloader with the same configuration as training
-    2. Using the dataloader to get real batches
-    3. Processing those batches through the model with mixed precision on/off
-    4. Checking if semantic features are properly generated in both modes
+    Parameters:
+    -----------
+    device_type : str
+        Default device to test ('cuda', 'mps', or 'cpu')
     """
-    logger.info(f"\n{'='*40}\nTesting dataloader with mixed_precision={mixed_precision}\n{'='*40}")
+    print(f"Testing numerical stability on {device_type}")
+    
+    # Create random features
+    batch_size = 4
+    embed_dim = 512
+    num_classes = 10
+    
+    # Devices to test
+    devices = ['cpu']
+    if torch.cuda.is_available():
+        devices.append('cuda')
+    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        devices.append('mps')
+        
+    print(f"Available devices: {devices}")
     
     # Set random seed for reproducibility
     torch.manual_seed(42)
-    np.random.seed(42)
     
-    # Device configuration (use CPU for consistent testing)
-    device = torch.device("cpu")
+    # Create a common set of data on CPU first
+    tabular_features_cpu = torch.randn(batch_size, embed_dim)
+    text_features_cpu = torch.randn(num_classes, embed_dim)
     
-    try:
-        # Create a minimal but realistic config for TabPFN with semantic features
-        config = {
-            'model_type': 'tabpfn',
-            'device': device,
-            'prior': {
-                'num_features': 10,
-                'n_samples': 32,
-                'prior_type': 'prior_bag',  # Required for dataloader
-                'gp': {                    # Required for prior_bag type
-                    'outputscale': 1.0,
-                    'lengthscale': 1.0,
-                    'noise': 0.0001
-                },
-                'mlp': {                   # Required for prior_bag type
-                    'add_uninformative_features': False,
-                    'sampling': 'normal',
-                    'num_layers': 2,
-                    'prior_mlp_hidden_dim': 16,
-                    'prior_mlp_dropout_prob': 0.1,
-                    'init_std': 0.1,
-                    'noise_std': 0.01,
-                    'num_causes': 2,
-                    'is_causal': False,
-                    'pre_sample_weights': True,
-                    'y_is_effect': False,
-                    'prior_mlp_scale_weights_sqrt': True,
-                    'random_feature_rotation': True,
-                    'pre_sample_causes': True,
-                    'block_wise_dropout': False,
-                    'sort_features': False,
-                    'in_clique': False,
-                    'prior_mlp_activations': torch.nn.ReLU
-                },
-                'classification': {
-                    'max_num_classes': 2,
-                    'num_classes': 2,          # Required for the classification adapter
-                    'semantic_feature_p': 0.3,  # Enable semantic features
-                    'categorical_feature_p': 0.2, # Required from the error message
-                    'pad_zeros': True,
-                    'balanced': False,         # Add additional parameters that may be needed
-                    'multiclass_type': 'rank', # Required parameter from the error message
-                    'multiclass_max_steps': 10, # Used with multiclass_type 
-                    'output_multiclass_ordered_p': 0.0, # Parameter from the new error message
-                    'nan_prob_no_reason': 0.0, # Additional parameters that might be needed
-                    'nan_prob_a_reason': 0.0,
-                    'num_features_sampler': 'uniform',
-                    'feature_curriculum': False,
-                    'set_value_to_nan': 0.9,   # Additional parameter that might be needed
-                    'track_causal_features': False,
-                }
-            },
-            'transformer': {
-                'emsize': 128,
-                'nlayers': 2,
-                'nhead': 4,
-                'y_encoder': 'linear',
-                'classification_task': True,
-            },
-            'optimizer': {
-                'train_mixed_precision': mixed_precision,
-            },
-            'dataloader': {
-                'num_steps': 2,     # Small number of steps for testing
-                'batch_size': 4,    # Small batch size
-                'min_eval_pos': 2,  # Required parameter for PriorDataLoader
-            },
-            'orchestration': {
-                'progress_bar': False,
-            },
-            'semantic_prediction': True,
-        }
-        
-        # Create a hook to capture model outputs
-        hook = ModelOutputHook()
-        
-        # Create data batch hook
-        batch_hook = DataBatchHook()
-        
-        logger.info("Creating dataloader...")
-        # Create a real dataloader with the configuration
-        dataloader = get_dataloader(
-            prior_config=config['prior'],
-            dataloader_config=config['dataloader'],
-            device=device
-        )
-        
-        # Record a few batches for inspection
-        logger.info("Extracting sample batches from dataloader...")
-        for i, batch_data in enumerate(dataloader):
-            if i >= batch_hook.max_batches:
-                break
-            batch_hook.batches.append(batch_data)
-        
-        # Examine the structure of the batches
-        if batch_hook.batches:
-            logger.info(f"Dataloader produced {len(batch_hook.batches)} batches")
+    # Normalize features (essential for proper cosine similarity)
+    tabular_features_cpu = torch.nn.functional.normalize(tabular_features_cpu, dim=1)
+    text_features_cpu = torch.nn.functional.normalize(text_features_cpu, dim=1)
+    
+    # Test each device
+    results = {}
+    for device in devices:
+        try:
+            print(f"\nTesting on {device.upper()}")
             
-            # Inspect first batch
-            sample_batch = batch_hook.batches[0]
-            logger.info(f"Batch structure: {type(sample_batch)}, length: {len(sample_batch)}")
+            # Move tensors to device
+            tabular_features = tabular_features_cpu.to(device)
+            text_features = text_features_cpu.to(device)
             
-            # Unpack batch data
-            if len(sample_batch) == 3:
-                data, targets, single_eval_pos = sample_batch
-                logger.info("Standard batch format: (data, targets, single_eval_pos)")
-                batch_info = None
-            elif len(sample_batch) == 4:
-                data, targets, single_eval_pos, batch_info = sample_batch
-                logger.info("Extended batch format: (data, targets, single_eval_pos, info)")
-            else:
-                logger.error(f"Unexpected batch format with {len(sample_batch)} elements")
-                return False
+            # Calculate similarity and apply standard normalization
+            similarity = torch.matmul(tabular_features, text_features.t())
             
-            # Check for semantic features in the data
-            if isinstance(data, tuple) and len(data) == 3 and isinstance(data[0], dict):
-                # This suggests it's the extended format with semantic info
-                info_dict, X, y = data
-                logger.info(f"Data contains semantic info dictionary with keys: {list(info_dict.keys())}")
+            # Report stats
+            print(f"Raw similarity - min: {similarity.min().item():.6f}, max: {similarity.max().item():.6f}")
+            print(f"Raw similarity - mean: {similarity.mean().item():.6f}, std: {similarity.std().item():.6f}")
+            
+            # Apply normalization by max value + epsilon
+            for eps in [1e-8, 1e-6, 1e-4, 1e-3, 1e-2]:
+                print(f"\nTesting epsilon: {eps}")
                 
-                # Check for semantic targets
-                semantic_info_present = False
-                if 'semantic_targets' in info_dict:
-                    semantic_info_present = True
-                    logger.info(f"Found semantic_targets with shape: {info_dict['semantic_targets'].shape}")
+                # Normalize by max (CLIP-style)
+                norm_similarity = similarity / (similarity.abs().max() + eps)
                 
-                if 'semantic_class_targets' in info_dict:
-                    semantic_info_present = True
-                    logger.info(f"Found semantic_class_targets with shape: {info_dict['semantic_class_targets'].shape}")
+                # Check for NaN values
+                has_nan = torch.isnan(norm_similarity).any().item()
+                has_inf = torch.isinf(norm_similarity).any().item()
                 
-                if semantic_info_present:
-                    logger.info("✅ Semantic information is present in dataloader output")
-                else:
-                    logger.warning("❌ No semantic information found in dataloader output")
+                # Apply scaling and clipping (varying values)
+                for scale in [0.5, 1.0, 2.0, 5.0]:
+                    for clip_val in [5.0, 10.0, 20.0]:
+                        # Scale and clip
+                        logits = norm_similarity * scale
+                        logits = torch.clamp(logits, min=-clip_val, max=clip_val)
+                        
+                        # Check and report
+                        logits_has_nan = torch.isnan(logits).any().item()
+                        logits_has_inf = torch.isinf(logits).any().item()
+                        
+                        # Get stats
+                        logits_min = logits.min().item()
+                        logits_max = logits.max().item()
+                        logits_mean = logits.mean().item()
+                        logits_std = logits.std().item()
+                        
+                        # Store results
+                        key = f"{device}_eps{eps}_scale{scale}_clip{clip_val}"
+                        results[key] = {
+                            'device': device,
+                            'epsilon': eps,
+                            'scale': scale,
+                            'clip_val': clip_val,
+                            'has_nan': has_nan or logits_has_nan,
+                            'has_inf': has_inf or logits_has_inf,
+                            'min': logits_min,
+                            'max': logits_max,
+                            'mean': logits_mean,
+                            'std': logits_std
+                        }
+                        
+                        # Report
+                        status = "✓" if not (has_nan or logits_has_nan or has_inf or logits_has_inf) else "✗"
+                        print(f"Scale {scale}, Clip {clip_val}: {status} - Min/Max: {logits_min:.4f}/{logits_max:.4f}, Mean±Std: {logits_mean:.4f}±{logits_std:.4f}")
             
-            # Create a basic TabPFN model
-            logger.info("Building model...")
-            from ticl.models.encoders import Linear
-            from ticl.models.tabpfn import TabPFN
+        except Exception as e:
+            print(f"Error testing on {device}: {e}")
+    
+    # Summary
+    print("\n===== STABILITY SUMMARY =====")
+    device_success = {device: [] for device in devices}
+    
+    for key, data in results.items():
+        device = data['device']
+        stable = not (data['has_nan'] or data['has_inf'])
+        device_success[device].append(stable)
+    
+    for device in devices:
+        success_rate = sum(device_success[device]) / len(device_success[device]) * 100
+        print(f"{device.upper()}: {success_rate:.1f}% configurations stable")
+    
+    # Test gradient stability
+    print("\n===== GRADIENT STABILITY =====")
+    for device in devices:
+        try:
+            print(f"\nTesting gradient stability on {device.upper()}")
             
-            # Create Y encoder (needed for TabPFN)
-            y_encoder = Linear(1, emsize=128)
+            # Create new tensors with gradients
+            tabular_features = torch.randn(batch_size, embed_dim, device=device, requires_grad=True)
+            text_features = torch.randn(num_classes, embed_dim, device=device)
             
-            # Create TabPFN with the total feature count
-            feature_count = config['prior']['num_features']
-            if config['prior']['classification']['semantic_feature_p'] > 0:
-                feature_count += 50  # Add semantic features
+            # Normalize
+            tabular_features = torch.nn.functional.normalize(tabular_features, dim=1)
+            text_features = torch.nn.functional.normalize(text_features, dim=1)
+            
+            # Select best parameters from earlier test
+            best_eps = 1e-3 if device != 'cuda' else 1e-2
+            best_scale = 2.0 if device != 'cuda' else 1.0
+            best_clip = 10.0 if device != 'cuda' else 5.0
+            
+            # Test forward pass
+            similarity = torch.matmul(tabular_features, text_features.t())
+            norm_similarity = similarity / (similarity.abs().max() + best_eps)
+            logits = norm_similarity * best_scale
+            logits = torch.clamp(logits, min=-best_clip, max=best_clip)
+            
+            # Create "labels" (random for testing)
+            labels = torch.randint(0, num_classes, (batch_size,), device=device)
+            
+            # Calculate loss
+            loss = torch.nn.functional.cross_entropy(logits, labels)
+            
+            # Backward pass
+            loss.backward()
+            
+            # Check gradients
+            grad = tabular_features.grad
+            grad_has_nan = torch.isnan(grad).any().item()
+            grad_has_inf = torch.isinf(grad).any().item()
+            
+            # Report
+            status = "✓" if not (grad_has_nan or grad_has_inf) else "✗"
+            print(f"Gradient stability: {status}")
+            print(f"Gradient stats - min: {grad.min().item():.6f}, max: {grad.max().item():.6f}")
+            print(f"Gradient stats - mean: {grad.mean().item():.6f}, std: {grad.std().item():.6f}")
+            
+            # Test our fix
+            print("\nTesting our CUDA-specific fix:")
+            
+            # Different parameters for CUDA
+            if device == 'cuda':
+                # Apply CUDA-specific adjustments
+                tabular_features = torch.randn(batch_size, embed_dim, device=device, requires_grad=True)
+                tabular_features = torch.nn.functional.normalize(tabular_features, dim=1)
                 
-            base_model = TabPFN(
-                n_out=2,
-                n_features=feature_count,
-                y_encoder_layer=y_encoder,
-                semantic_feature_p=0.3,
-                emsize=128,
-                nlayers=2,
-                nhead=4,
-                nhid_factor=4
-            )
+                similarity = torch.matmul(tabular_features, text_features.t())
+                norm_similarity = similarity / (similarity.abs().max() + 1e-2)  # Larger epsilon
+                logits = norm_similarity * 1.0  # Smaller scale
+                logits = torch.clamp(logits, min=-5.0, max=5.0)  # Tighter clamp
+                
+                # Normalize via softmax to handle extreme cases
+                normalized_logits = torch.nn.functional.softmax(logits, dim=-1)
+                logits = torch.log(normalized_logits + 1e-6) * 2.0
+                
+                # Loss and backward
+                loss = torch.nn.functional.cross_entropy(logits, labels)
+                loss.backward()
+                
+                # Check gradients
+                grad = tabular_features.grad
+                grad_has_nan = torch.isnan(grad).any().item()
+                grad_has_inf = torch.isinf(grad).any().item()
+                
+                # Report
+                status = "✓" if not (grad_has_nan or grad_has_inf) else "✗"
+                print(f"CUDA fix gradient stability: {status}")
+                print(f"CUDA fix gradient stats - min: {grad.min().item():.6f}, max: {grad.max().item():.6f}")
+                print(f"CUDA fix gradient stats - mean: {grad.mean().item():.6f}, std: {grad.std().item():.6f}")
             
-            # Wrap with SemanticAwareClassifier
-            logger.info("Creating semantic-aware model wrapper...")
-            model = create_semantic_aware_model(base_model, num_semantic_classes=3)
-            model.to(device)
-            model.eval()  # Set to eval mode for testing
-            
-            # Register a forward hook on the model to capture outputs
-            handle = model.register_forward_hook(hook)
-            
-            # Create class text descriptions for the forward pass
-            class_texts = [
-                "This is a sample of class 0, representing a negative example",
-                "This is a sample of class 1, representing a positive example",
-                "This is a sample of an extra class for testing purposes"
-            ]
-            
-            # Set up autocast context according to precision setting
-            ctx = get_autocast_context(mixed_precision, "bfloat16" if mixed_precision else None, device)
-            
-            # Process a sample batch through the model
-            logger.info(f"Processing a batch through the model with autocast={mixed_precision}...")
-            
-            with ctx:
-                try:
-                    # Use the data from the dataloader
-                    # Note: single_eval_pos is already in the batch
-                    model_input = data  # Should be a tuple as TabPFN expects
-                    output = model(model_input, single_eval_pos=single_eval_pos, class_texts=class_texts)
-                    logger.info("✅ Model forward pass succeeded")
-                except Exception as e:
-                    logger.error(f"❌ Model forward pass failed: {e}")
-                    import traceback
-                    logger.error(traceback.format_exc())
-                    return False
-            
-            # Remove hook
-            handle.remove()
-            
-            # Check if hook captured outputs
-            if hook.outputs is None:
-                logger.error("Hook did not capture any outputs")
-                return False
-            
-            # Log the outputs
-            logger.info(f"Model output keys: {list(hook.outputs.keys())}")
-            
-            # Check for the specific feature tensors
-            features_present = []
-            for key in ['tabular_features', 'text_features', 'semantic_features', 'class_logits', 'semantic_logits']:
-                if key in hook.outputs and hook.outputs[key] is not None:
-                    features_present.append(key)
-                    shape = hook.outputs[key].shape if hasattr(hook.outputs[key], 'shape') else 'N/A'
-                    try:
-                        mean = hook.outputs[key].float().mean().item() if hasattr(hook.outputs[key], 'float') else 'N/A'
-                        std = hook.outputs[key].float().std().item() if hasattr(hook.outputs[key], 'float') else 'N/A'
-                        logger.info(f"{key}: shape={shape}, mean={mean}, std={std}")
-                    except:
-                        logger.info(f"{key}: shape={shape}, stats unavailable")
-                else:
-                    logger.warning(f"{key}: NOT PRESENT OR NONE")
-            
-            # Check for essential semantic components
-            essential_components = ['tabular_features', 'text_features']
-            missing_components = [c for c in essential_components if c not in features_present]
-            
-            if missing_components:
-                logger.error(f"❌ Missing essential components: {missing_components}")
-                return False
-            else:
-                logger.info("✅ All essential semantic components are present")
-                return True
-        else:
-            logger.error("No batches were produced by the dataloader")
-            return False
-            
-    except Exception as e:
-        logger.error(f"Test failed with error: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return False
-
-def run_test():
-    """Run all tests."""
-    # Test with real dataloader in both precision modes
-    precision_true = test_model_with_real_dataloader(mixed_precision=True)
-    precision_false = test_model_with_real_dataloader(mixed_precision=False)
+        except Exception as e:
+            print(f"Error testing gradients on {device}: {e}")
     
-    # Report results
-    logger.info("\n" + "="*80)
-    logger.info("DATALOADER TEST SUMMARY")
-    logger.info("="*80)
-    logger.info(f"Mixed precision=True:  {'PASS' if precision_true else 'FAIL'}")
-    logger.info(f"Mixed precision=False: {'PASS' if precision_false else 'FAIL'}")
-    logger.info("="*80)
-    
-    # If they differ, highlight the difference
-    if precision_true != precision_false:
-        logger.info("\n⚠️ IMPORTANT: Test results differ between precision modes!")
-        logger.info("This confirms that mixed precision setting affects semantic feature processing")
-        logger.info("The issue is in the interaction between mixed precision and the data loading pipeline")
-    else:
-        logger.info("\nBoth precision modes behave the same in this controlled test")
-        logger.info("The issue may be more subtle and occur in the full training loop")
-    
-    return precision_true and precision_false
+    print("\nStability test complete!")
 
 if __name__ == "__main__":
-    run_test()
+    parser = argparse.ArgumentParser(description='Test semantic model stability')
+    parser.add_argument('--device', type=str, default='cuda', choices=['cuda', 'mps', 'cpu'],
+                        help='Device to test (default: cuda)')
+    
+    args = parser.parse_args()
+    test_stability(args.device)

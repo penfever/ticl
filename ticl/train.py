@@ -296,7 +296,6 @@ def train_epoch(
             if single_eval_pos is not None:
                 targets = targets[single_eval_pos:]
                 
-                # Also adjust semantic targets if present - MOVED OUTSIDE AUTOCAST CONTEXT
                 if batch_info is not None and 'semantic_targets' in batch_info:
                     batch_info['semantic_targets'] = batch_info['semantic_targets'][single_eval_pos:]
                     
@@ -581,17 +580,8 @@ def train(dl, model, criterion, optimizer_state=None, scheduler=None,
     # Initialize mixed precision training if applicable
     # Different backend types have different mixed precision capabilities
     if train_mixed_precision:
-        if is_cuda:
-            # CUDA backend supports mixed precision
+        if is_cuda or is_mps:
             scaler = GradScaler()
-            if verbose:
-                precision_type = "bfloat16" if torch.cuda.is_bf16_supported() else "float16"
-                print(f"Using mixed precision training ({precision_type}) with CUDA backend")
-        elif is_mps:
-            # MPS supports float16 mixed precision
-            scaler = GradScaler()
-            if verbose:
-                print("Using mixed precision training (float16) with MPS backend")
         else:
             # CPU doesn't benefit much from mixed precision, but we'll use it if requested
             scaler = None

@@ -51,15 +51,12 @@ class TextualClassifier:
             self.device = device
         
         # Enable mixed precision for memory efficiency (CUDA only)
-        self.use_mixed_precision = use_mixed_precision and torch.cuda.is_available() and self.device == "cuda"
+        self.use_mixed_precision=False
+        # self.use_mixed_precision = use_mixed_precision and torch.cuda.is_available() and self.device == "cuda"
             
         # Store model and semantic data (keep semantic data on CPU to save GPU memory)
         self.model = model.to(self.device)
         self.model.eval()
-        
-        # Ensure semantic data is int32 to save memory and stays on CPU
-        if semantic_data.dtype != torch.int32 and semantic_data.dtype != torch.int64:
-            semantic_data = semantic_data.to(dtype=torch.int32)
         
         # IMPORTANT: Always keep semantic data on CPU
         self.semantic_data = semantic_data.to("cpu")
@@ -142,24 +139,12 @@ class TextualClassifier:
         # Get predictions based on text - use mixed precision if enabled
         try:
             with torch.no_grad():
-                if self.use_mixed_precision and torch.cuda.is_available() and x.device.type == 'cuda':
-                    # CUDA with mixed precision
-                    with torch.cuda.amp.autocast():
-                        results = self.model.predict_from_text(
-                            x, 
-                            text_description, 
-                            self.semantic_data,  # Keep on CPU
-                            self.text_mapper
-                        )
-                else:
-                    # Standard precision for MPS/CPU or when mixed precision is disabled
-                    results = self.model.predict_from_text(
+                results = self.model.predict_from_text(
                         x, 
                         text_description, 
                         self.semantic_data,  # Keep on CPU
                         self.text_mapper
-                    )
-                
+                )  
         finally:
             # Explicit cleanup after prediction
             if x.device.type != 'cpu':
