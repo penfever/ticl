@@ -61,20 +61,43 @@ class SemanticAwareClassifier(nn.Module):
         # Get transformer dimensions from the CLIP model
         transformer_dim = self.clip_text_model.config.hidden_size  # Usually 512 for base model
         
-        # Project tabular features to CLIP embedding space
-        self.semantic_projection = nn.Linear(self.emsize, transformer_dim)
+        # Project tabular features to CLIP embedding space with normalization
+        self.semantic_projection = nn.Sequential(
+            nn.Linear(self.emsize, transformer_dim),
+            nn.LayerNorm(transformer_dim),  # Add normalization to stabilize projection
+            nn.Dropout(0.1)  # Add dropout to prevent overfitting
+        )
         
         # Feature enhancement network to better align tabular features with text space
+        # Enhanced with more normalization and activation layers
         self.feature_enhancer = nn.Sequential(
+            nn.LayerNorm(transformer_dim),  # Normalize inputs first
             nn.Linear(transformer_dim, transformer_dim * 2),
             nn.LayerNorm(transformer_dim * 2),
             nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(transformer_dim * 2, transformer_dim)
+            nn.Dropout(0.2),  # Increased dropout for more regularization
+            nn.Linear(transformer_dim * 2, transformer_dim),
+            nn.LayerNorm(transformer_dim)  # Final normalization layer
         )
         
-        # Temperature parameter for similarity scaling (learnable)
-        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+        # Temperature parameter for similarity scaling (learnable but bounded)
+        # Start with a more conservative temperature (0.1 instead of 0.07)
+        # This is especially important for training stability
+        initial_temp = np.log(1 / 0.1)
+        self.logit_scale = nn.Parameter(torch.ones([]) * initial_temp)
+        
+        # Register a hook to clamp the logit_scale parameter to prevent it from exploding
+        def clamp_logit_scale(grad):
+            # This will keep logit_scale.exp() between exp(-3) and exp(3)
+            max_val = 3.0
+            min_val = -3.0
+            current_val = self.logit_scale.data
+            if current_val > max_val or current_val < min_val:
+                memory_logger.warning(f"Clamping logit_scale from {current_val.item():.4f} to range [{min_val}, {max_val}]")
+                self.logit_scale.data.clamp_(min=min_val, max=max_val)
+            return grad
+        
+        self.logit_scale.register_hook(clamp_logit_scale)
     
     def forward(self, x, single_eval_pos=None, class_texts=None):
         """
@@ -177,14 +200,39 @@ class SemanticAwareClassifier(nn.Module):
                 features = torch.zeros((features.shape[0] if len(features.shape) > 1 else 1, self.emsize), 
                                        device=features.device, dtype=features.dtype)
         
-        # Project features to CLIP text model dimension
+        # Check features for extreme or NaN values before projection
+        if torch.isnan(features).any() or torch.isinf(features).any():
+            memory_logger.warning("NaN or Inf values detected in features before projection, applying stabilization")
+            features = torch.nan_to_num(features, nan=0.0, posinf=1.0, neginf=-1.0)
+            
+            # Detect if values are very large, which could indicate instability
+            max_val = features.abs().max().item()
+            if max_val > 100.0:
+                memory_logger.warning(f"Very large feature values detected (max={max_val:.2f}), applying normalization")
+                # Apply feature-wise normalization to bring values to reasonable range
+                features = features / (features.norm(dim=-1, keepdim=True) + 1e-6)
+        
+        # Project features to CLIP text model dimension with enhanced error handling
         try:
+            # Now using sequential model with built-in normalization and dropout
             projected_features = self.semantic_projection(features)
-        except RuntimeError:
-            # Create fallback projected features
+            
+            # Extra check for NaNs after projection
+            if torch.isnan(projected_features).any() or torch.isinf(projected_features).any():
+                memory_logger.warning("NaN or Inf values detected after projection, using fallback")
+                transformer_dim = self.clip_text_model.config.hidden_size
+                projected_features = torch.zeros((features.shape[0] if len(features.shape) > 1 else 1, transformer_dim), 
+                                                device=features.device)
+                # Add small random noise for gradient flow
+                projected_features = projected_features + torch.randn_like(projected_features) * 0.01
+        except Exception as e:
+            # Create fallback projected features with detailed error logging
+            memory_logger.error(f"Feature projection failed: {e}")
             transformer_dim = self.clip_text_model.config.hidden_size
             projected_features = torch.zeros((features.shape[0] if len(features.shape) > 1 else 1, transformer_dim), 
-                                            device=features.device, dtype=features.dtype)
+                                            device=features.device)
+            # Add small random noise for gradient flow
+            projected_features = projected_features + torch.randn_like(projected_features) * 0.01
         
         # Add batch dimension if needed (for single sample case)
         if len(projected_features.shape) == 1:
@@ -192,15 +240,33 @@ class SemanticAwareClassifier(nn.Module):
         
         batch_size = projected_features.shape[0]
         
-        # Apply feature enhancement to match CLIP embedding space
-        tabular_features = self.feature_enhancer(projected_features)
+        # Apply feature enhancement with extra safety checks
+        try:
+            # Feature enhancer now has built-in normalization layers
+            tabular_features = self.feature_enhancer(projected_features)
+            
+            # Check for NaNs after enhancement
+            if torch.isnan(tabular_features).any() or torch.isinf(tabular_features).any():
+                memory_logger.warning("NaN or Inf values detected after feature enhancement, using fallback")
+                tabular_features = projected_features  # Fallback to just the projected features
+                # Apply simple normalization instead of the enhancer output
+                tabular_features = F.normalize(tabular_features, dim=1)
+        except Exception as e:
+            memory_logger.error(f"Feature enhancement failed: {e}")
+            # Fallback to just normalized projected features
+            tabular_features = F.normalize(projected_features, dim=1)
         
         # Average pooling over batch if needed
         if tabular_features.dim() > 2:
             tabular_features = tabular_features.mean(dim=1)
         
+        # Final normalization with safety bounds
+        # Clip any extreme values before normalization
+        tabular_features = torch.clamp(tabular_features, min=-10.0, max=10.0)
+        
         # Normalize feature vectors to enable proper cosine similarity
-        tabular_features = F.normalize(tabular_features, dim=1)
+        # Use a small epsilon to prevent division by zero
+        tabular_features = F.normalize(tabular_features, dim=1, eps=1e-5)
         
         # ===== Process class texts with CLIP text encoder =====
         text_features = None

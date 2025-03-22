@@ -49,14 +49,22 @@ def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
             memory_logger.debug("Targets are float type - likely regression task")
         else:
             # For integer targets, we can use bincount if there are valid samples
-            valid_targets = targets[targets>=0].long()  # Ensure long type for bincount
-            if valid_targets.numel() > 0:  # Only proceed if we have valid targets
-                try:
-                    memory_logger.debug(f"Target classes distribution: {torch.bincount(valid_targets)}")
-                except Exception as e:
-                    memory_logger.warning(f"Error during statistical analysis: {e}")
-            else:
-                memory_logger.debug("No valid targets found for distribution analysis")
+            try:
+                # Stricter filtering for bincount - must be non-negative integers in a reasonable range
+                valid_mask = (targets >= 0) & (targets < 1000) & (targets == targets.floor())
+                valid_targets = targets[valid_mask].long()  # Ensure long type for bincount
+                
+                if valid_targets.numel() > 0:  # Only proceed if we have valid targets
+                    # Double-check values are valid for bincount
+                    if torch.all(valid_targets >= 0):
+                        memory_logger.debug(f"Target classes distribution: {torch.bincount(valid_targets)}")
+                    else:
+                        memory_logger.debug(f"Target values not suitable for distribution analysis")
+                else:
+                    memory_logger.debug("No valid targets found for distribution analysis")
+            except Exception as e:
+                # Completely suppress this error - it's just for logging
+                memory_logger.debug(f"Skipped target distribution analysis: {e}")
     except Exception as e:
         memory_logger.debug(f"Could not compute target distribution: {e}")
     
@@ -351,14 +359,22 @@ def train_epoch(
                     
                     # Only try to compute distribution if integer type
                     if not torch.is_floating_point(sem_targets):
-                        valid_sem_targets = sem_targets[sem_targets>=0].long()
-                        if valid_sem_targets.numel() > 0:  # Check if we have any valid targets
-                            try:
-                                memory_logger.debug(f"Semantic target distribution: {torch.bincount(valid_sem_targets)}")
-                            except Exception as e:
-                                memory_logger.warning(f"Error during statistical analysis: {e}")
-                        else:
-                            memory_logger.debug("No valid semantic targets found for distribution analysis")
+                        try:
+                            # Stricter filtering for bincount - must be non-negative integers in a reasonable range
+                            valid_mask = (sem_targets >= 0) & (sem_targets < 1000) & (sem_targets == sem_targets.floor())
+                            valid_sem_targets = sem_targets[valid_mask].long()
+                            
+                            if valid_sem_targets.numel() > 0:  # Check if we have any valid targets
+                                # Double-check values are valid for bincount
+                                if torch.all(valid_sem_targets >= 0):
+                                    memory_logger.debug(f"Semantic target distribution: {torch.bincount(valid_sem_targets)}")
+                                else:
+                                    memory_logger.debug("Semantic target values not suitable for distribution analysis")
+                            else:
+                                memory_logger.debug("No valid semantic targets found for distribution analysis")
+                        except Exception as e:
+                            # Completely suppress this error - it's just for logging
+                            memory_logger.debug(f"Skipped semantic target distribution analysis: {e}")
                 except Exception as e:
                     memory_logger.debug(f"Could not calculate semantic target stats: {e}")
         
@@ -585,20 +601,39 @@ def train_epoch(
 
             # Update weights after accumulating gradients
             if batch % aggregate_k_gradients == aggregate_k_gradients - 1:
-                # Gradient clipping with backend-specific handling
+                # Enhanced gradient clipping with more aggressive threshold and backend-specific handling
+                # Use a stricter max norm value of 0.5 to prevent gradient explosion
+                max_norm = 0.5
+                
+                # Check for extremely large gradients which indicate instability
+                grad_norm = 0.0
+                for p in model.parameters():
+                    if p.grad is not None:
+                        param_norm = p.grad.data.norm(2).item()
+                        grad_norm += param_norm ** 2
+                grad_norm = grad_norm ** 0.5
+                
+                if grad_norm > 10.0:  # Very large gradient norm
+                    memory_logger.warning(f"Extremely large gradient norm detected: {grad_norm:.4f} - applying strict clipping")
+                    max_norm = 0.1  # Even stricter clipping for extreme cases
+                
                 # 'foreach=True' is not supported on MPS (Apple Silicon) in some PyTorch versions
                 if device == 'mps':
                     try:
                         # Try first with foreach (newer PyTorch versions may support it)
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), 1., foreach=True)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm, foreach=True)
                     except (RuntimeError, TypeError):
                         # Fallback to standard gradient clipping without foreach
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), 1., foreach=False)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm, foreach=False)
                         if batch == 0:  # Only print warning once
-                            print("Note: Using slower gradient clipping method for MPS device")
+                            print(f"Note: Using slower gradient clipping method for MPS device with max_norm={max_norm}")
                 else:
                     # For CUDA, CPU, ROCm, use the faster foreach version
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1., foreach=True)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm, foreach=True)
+                
+                # Log clipping info for debugging
+                if batch % 20 == 0:  # Only log occasionally to reduce verbosity
+                    memory_logger.debug(f"Gradient norm: {grad_norm:.4f}, clipped with max_norm={max_norm}")
                 
                 # Use mixed precision optimizer step if enabled
                 if scaler is not None and (is_cuda or is_mps):
