@@ -235,86 +235,94 @@ def train_epoch(
                 
             # Additional check to ensure we don't try to use scaler with nullcontext
             use_scaler = (scaler is not None and autocast_context is not nullcontext())
+            
+            # Move data to the appropriate device
+            # At this point, we should have a clean data tuple or tensor
+            if isinstance(data, tuple):
+                device_data = tuple(e.to(device) if torch.is_tensor(e) else e for e in data)
+            else:
+                device_data = data.to(device)
+            
+            # Check if we have semantic information to pass to the model
+            class_texts = None
+            
+            if batch_info is not None and 'class_token_patterns' in batch_info:
+                # Extract class texts from token patterns
+                class_token_patterns = batch_info['class_token_patterns']
+                
+                # Try to import CLIP tokenizer for token decoding
+                try:
+                    from transformers import CLIPTokenizerFast
+                    tokenizer = CLIPTokenizerFast.from_pretrained("openai/clip-vit-base-patch32")
+                    has_tokenizer = True
+                except (ImportError, Exception):
+                    has_tokenizer = False
+                
+                # Generate meaningful descriptions for each class
+                class_texts = []
+                for class_idx in sorted(class_token_patterns.keys()):
+                    pattern = class_token_patterns[class_idx]
+                    semantic_class = pattern.get('semantic_class', 0)
+                    
+                    # First try to use the actual column_name from semantic data if available
+                    if 'column_name' in pattern and pattern['column_name'] is not None:
+                        # Format it more nicely by removing underscores and adding spaces
+                        col_name = pattern['column_name'].replace('_', ' ').title()
+                        text = f"Data with {col_name}"
+                    # Fall back to class_name if available
+                    elif 'class_name' in pattern:
+                        text = pattern['class_name']
+                    # Otherwise, try to create a more descriptive text if we have token information and tokenizer
+                    elif 'tokens' in pattern and has_tokenizer and len(pattern['tokens']) > 0:
+                        try:
+                            # Get the tokens and try to decode them
+                            tokens = pattern['tokens'].cpu().tolist()
+                            token_texts = tokenizer.decode(tokens[:5])  # Use first few tokens
+                            # Clean up the token text
+                            token_texts = token_texts.replace("<|startoftext|>", "").replace("<|endoftext|>", "").strip()
+                            if token_texts:
+                                text = f"Data class {class_idx}: {token_texts}"
+                            else:
+                                text = f"Data class {class_idx} from semantic class {semantic_class}"
+                        except Exception:
+                            text = f"Data class {class_idx} from semantic class {semantic_class}"
+                    else:
+                        # Fallback to simple description
+                        text = f"Data class {class_idx} from semantic class {semantic_class}"
+                        
+                    class_texts.append(text)
+            
+            # Process targets for evaluation before forward pass
+            if single_eval_pos is not None:
+                targets = targets[single_eval_pos:]
+                
+                # Also adjust semantic targets if present - MOVED OUTSIDE AUTOCAST CONTEXT
+                if batch_info is not None and 'semantic_targets' in batch_info:
+                    batch_info['semantic_targets'] = batch_info['semantic_targets'][single_eval_pos:]
+                    
+                    # Ensure semantic targets are long tensor type (for bincount and loss functions)
+                    if batch_info['semantic_targets'].dtype != torch.long:
+                        batch_info['semantic_targets'] = batch_info['semantic_targets'].long()
+                    
+                    # Print diagnostic info to verify we have valid targets
+                    if batch % 50 == 0:  # Only print occasionally to avoid spam
+                        unique_vals = torch.unique(batch_info['semantic_targets']).tolist()
+                        print(f"Semantic targets unique values: {unique_vals}")
+                        valid_semantic = (batch_info['semantic_targets'] != -100).sum().item()
+                        print(f"Valid semantic targets: {valid_semantic}/{batch_info['semantic_targets'].numel()}")
+
+            # Check for valid labels
+            valid_labels = targets != -100
+            valid_count = valid_labels.sum().item()
+            
+            if valid_count == 0:
+                continue
                 
             with autocast_context:
-                # Move data to the appropriate device
-                # At this point, we should have a clean data tuple or tensor
-                if isinstance(data, tuple):
-                    device_data = tuple(e.to(device) if torch.is_tensor(e) else e for e in data)
-                else:
-                    device_data = data.to(device)
-                
-                # Forward pass
-                # Check if we have semantic information to pass to the model
-                class_texts = None
-                
-                if batch_info is not None and 'class_token_patterns' in batch_info:
-                    # Extract class texts from token patterns
-                    class_token_patterns = batch_info['class_token_patterns']
-                    
-                    # Try to import CLIP tokenizer for token decoding
-                    try:
-                        from transformers import CLIPTokenizerFast
-                        tokenizer = CLIPTokenizerFast.from_pretrained("openai/clip-vit-base-patch32")
-                        has_tokenizer = True
-                    except (ImportError, Exception):
-                        has_tokenizer = False
-                    
-                    # Generate meaningful descriptions for each class
-                    class_texts = []
-                    for class_idx in sorted(class_token_patterns.keys()):
-                        pattern = class_token_patterns[class_idx]
-                        semantic_class = pattern.get('semantic_class', 0)
-                        
-                        # First try to use the actual column_name from semantic data if available
-                        if 'column_name' in pattern and pattern['column_name'] is not None:
-                            # Format it more nicely by removing underscores and adding spaces
-                            col_name = pattern['column_name'].replace('_', ' ').title()
-                            text = f"Data with {col_name}"
-                        # Fall back to class_name if available
-                        elif 'class_name' in pattern:
-                            text = pattern['class_name']
-                        # Otherwise, try to create a more descriptive text if we have token information and tokenizer
-                        elif 'tokens' in pattern and has_tokenizer and len(pattern['tokens']) > 0:
-                            try:
-                                # Get the tokens and try to decode them
-                                tokens = pattern['tokens'].cpu().tolist()
-                                token_texts = tokenizer.decode(tokens[:5])  # Use first few tokens
-                                # Clean up the token text
-                                token_texts = token_texts.replace("<|startoftext|>", "").replace("<|endoftext|>", "").strip()
-                                if token_texts:
-                                    text = f"Data class {class_idx}: {token_texts}"
-                                else:
-                                    text = f"Data class {class_idx} from semantic class {semantic_class}"
-                            except Exception:
-                                text = f"Data class {class_idx} from semantic class {semantic_class}"
-                        else:
-                            # Fallback to simple description
-                            text = f"Data class {class_idx} from semantic class {semantic_class}"
-                            
-                        class_texts.append(text)
-                
                 # Pass class_texts to the model's forward method if available
+                # Keep the original single_eval_pos for base models that require it
+                # We've already handled slicing the targets above, but the model still needs the position
                 output = model(device_data, single_eval_pos=single_eval_pos, class_texts=class_texts)
-
-                # Process targets for evaluation 
-                if single_eval_pos is not None:
-                    targets = targets[single_eval_pos:]
-                    
-                    # Also adjust semantic targets if present
-                    if batch_info is not None and 'semantic_targets' in batch_info:
-                        batch_info['semantic_targets'] = batch_info['semantic_targets'][single_eval_pos:]
-                        
-                        # Ensure semantic targets are long tensor type (for bincount and loss functions)
-                        if batch_info['semantic_targets'].dtype != torch.long:
-                            batch_info['semantic_targets'] = batch_info['semantic_targets'].long()
-
-                # Check for valid labels
-                valid_labels = targets != -100
-                valid_count = valid_labels.sum().item()
-                
-                if valid_count == 0:
-                    continue
 
                 # Calculate loss
                 loss, nan_share = eval_criterion(

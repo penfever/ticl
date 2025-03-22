@@ -914,47 +914,73 @@ class SemanticConsistencyLoss(nn.Module):
         text_features = outputs['text_features']
         
         # Note: These are already normalized vectors, so this is cosine similarity
-        raw_logits = torch.matmul(tabular_features, text_features.t()) * 4.5
+        # Reduced multiplier factor from 4.5 to 2.0 to improve numerical stability
+        raw_similarity = torch.matmul(tabular_features, text_features.t())
+        
+        # Scale with a smaller factor and apply clamping to prevent extreme values
+        raw_logits = raw_similarity * 2.0
+        
+        # Add clipping to prevent extreme values that could cause precision issues
+        raw_logits = torch.clamp(raw_logits, min=-10.0, max=10.0)
         
         # Get semantic targets
         semantic_targets = targets['semantic_targets']
         
-         # Transpose targets to [batch_size, n_rows]
-        targets_transposed = semantic_targets.permute(1, 0)  # [4, 302]
-
-        batch_size = targets_transposed.shape[0]
-
-        # Initialize loss
-        total_loss = 0
-        total_rows = 0
-
-        # For each batch item
-        for i in range(batch_size):
-            # Get logits for this batch item [n_classes]
-            batch_logits = raw_logits[i]  # [n_classes]
-
-            # Get all target rows for this batch item [n_rows]
-            batch_targets = targets_transposed[i]  # [n_rows]
-            n_rows = batch_targets.shape[0]
-
-            if n_rows > 0:  # Handle case where some batch items might have zero rows
-                # Compute cross-entropy for this batch item
-                batch_loss = self.class_loss(
-                    batch_logits.unsqueeze(0).expand(n_rows, -1),
-                    batch_targets
-                )
-
-                # Add to total loss, weighted by number of rows
-                total_loss += batch_loss * n_rows
-                total_rows += n_rows
-
-            # Normalize loss by total number of rows across all batch items
+        # Check for all -100 values which would indicate invalid targets
+        valid_mask = semantic_targets != -100
+        valid_count = valid_mask.sum().item()
+        
+        if valid_count == 0:
+            # No valid semantic targets, skip semantic loss
+            normalized_loss = torch.tensor(0.0, device=raw_logits.device, requires_grad=True)
+            print("WARNING: No valid semantic targets found (all -100)")
+        else:
+            # Transpose targets to [batch_size, n_rows]
+            targets_transposed = semantic_targets.permute(1, 0)  # [4, 302]
+            batch_size = targets_transposed.shape[0]
+    
+            # Initialize loss
+            total_loss = 0
+            total_rows = 0
+    
+            # For each batch item
+            for i in range(batch_size):
+                # Get logits for this batch item [n_classes]
+                batch_logits = raw_logits[i]  # [n_classes]
+    
+                # Get all target rows for this batch item [n_rows]
+                batch_targets = targets_transposed[i]  # [n_rows]
+                
+                # Filter out -100 ignore indices
+                valid_indices = batch_targets != -100
+                valid_target_count = valid_indices.sum().item()
+                
+                if valid_target_count > 0:  # Only process if we have valid targets
+                    valid_targets = batch_targets[valid_indices]
+                    
+                    # Ensure targets are in valid range for CE loss
+                    num_classes = batch_logits.size(0)
+                    if valid_targets.max() >= num_classes:
+                        print(f"WARNING: Target max {valid_targets.max().item()} >= num_classes {num_classes}")
+                        valid_targets = valid_targets.clamp(max=num_classes-1)
+                    
+                    # Compute cross-entropy only on valid targets
+                    batch_loss = F.cross_entropy(
+                        batch_logits.unsqueeze(0).expand(valid_target_count, -1),
+                        valid_targets
+                    )
+    
+                    # Add to total loss, weighted by number of valid targets
+                    total_loss += batch_loss * valid_target_count
+                    total_rows += valid_target_count
+    
+            # Normalize loss by total number of valid rows across all batch items
             if total_rows > 0:
                 normalized_loss = total_loss / total_rows
             else:
                 normalized_loss = torch.tensor(0.0, device=raw_logits.device, requires_grad=True)
         
-        #NOTE: make this weighting a hyperparameter, not hardcoded
+        # Use the configured semantic weight
         total_loss = (self.semantic_weight * normalized_loss) + class_loss
         return total_loss
 

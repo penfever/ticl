@@ -1141,7 +1141,7 @@ class ClassificationAdapter:
                         traceback.print_exc()
                 
             except Exception as e:
-                memory_logger.warning(f"Error during statistical analysis: {e}")
+                pass
 
         # Append empty features if enabled
         if self.h['pad_zeros']:
