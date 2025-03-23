@@ -243,6 +243,11 @@ def train_epoch(
             else:
                 device_data = data.to(device)
             
+            # Let's skip batch if all labels are empty
+            if isinstance(device_data, tuple) and len(device_data) == 2:
+                if torch.all(device_data[1][single_eval_pos:] == -100):
+                    continue
+
             # Check if we have semantic information to pass to the model
             class_texts = None
             
@@ -309,7 +314,8 @@ def train_epoch(
                         print(f"Semantic targets unique values: {unique_vals}")
                         valid_semantic = (batch_info['semantic_targets'] != -100).sum().item()
                         print(f"Valid semantic targets: {valid_semantic}/{batch_info['semantic_targets'].numel()}")
-
+            
+            # breakpoint()
             # Check for valid labels
             valid_labels = targets != -100
             valid_count = valid_labels.sum().item()
@@ -318,10 +324,11 @@ def train_epoch(
                 continue
                 
             with autocast_context:
-                # Pass class_texts to the model's forward method if available
+                # Pass class_texts and batch_info to the model's forward method if available
                 # Keep the original single_eval_pos for base models that require it
                 # We've already handled slicing the targets above, but the model still needs the position
-                output = model(device_data, single_eval_pos=single_eval_pos, class_texts=class_texts)
+                output = model(device_data, single_eval_pos=single_eval_pos, 
+                               class_texts=class_texts, batch_info=batch_info)
 
                 # Calculate loss
                 loss, nan_share = eval_criterion(
@@ -360,30 +367,13 @@ def train_epoch(
             # Update weights after accumulating gradients
             if batch % aggregate_k_gradients == aggregate_k_gradients - 1:
                 # Enhanced gradient clipping with more aggressive threshold and backend-specific handling
-                # Use a stricter max norm value of 0.5 to prevent gradient explosion
-                max_norm = 0.5
+                max_norm = 0.2
 
                 if is_cuda:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm, foreach=True)
                 else:
                     # This matches the more numerically stable approach used on MPS devices
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm, foreach=False)
-                if batch == 0:  # Only print warning once
-                    print(f"Note: Using slower but more stable gradient clipping method with max_norm={max_norm}")
-                
-                # Check for NaN parameters needing reset in semantic model - CUDA stability fix
-                # Important: Call this AFTER backward but BEFORE optimizer step
-                if is_cuda:
-                    # For unwrapped model
-                    if hasattr(model, 'reset_parameters_if_needed'):
-                        model.reset_parameters_if_needed()
-                    # For DDP wrapped model
-                    elif hasattr(model, 'module') and hasattr(model.module, 'reset_parameters_if_needed'):
-                        model.module.reset_parameters_if_needed()
-                    # Check for semantic components that need reset
-                    for name, submodule in model.named_modules():
-                        if hasattr(submodule, 'reset_parameters_if_needed'):
-                            submodule.reset_parameters_if_needed()
                 
                 # Use mixed precision optimizer step if enabled
                 # Be more explicit about when to use scaler

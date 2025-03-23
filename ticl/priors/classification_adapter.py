@@ -801,6 +801,17 @@ class ClassificationAdapter:
                     for i in range(min(5, semantic_targets.shape[0])):
                         row_values = semantic_targets[i, :min(5, semantic_targets.shape[1])].tolist()
                         memory_logger.debug(f"  Row {i}: {row_values}")
+                    
+                    # Add batch-level semantic tokens for the semantic model
+                    # This allows the semantic model to directly access the tokens
+                    # Select the first class's tokens for simplicity
+                    if 'class_token_patterns' in semantic_info:
+                        first_class = min(semantic_info['class_token_patterns'].keys())
+                        first_tokens = semantic_info['class_token_patterns'][first_class]['tokens']
+                        
+                        # Add the semantic tokens to the info dictionary
+                        info['semantic_tokens'] = first_tokens
+                        memory_logger.debug(f"Added semantic_tokens to info with shape: {first_tokens.shape}")
             
             memory_logger.debug(f"=== Semantic features added successfully ===")
         else:
