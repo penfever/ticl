@@ -25,6 +25,11 @@ class SemanticAwareClassifier(nn.Module):
         """
         super().__init__()
         
+        # Track debugging information for numerical stability
+        self.nan_grad_counts = {}
+        self.grad_stats = {}
+        self.cuda_safe_init = True  # Flag to use CUDA-safe initialization
+        
         # Store the base model
         self.base_model = base_model
         
@@ -64,21 +69,31 @@ class SemanticAwareClassifier(nn.Module):
         # Project tabular features to CLIP embedding space with normalization
         self.semantic_projection = nn.Sequential(
             nn.Linear(self.emsize, transformer_dim),
-            nn.LayerNorm(transformer_dim),  # Add normalization to stabilize projection
+            nn.LayerNorm(transformer_dim, eps=1e-2),  # Add normalization with higher epsilon for stability
             nn.Dropout(0.1)  # Add dropout to prevent overfitting
         )
         
+        # Register gradient hook on the semantic projection to catch and fix NaN/Inf values
+        for name, param in self.semantic_projection.named_parameters():
+            if param.requires_grad:
+                param.register_hook(lambda grad, pname=name: self._gradient_hook(grad, pname))
+        
         # Feature enhancement network to better align tabular features with text space
-        # Enhanced with more normalization and activation layers
+        # Enhanced with more normalization and activation layers + CUDA-specific stability fixes
         self.feature_enhancer = nn.Sequential(
-            nn.LayerNorm(transformer_dim),  # Normalize inputs first
+            nn.LayerNorm(transformer_dim, eps=1e-2),  # Normalize inputs with higher epsilon
             nn.Linear(transformer_dim, transformer_dim * 2),
-            nn.LayerNorm(transformer_dim * 2),
+            nn.LayerNorm(transformer_dim * 2, eps=1e-2),
             nn.GELU(),
             nn.Dropout(0.2),  # Increased dropout for more regularization
             nn.Linear(transformer_dim * 2, transformer_dim),
-            nn.LayerNorm(transformer_dim)  # Final normalization layer
+            nn.LayerNorm(transformer_dim, eps=1e-2)  # Final normalization layer with higher epsilon
         )
+        
+        # Register gradient hooks on the feature enhancer to catch and fix NaN/Inf values
+        for name, param in self.feature_enhancer.named_parameters():
+            if param.requires_grad:
+                param.register_hook(lambda grad, pname=name: self._gradient_hook(grad, f"enhancer.{pname}"))
         
         # Temperature parameter for similarity scaling (learnable but bounded)
         # Start with a more conservative temperature (0.1 instead of 0.07)
@@ -97,6 +112,108 @@ class SemanticAwareClassifier(nn.Module):
             return grad
         
         self.logit_scale.register_hook(clamp_logit_scale)
+        
+        # Initialize parameters with CUDA-safe values
+        self._initialize_parameters()
+    
+    def _initialize_parameters(self):
+        """
+        Initialize model parameters with additional stability measures for CUDA.
+        - Uses smaller variance for weight initialization
+        - Ensures LayerNorm parameters are initialized in a stable range
+        """
+        if not self.cuda_safe_init:
+            return  # Skip if safe init is disabled
+        
+        # Initialize projection layer with special care
+        for name, module in self.semantic_projection.named_modules():
+            if isinstance(module, nn.Linear):
+                # Use smaller standard deviation for linear layers
+                nn.init.normal_(module.weight, mean=0.0, std=0.01)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.LayerNorm):
+                # Initialize LayerNorm more carefully to avoid extreme values
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+                
+        # Initialize enhancer with the same careful approach
+        for name, module in self.feature_enhancer.named_modules():
+            if isinstance(module, nn.Linear):
+                # Use smaller standard deviation for linear layers
+                nn.init.normal_(module.weight, mean=0.0, std=0.01)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+        
+        print("Initialized semantic components with CUDA-safe values")
+    
+    def _gradient_hook(self, grad, param_name):
+        """
+        Custom gradient hook to catch and fix NaN/Inf values in gradients.
+        This is especially important for CUDA stability.
+        
+        Parameters:
+        -----------
+        grad : torch.Tensor
+            The gradient tensor
+        param_name : str
+            Name of the parameter
+            
+        Returns:
+        --------
+        torch.Tensor
+            Fixed gradient tensor
+        """
+        if grad is None:
+            return None
+            
+        # Count NaN and Inf values
+        nan_count = torch.isnan(grad).sum().item()
+        inf_count = torch.isinf(grad).sum().item()
+        
+        # Track counts for debugging
+        if param_name not in self.nan_grad_counts:
+            self.nan_grad_counts[param_name] = 0
+        
+        if nan_count > 0 or inf_count > 0:
+            self.nan_grad_counts[param_name] += 1
+            
+            # Print warning only occasionally to avoid spam
+            if self.nan_grad_counts[param_name] % 10 == 1:
+                device_type = grad.device.type
+                print(f"WARNING: {device_type} gradient for {param_name} contains {nan_count} NaN and {inf_count} Inf values")
+                
+                # Collect stats only on problematic gradients
+                if grad.numel() > 0:
+                    # Create masked version for valid statistics
+                    valid_mask = ~(torch.isnan(grad) | torch.isinf(grad))
+                    if valid_mask.any():
+                        valid_grad = grad[valid_mask]
+                        grad_abs_max = valid_grad.abs().max().item()
+                        grad_mean = valid_grad.mean().item()
+                        grad_std = valid_grad.std().item()
+                        print(f"  - Valid values - max abs: {grad_abs_max:.6f}, mean: {grad_mean:.6f}, std: {grad_std:.6f}")
+                
+            # Replace NaN/Inf with zeros
+            grad = torch.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        # Clip extremely large gradients (different thresholds for different devices)
+        if grad.device.type == 'cuda':
+            # More aggressive clipping for CUDA
+            max_norm = 1.0
+        else:
+            # Standard clipping for CPU/MPS
+            max_norm = 5.0
+            
+        # Apply per-tensor gradient clipping
+        grad_norm = grad.norm()
+        if grad_norm > max_norm:
+            grad = grad * (max_norm / (grad_norm + 1e-6))
+            
+        return grad
     
     def forward(self, x, single_eval_pos=None, class_texts=None):
         """
@@ -218,7 +335,7 @@ class SemanticAwareClassifier(nn.Module):
             # Extra check for NaNs after projection
             if torch.isnan(projected_features).any() or torch.isinf(projected_features).any():
                 memory_logger.warning("NaN or Inf values detected after projection, using fallback")
-                breakpoint()
+                #breakpoint()
                 transformer_dim = self.clip_text_model.config.hidden_size
                 projected_features = torch.zeros((features.shape[0] if len(features.shape) > 1 else 1, transformer_dim), 
                                                 device=features.device)
@@ -245,7 +362,7 @@ class SemanticAwareClassifier(nn.Module):
             
             # Check for NaNs after enhancement
             if torch.isnan(tabular_features).any() or torch.isinf(tabular_features).any():
-                breakpoint()
+                #breakpoint()
                 memory_logger.warning("NaN or Inf values detected after feature enhancement, using fallback")
                 tabular_features = projected_features  # Fallback to just the projected features
                 # Apply simple normalization instead of the enhancer output
@@ -396,14 +513,14 @@ class SemanticAwareClassifier(nn.Module):
         if text_features is not None:
             # Check features for NaN values first and fix if needed
             if torch.isnan(tabular_features).any() or torch.isinf(tabular_features).any():
-                breakpoint()
+                #breakpoint()
                 memory_logger.warning("NaN or inf values detected in tabular features, applying stabilization")
                 tabular_features = torch.nan_to_num(tabular_features, nan=0.0, posinf=1.0, neginf=-1.0)
                 # Re-normalize after fixing NaNs
                 tabular_features = F.normalize(tabular_features, dim=1)
                 
             if torch.isnan(text_features).any() or torch.isinf(text_features).any():
-                breakpoint()
+                #breakpoint()
                 memory_logger.warning("NaN or inf values detected in text features, applying stabilization")
                 text_features = torch.nan_to_num(text_features, nan=0.0, posinf=1.0, neginf=-1.0)
                 # Re-normalize after fixing NaNs
@@ -451,7 +568,7 @@ class SemanticAwareClassifier(nn.Module):
                 
                 # Check for NaN or Inf in the resulting logits
                 if torch.isnan(semantic_logits).any() or torch.isinf(semantic_logits).any():
-                    breakpoint()
+                    #breakpoint()
                     memory_logger.warning("NaN or inf values detected in semantic_logits, applying numeric stabilization")
                     semantic_logits = torch.nan_to_num(semantic_logits, nan=0.0, posinf=100.0, neginf=-100.0)
             except Exception as e:
@@ -1219,7 +1336,7 @@ def get_clip_text_embeddings(texts, clip_model, tokenizer, batch_size=5, device=
         return torch.zeros((0, clip_model.config.hidden_size), device=processing_device)
 
 
-def create_semantic_aware_model(base_model, num_semantic_classes=None, freeze_clip=True, semantic_column_metadata=None):
+def create_semantic_aware_model(base_model, num_semantic_classes=None, freeze_clip=True, semantic_column_metadata=None, cuda_safe=True):
     """
     Factory function to create a CLIP-style semantic-aware model.
     
@@ -1234,17 +1351,31 @@ def create_semantic_aware_model(base_model, num_semantic_classes=None, freeze_cl
         Whether to freeze the CLIP text encoder parameters (recommended)
     semantic_column_metadata : dict, optional
         Metadata about semantic columns in the dataset
+    cuda_safe : bool
+        Whether to apply additional CUDA-specific stability optimizations
         
     Returns:
     --------
     SemanticAwareClassifier
         The extended model with CLIP contrastive learning
     """
+    # Check if we're using CUDA and warn about numerical stability
+    using_cuda = torch.cuda.is_available()
+    if using_cuda:
+        print("=" * 80)
+        print("IMPORTANT: Using CUDA with semantic model. Special stability measures will be applied.")
+        print("For best stability:")
+        print("  1. Use a lower learning rate (0.0001 or lower)")
+        print("  2. Consider using a larger epsilon for LayerNorm (default: 1e-2)")
+        print("  3. Use the modified SemanticConsistencyLoss with CUDA-specific settings")
+        print("  4. Gradient hooks will automatically catch and fix NaN/Inf values")
+        print("=" * 80)
     if num_semantic_classes is None:
         num_semantic_classes = get_semantic_class_count()
         print(f"Creating semantic-aware model with {num_semantic_classes} semantic classes")
     
     model = SemanticAwareClassifier(base_model, num_semantic_classes)
+    model.cuda_safe_init = cuda_safe
     
     # If we have semantic column metadata, store it in the model
     if semantic_column_metadata:
