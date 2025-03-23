@@ -372,11 +372,17 @@ class SemanticAwareClassifier(nn.Module):
                 memory_logger.warning(f"Very large feature values detected (max={max_val:.2f}), applying normalization")
                 # Apply feature-wise normalization to bring values to reasonable range
                 features = features / (features.norm(dim=-1, keepdim=True) + 1e-4)
-        
+        print(f"Features sample (first 20):")
+        if features.numel() > 0:
+            print(features.flatten()[:20])
+
         # Project features to CLIP text model dimension with enhanced error handling
         try:
             # Now using sequential model with built-in normalization and dropout
             projected_features = self.semantic_projection(features)
+            print(f"Projected features sample (first 20):")
+            if projected_features.numel() > 0:
+                print(projected_features.flatten()[:20])
             
             # Extra check for NaNs after projection - CRITICAL CHECK
             if torch.isnan(projected_features).any() or torch.isinf(projected_features).any():
@@ -396,9 +402,7 @@ class SemanticAwareClassifier(nn.Module):
                     print(f"NaN count: {nan_count}, Inf count: {inf_count}")
                     
                     # Sample some values from features
-                    print(f"Features sample (first 5):")
-                    if features.numel() > 0:
-                        print(features.flatten()[:5])
+                    
                         
                     # Check the weights of the semantic projection module
                     print(f"Semantic projection weights sample:")
@@ -1297,6 +1301,9 @@ class SemanticConsistencyLoss(nn.Module):
         # Get normalized feature vectors
         tabular_features = outputs['tabular_features']
         text_features = outputs['text_features']
+        print("Tabular and text features")
+        print(tabular_features)
+        print(text_features)
         
         # Note: These are already normalized vectors, so this is cosine similarity
         # Reduced multiplier factor from 4.5 to 2.0 to improve numerical stability
@@ -1309,6 +1316,8 @@ class SemanticConsistencyLoss(nn.Module):
         
         # Get raw similarity matrix through matrix multiplication
         raw_similarity = torch.matmul(tabular_features, text_features.t())
+        print("Raw similarity")
+        print(raw_similarity)
         
         # Apply device-specific stabilization techniques
         if device_type == 'cuda':
