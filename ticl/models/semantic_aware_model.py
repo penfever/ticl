@@ -218,6 +218,7 @@ class SemanticAwareClassifier(nn.Module):
             # Extra check for NaNs after projection
             if torch.isnan(projected_features).any() or torch.isinf(projected_features).any():
                 memory_logger.warning("NaN or Inf values detected after projection, using fallback")
+                breakpoint()
                 transformer_dim = self.clip_text_model.config.hidden_size
                 projected_features = torch.zeros((features.shape[0] if len(features.shape) > 1 else 1, transformer_dim), 
                                                 device=features.device)
@@ -244,6 +245,7 @@ class SemanticAwareClassifier(nn.Module):
             
             # Check for NaNs after enhancement
             if torch.isnan(tabular_features).any() or torch.isinf(tabular_features).any():
+                breakpoint()
                 memory_logger.warning("NaN or Inf values detected after feature enhancement, using fallback")
                 tabular_features = projected_features  # Fallback to just the projected features
                 # Apply simple normalization instead of the enhancer output
@@ -394,12 +396,14 @@ class SemanticAwareClassifier(nn.Module):
         if text_features is not None:
             # Check features for NaN values first and fix if needed
             if torch.isnan(tabular_features).any() or torch.isinf(tabular_features).any():
+                breakpoint()
                 memory_logger.warning("NaN or inf values detected in tabular features, applying stabilization")
                 tabular_features = torch.nan_to_num(tabular_features, nan=0.0, posinf=1.0, neginf=-1.0)
                 # Re-normalize after fixing NaNs
                 tabular_features = F.normalize(tabular_features, dim=1)
                 
             if torch.isnan(text_features).any() or torch.isinf(text_features).any():
+                breakpoint()
                 memory_logger.warning("NaN or inf values detected in text features, applying stabilization")
                 text_features = torch.nan_to_num(text_features, nan=0.0, posinf=1.0, neginf=-1.0)
                 # Re-normalize after fixing NaNs
@@ -447,6 +451,7 @@ class SemanticAwareClassifier(nn.Module):
                 
                 # Check for NaN or Inf in the resulting logits
                 if torch.isnan(semantic_logits).any() or torch.isinf(semantic_logits).any():
+                    breakpoint()
                     memory_logger.warning("NaN or inf values detected in semantic_logits, applying numeric stabilization")
                     semantic_logits = torch.nan_to_num(semantic_logits, nan=0.0, posinf=100.0, neginf=-100.0)
             except Exception as e:
