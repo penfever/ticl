@@ -787,26 +787,44 @@ class SemanticAwareClassifier(nn.Module):
                     tabular_dtype = tabular_features.dtype
                     text_dtype = text_features.dtype
                     
-                    # If either tensor is in reduced precision, convert both to float32
-                    if tabular_dtype in [torch.bfloat16, torch.float16] or text_dtype in [torch.bfloat16, torch.float16]:
-                        print(f"⚠️ Mixed precision detected for similarity computation: tabular={tabular_dtype}, text={text_dtype}")
-                        print(f"Converting both tensors to float32 for stable matrix multiplication")
-                        
-                        # Convert to float32 for stable computation
-                        tabular_features = tabular_features.to(torch.float32)
-                        text_features = text_features.to(torch.float32)
+                    # Force float32 precision for critical computation regardless of autocast
+                    print(f"⚠️ Using float32 for critical similarity computation (overriding autocast)")
+                    print(f"Original dtypes - tabular: {tabular_dtype}, text: {text_dtype}")
+                    
+                    # Convert both tensors to float32 explicitly
+                    tabular_features_fp32 = tabular_features.to(torch.float32)
+                    text_features_fp32 = text_features.to(torch.float32)
                     
                     # Double check normalization with strong epsilon before matmul
-                    tabular_features = F.normalize(tabular_features, dim=1, eps=1e-2)
-                    text_features = F.normalize(text_features, dim=1, eps=1e-2)
+                    tabular_features_fp32 = F.normalize(tabular_features_fp32, dim=1, eps=1e-2)
+                    text_features_fp32 = F.normalize(text_features_fp32, dim=1, eps=1e-2)
                     
                     # Print diagnostic information about tensor shapes and devices
-                    print(f"Tensor shapes before matmul - tabular: {tabular_features.shape}, text: {text_features.shape}")
-                    print(f"Tensor dtypes before matmul - tabular: {tabular_features.dtype}, text: {text_features.dtype}")
+                    print(f"Tensor shapes before matmul - tabular: {tabular_features_fp32.shape}, text: {text_features_fp32.shape}")
+                    print(f"Tensor dtypes before matmul - tabular: {tabular_features_fp32.dtype}, text: {text_features_fp32.dtype}")
                     
+                    # CRITICAL: Disable autocast temporarily for this computation
+                    # This ensures the matrix multiplication is done in full precision
+                    autocast_enabled = torch.is_autocast_enabled()
+                    if autocast_enabled:
+                        print("🔍 Autocast is enabled - temporarily disabling it for stable computation")
+                
                 # Compute similarity matrix with more careful error handling
                 try:
-                    raw_similarity = torch.matmul(tabular_features, text_features.transpose(0, 1))
+                    # Use different computation paths based on device
+                    if tabular_features.device.type == 'cuda':
+                        # For CUDA: Temporarily disable autocast and use float32
+                        if autocast_enabled:
+                            with torch.cuda.amp.autocast(enabled=False):
+                                # This computation will be in full precision regardless of surrounding context
+                                raw_similarity = torch.matmul(tabular_features_fp32, text_features_fp32.transpose(0, 1))
+                                print(f"Matrix multiplication performed with autocast disabled")
+                        else:
+                            # Use the float32 tensors we prepared
+                            raw_similarity = torch.matmul(tabular_features_fp32, text_features_fp32.transpose(0, 1))
+                    else:
+                        # For CPU/MPS: Use regular computation
+                        raw_similarity = torch.matmul(tabular_features, text_features.transpose(0, 1))
                     
                     # Debug output
                     print(f"Raw similarity shape: {raw_similarity.shape}, dtype: {raw_similarity.dtype}")
@@ -822,13 +840,41 @@ class SemanticAwareClassifier(nn.Module):
                 # Print diagnostic info about the raw similarity values
                 raw_max = raw_similarity.abs().max().item()
                 
+                # Force raw_similarity to float32 on CUDA for numerical stability
+                if tabular_features.device.type == 'cuda' and raw_similarity.dtype != torch.float32:
+                    print(f"Converting raw_similarity from {raw_similarity.dtype} to float32 for stable scaling")
+                    raw_similarity = raw_similarity.to(torch.float32)
+                
                 # Apply a hard safety cap on the scale when raw values are already high
                 if raw_max > 0.5:  # If raw cosine similarity is already high
                     adjusted_scale = min(logit_scale.item(), 5.0)
                     print(f"FORWARD DIAGNOSTIC: Raw similarity high ({raw_max:.6f}), capping scale to {adjusted_scale:.6f}")
-                    semantic_logits = adjusted_scale * raw_similarity
+                    
+                    # Use explicit dtype control for CUDA
+                    if tabular_features.device.type == 'cuda' and autocast_enabled:
+                        with torch.cuda.amp.autocast(enabled=False):
+                            # Force computation in float32 by explicitly creating the scale tensor in float32
+                            scale_tensor = torch.tensor(adjusted_scale, dtype=torch.float32, device=raw_similarity.device)
+                            semantic_logits = scale_tensor * raw_similarity
+                    else:
+                        # Convert logit_scale to float32 explicitly for consistent computation
+                        scale_tensor = torch.tensor(adjusted_scale, dtype=torch.float32, device=raw_similarity.device)
+                        semantic_logits = scale_tensor * raw_similarity
                 else:
-                    semantic_logits = logit_scale * raw_similarity
+                    # Regular scaling with careful type handling
+                    if tabular_features.device.type == 'cuda' and autocast_enabled:
+                        with torch.cuda.amp.autocast(enabled=False):
+                            # Force computation in float32
+                            scale_tensor = logit_scale.to(torch.float32)
+                            semantic_logits = scale_tensor * raw_similarity
+                    else:
+                        # Convert to consistent dtype
+                        scale_tensor = logit_scale.to(raw_similarity.dtype)
+                        semantic_logits = scale_tensor * raw_similarity
+                        
+                # Print diagnostic info about the semantic logits
+                if tabular_features.device.type == 'cuda':
+                    print(f"Semantic logits dtype: {semantic_logits.dtype}, min: {semantic_logits.min().item():.4f}, max: {semantic_logits.max().item():.4f}")
                 
                 # Check for NaN or Inf in the resulting logits
                 if torch.isnan(semantic_logits).any() or torch.isinf(semantic_logits).any():
@@ -1375,13 +1421,40 @@ class SemanticConsistencyLoss(nn.Module):
         # Track device for debugging and diagnostic info
         self.last_device = device_type
         
-        # Get raw similarity matrix through matrix multiplication
-        raw_similarity = torch.matmul(tabular_features, text_features.t())
-        print("Raw similarity")
-        print(raw_similarity)
+        # Check for mixed precision issues on CUDA
+        if device_type == 'cuda':
+            # Check if we need to convert to float32 for stability
+            tab_dtype, text_dtype = tabular_features.dtype, text_features.dtype
+            autocast_enabled = torch.is_autocast_enabled()
+            
+            if autocast_enabled or tab_dtype in [torch.bfloat16, torch.float16] or text_dtype in [torch.bfloat16, torch.float16]:
+                print(f"⚠️ Mixed precision detected in loss function - converting to float32 for stability")
+                print(f"Current dtypes - tabular: {tab_dtype}, text: {text_dtype}, autocast: {autocast_enabled}")
+                
+                # Convert to float32 for stable computation
+                tabular_features = tabular_features.to(torch.float32)
+                text_features = text_features.to(torch.float32)
+        
+        # Compute raw similarity matrix - need to be explicit about autocast with CUDA
+        if device_type == 'cuda' and torch.is_autocast_enabled():
+            # Temporarily disable autocast for this critical computation
+            with torch.cuda.amp.autocast(enabled=False):
+                # Force computation in float32
+                raw_similarity = torch.matmul(tabular_features.float(), text_features.float().t())
+                print("Raw similarity (computed with autocast disabled)")
+                print(raw_similarity)
+        else:
+            # Standard computation for CPU/MPS or when autocast is already disabled
+            raw_similarity = torch.matmul(tabular_features, text_features.t())
+            print("Raw similarity")
+            print(raw_similarity)
         
         # Apply device-specific stabilization techniques
         if device_type == 'cuda':
+            # Ensure raw_similarity is in float32 for numerical stability
+            if raw_similarity.dtype != torch.float32:
+                raw_similarity = raw_similarity.to(torch.float32)
+                
             # Apply stronger normalization for CUDA with our larger epsilon
             raw_similarity = raw_similarity / (raw_similarity.abs().max() + self.cuda_eps)
             
@@ -1454,10 +1527,30 @@ class SemanticConsistencyLoss(nn.Module):
                         valid_targets = valid_targets.clamp(max=num_classes-1)
                     
                     # Compute cross-entropy only on valid targets
-                    batch_loss = F.cross_entropy(
-                        batch_logits.unsqueeze(0).expand(valid_target_count, -1),
-                        valid_targets
-                    )
+                    # Ensure proper data types for CUDA stability
+                    if device_type == 'cuda':
+                        # Ensure the input logits are in float32 for stable computation
+                        batch_logits_expanded = batch_logits.unsqueeze(0).expand(valid_target_count, -1)
+                        
+                        # Check if autocast is enabled
+                        if torch.is_autocast_enabled():
+                            # Temporarily disable autocast for this critical computation
+                            with torch.cuda.amp.autocast(enabled=False):
+                                # Force computation in float32
+                                if batch_logits_expanded.dtype != torch.float32:
+                                    batch_logits_expanded = batch_logits_expanded.to(torch.float32)
+                                batch_loss = F.cross_entropy(batch_logits_expanded, valid_targets)
+                        else:
+                            # Ensure float32 even without autocast
+                            if batch_logits_expanded.dtype != torch.float32:
+                                batch_logits_expanded = batch_logits_expanded.to(torch.float32)
+                            batch_loss = F.cross_entropy(batch_logits_expanded, valid_targets)
+                    else:
+                        # Standard approach for CPU/MPS
+                        batch_loss = F.cross_entropy(
+                            batch_logits.unsqueeze(0).expand(valid_target_count, -1),
+                            valid_targets
+                        )
     
                     # Add to total loss, weighted by number of valid targets
                     total_loss += batch_loss * valid_target_count
@@ -1492,15 +1585,36 @@ class SemanticConsistencyLoss(nn.Module):
             
             # Register a custom gradient hook for CUDA stability
             def grad_hook(grad):
+                if grad is None:
+                    return None
+                    
+                # First check if we need to convert dtype for stability
+                orig_dtype = grad.dtype
+                if orig_dtype in [torch.bfloat16, torch.float16]:
+                    print(f"⚠️ Graduate hook: Converting from {orig_dtype} to float32 for stability")
+                    grad = grad.to(torch.float32)
+                
+                # Handle NaN/Inf values
                 if torch.isnan(grad).any() or torch.isinf(grad).any():
                     # Print diagnostic info
                     nan_count = torch.isnan(grad).sum().item()
                     inf_count = torch.isinf(grad).sum().item()
                     if nan_count > 0 or inf_count > 0:
-                        print(f"WARNING: CUDA gradient contains {nan_count} NaN and {inf_count} Inf values")
+                        print(f"WARNING: CUDA gradient contains {nan_count} NaN and {inf_count} Inf values (shape: {grad.shape})")
+                        
+                        # Print a sample of the gradient tensor for debugging
+                        print(f"Gradient sample (first few elements): {grad.flatten()[:5]}")
                     
                     # Replace NaN/Inf with zeros to allow training to continue
                     grad = torch.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0)
+                
+                # Apply aggressive gradient clipping
+                grad_norm = grad.norm()
+                max_norm = 0.5  # Very strict clipping threshold for CUDA stability
+                if grad_norm > max_norm:
+                    grad = grad * (max_norm / (grad_norm + 1e-6))
+                    print(f"Gradient clipped from {grad_norm:.4f} to {max_norm:.4f}")
+                
                 return grad
                 
             # Only register hook if semantic loss contributes to the total
