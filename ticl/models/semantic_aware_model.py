@@ -462,6 +462,29 @@ class SemanticConsistencyLoss(nn.Module):
         return total_loss
 
 
+def get_semantic_class_count():
+    """
+    Get the current count of semantic classes from the semantic data loader.
+    
+    Returns:
+    --------
+    int
+        Number of semantic classes available
+    """
+    try:
+        from ticl.datasets.semantic_prior_data_loader import load_semantic_prior_data
+        
+        # Try to load real data to get column count
+        column_names, _ = load_semantic_prior_data()
+        num_classes = len(column_names)
+        
+        # Ensure we have at least 3 classes (minimum reasonable number)
+        return max(num_classes, 3)
+    except (ImportError, FileNotFoundError, Exception) as e:
+        # Fallback to default if loading fails
+        return 3
+
+
 def create_semantic_aware_model(base_model, num_semantic_classes=None, freeze_clip=True):
     """
     Factory function to create a semantic-aware model.
@@ -482,15 +505,7 @@ def create_semantic_aware_model(base_model, num_semantic_classes=None, freeze_cl
     """
     # Determine number of semantic classes if not provided
     if num_semantic_classes is None:
-        try:
-            # Try to load from semantic data
-            from ticl.datasets.semantic_prior_data_loader import load_semantic_prior_data
-            column_names, _ = load_semantic_prior_data()
-            num_semantic_classes = len(column_names)
-            num_semantic_classes = max(num_semantic_classes, 3)  # Ensure at least 3 classes
-        except:
-            # Default fallback
-            num_semantic_classes = 3
+        num_semantic_classes = get_semantic_class_count()
     
     # Create model
     model = SemanticAwareClassifier(base_model, num_semantic_classes)
