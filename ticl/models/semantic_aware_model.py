@@ -115,7 +115,8 @@ class SemanticAwareClassifier(nn.Module):
         -----------
         x : torch.Tensor or tuple
             Input tensor with shape [samples, batch, features] or
-            tuple of (x_data, semantic_tokens) with semantic_tokens of shape [batch, seq_len]
+            tuple of (x_data, y_data) or (style, x_data, y_data) following TabPFN convention,
+            with semantic_tokens included in the info field of x_data
         single_eval_pos : int, optional
             Position to split training and evaluation data
         class_texts : list of str, optional
@@ -126,25 +127,42 @@ class SemanticAwareClassifier(nn.Module):
         dict
             Dictionary containing class_logits and semantic_logits
         """
-        # Extract semantic tokens if provided in tuple format
+        # Extract semantic tokens from data
         semantic_tokens = None
-        if isinstance(x, tuple) and len(x) >= 2:
-            if len(x) == 3:
-                # Format with style: (style, x_data, semantic_tokens)
-                style, x_data, semantic_tokens = x
-                # Pass style and data to base model
-                base_input = (style, x_data)
-            else:
-                # Format: (x_data, semantic_tokens)
-                x_data, semantic_tokens = x
-                base_input = x_data
-        else:
-            # Standard format
-            x_data = x
-            base_input = x
         
-        # Forward pass on the base model
-        base_output = self.base_model(base_input, single_eval_pos=single_eval_pos)
+        # Handle inputs following TabPFN convention
+        if isinstance(x, tuple):
+            if len(x) == 3:
+                # Format: (style, x_src, y_src)
+                style_src, x_src, y_src = x
+                
+                # Check if x_src contains info with semantic_tokens
+                if isinstance(x_src, tuple) and len(x_src) >= 2:
+                    if isinstance(x_src[0], dict) and 'semantic_tokens' in x_src[0]:
+                        info = x_src[0]
+                        semantic_tokens = info.get('semantic_tokens')
+                
+                # Pass to base model in (style, x, y) format
+                base_output = self.base_model(x, single_eval_pos=single_eval_pos)
+            
+            elif len(x) == 2:
+                # Format: (x_src, y_src)
+                x_src, y_src = x
+                
+                # Check if x_src contains info with semantic_tokens
+                if isinstance(x_src, tuple) and len(x_src) >= 2:
+                    if isinstance(x_src[0], dict) and 'semantic_tokens' in x_src[0]:
+                        info = x_src[0]
+                        semantic_tokens = info.get('semantic_tokens')
+                
+                # Pass to base model in (x, y) format
+                base_output = self.base_model(x, single_eval_pos=single_eval_pos)
+            
+            else:
+                raise ValueError(f"Unsupported input format: tuple with {len(x)} elements")
+        else:
+            # Handle direct tensor input (shouldn't happen with TabPFN)
+            raise ValueError("TabPFN requires inputs as (x,y) or (style,x,y) tuple")
         
         # Update semantic classes count if needed
         if isinstance(base_output, torch.Tensor) and len(base_output.shape) >= 3:
@@ -485,7 +503,7 @@ def get_semantic_class_count():
         return 3
 
 
-def create_semantic_aware_model(base_model, num_semantic_classes=None, freeze_clip=True):
+def create_semantic_aware_model(base_model, num_semantic_classes=None, freeze_clip=False):
     """
     Factory function to create a semantic-aware model.
     
@@ -496,7 +514,7 @@ def create_semantic_aware_model(base_model, num_semantic_classes=None, freeze_cl
     num_semantic_classes : int, optional
         Number of semantic classes to predict
     freeze_clip : bool
-        Whether to freeze the CLIP text encoder parameters
+        Whether to freeze the CLIP text encoder parameters (default: False)
         
     Returns:
     --------
@@ -516,7 +534,7 @@ def create_semantic_aware_model(base_model, num_semantic_classes=None, freeze_cl
         for param in model.clip_text_model.parameters():
             param.requires_grad = False
     else:
-        print("Fine-tuning CLIP text encoder (this will increase GPU memory usage)")
+        print("Fine-tuning CLIP text encoder (training the transformer)")
         for param in model.clip_text_model.parameters():
             param.requires_grad = True
     
