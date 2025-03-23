@@ -372,6 +372,40 @@ class SemanticAwareClassifier(nn.Module):
                 memory_logger.warning("NaN or Inf values detected after projection, using fallback")
                 transformer_dim = self.clip_text_model.config.hidden_size
                 
+                # Insert breakpoint if on CUDA for inspection when NaNs first happen
+                if features.device.type == 'cuda':
+                    print(f"CRITICAL: NaN detected in semantic projection on CUDA - ADDING BREAKPOINT")
+                    print(f"Features shape: {features.shape}, Projected features shape: {projected_features.shape}")
+                    
+                    # Print information about the state before the breakpoint
+                    nan_positions = torch.isnan(projected_features)
+                    inf_positions = torch.isinf(projected_features)
+                    nan_count = nan_positions.sum().item()
+                    inf_count = inf_positions.sum().item()
+                    print(f"NaN count: {nan_count}, Inf count: {inf_count}")
+                    
+                    # Sample some values from features
+                    print(f"Features sample (first 5):")
+                    if features.numel() > 0:
+                        print(features.flatten()[:5])
+                        
+                    # Check the weights of the semantic projection module
+                    print(f"Semantic projection weights sample:")
+                    for name, param in self.semantic_projection.named_parameters():
+                        if 'weight' in name:
+                            print(f"  {name} shape: {param.shape}")
+                            print(f"  {name} stats - min: {param.min().item():.6f}, max: {param.max().item():.6f}")
+                            print(f"  {name} sample (first 5): {param.flatten()[:5]}")
+                            
+                            # Check if there are NaNs in weights
+                            if torch.isnan(param).any() or torch.isinf(param).any():
+                                nan_weight_count = torch.isnan(param).sum().item()
+                                inf_weight_count = torch.isinf(param).sum().item()
+                                print(f"  WARNING: {name} has {nan_weight_count} NaNs and {inf_weight_count} Infs")
+                            
+                    # Add an interactive breakpoint
+                    import pdb; pdb.set_trace()
+                
                 # Don't just replace with zeros - try to save what we can first
                 projected_features = torch.nan_to_num(projected_features, nan=0.0, posinf=1.0, neginf=-1.0)
                 
@@ -410,6 +444,40 @@ class SemanticAwareClassifier(nn.Module):
             # Check for NaNs after enhancement - critical stability check
             if torch.isnan(tabular_features).any() or torch.isinf(tabular_features).any():
                 memory_logger.warning("NaN or Inf values detected after feature enhancement, using fallback")
+                
+                # Insert breakpoint if on CUDA for inspection when NaNs first happen
+                if projected_features.device.type == 'cuda':
+                    print(f"CRITICAL: NaN detected in feature enhancer on CUDA - ADDING BREAKPOINT")
+                    print(f"Projected features shape: {projected_features.shape}, Tabular features shape: {tabular_features.shape}")
+                    
+                    # Print information about the state before the breakpoint
+                    nan_positions = torch.isnan(tabular_features)
+                    inf_positions = torch.isinf(tabular_features)
+                    nan_count = nan_positions.sum().item()
+                    inf_count = inf_positions.sum().item()
+                    print(f"NaN count: {nan_count}, Inf count: {inf_count}")
+                    
+                    # Sample some values from projected features (input to enhancer)
+                    print(f"Projected features sample (first 5):")
+                    if projected_features.numel() > 0:
+                        print(projected_features.flatten()[:5])
+                        
+                    # Check the weights of the feature enhancer module
+                    print(f"Feature enhancer weights sample:")
+                    for name, param in self.feature_enhancer.named_parameters():
+                        if 'weight' in name:
+                            print(f"  {name} shape: {param.shape}")
+                            print(f"  {name} stats - min: {param.min().item():.6f}, max: {param.max().item():.6f}")
+                            print(f"  {name} sample (first 5): {param.flatten()[:5]}")
+                            
+                            # Check if there are NaNs in weights
+                            if torch.isnan(param).any() or torch.isinf(param).any():
+                                nan_weight_count = torch.isnan(param).sum().item()
+                                inf_weight_count = torch.isinf(param).sum().item()
+                                print(f"  WARNING: {name} has {nan_weight_count} NaNs and {inf_weight_count} Infs")
+                    
+                    # Add an interactive breakpoint
+                    import pdb; pdb.set_trace()
                 
                 # Try to fix the values in place first
                 tabular_features = torch.nan_to_num(tabular_features, nan=0.0, posinf=1.0, neginf=-1.0)
@@ -696,6 +764,39 @@ class SemanticAwareClassifier(nn.Module):
                     
                     # For CUDA, try more aggressive stabilization
                     if semantic_logits.device.type == 'cuda':
+                        print(f"CRITICAL: NaN in semantic_logits on CUDA - ADDING BREAKPOINT")
+                        
+                        # Print detailed diagnostic information
+                        print(f"Raw similarity - min: {raw_similarity.min().item():.6f}, max: {raw_similarity.max().item():.6f}")
+                        print(f"Raw similarity - mean: {raw_similarity.mean().item():.6f}, std: {raw_similarity.std().item():.6f}")
+                        print(f"Logit scale used: {logit_scale.item():.6f}")
+                        
+                        # Check where the NaNs are coming from
+                        nan_positions = torch.isnan(semantic_logits)
+                        inf_positions = torch.isinf(semantic_logits)
+                        nan_count = nan_positions.sum().item()
+                        inf_count = inf_positions.sum().item()
+                        print(f"NaN count: {nan_count}, Inf count: {inf_count}")
+                        
+                        # Check the text and tabular features that were used in the computation
+                        print(f"Tabular features - min: {tabular_features.min().item():.6f}, max: {tabular_features.max().item():.6f}")
+                        print(f"Text features - min: {text_features.min().item():.6f}, max: {text_features.max().item():.6f}")
+                        
+                        # Check for any NaNs in the input features
+                        tabular_has_nan = torch.isnan(tabular_features).any().item()
+                        tabular_has_inf = torch.isinf(tabular_features).any().item()
+                        text_has_nan = torch.isnan(text_features).any().item()
+                        text_has_inf = torch.isinf(text_features).any().item()
+                        
+                        if tabular_has_nan or tabular_has_inf:
+                            print(f"WARNING: Input tabular features contain NaNs: {tabular_has_nan} or Infs: {tabular_has_inf}")
+                            
+                        if text_has_nan or text_has_inf:
+                            print(f"WARNING: Input text features contain NaNs: {text_has_nan} or Infs: {text_has_inf}")
+                        
+                        # Add an interactive breakpoint
+                        import pdb; pdb.set_trace()
+                        
                         print(f"CRITICAL: NaN in semantic_logits on CUDA - applying drastic stabilization")
                         # Apply more aggressive clamping for CUDA
                         semantic_logits = torch.nan_to_num(semantic_logits, nan=0.0, posinf=5.0, neginf=-5.0)
