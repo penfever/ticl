@@ -362,71 +362,12 @@ def train_epoch(
                 # Enhanced gradient clipping with more aggressive threshold and backend-specific handling
                 # Use a stricter max norm value of 0.5 to prevent gradient explosion
                 max_norm = 0.5
-                
-                # Check for extremely large gradients which indicate instability
-                grad_norm = 0.0
-                for p in model.parameters():
-                    if p.grad is not None:
-                        param_norm = p.grad.data.norm(2).item()
-                        grad_norm += param_norm ** 2
-                grad_norm = grad_norm ** 0.5
-                
-                # Enhanced gradient diagnostics for debugging stability issues
-                # print(f"GRAD DIAGNOSTIC: Gradient norm before clipping: {grad_norm:.4f}")
-                
-                # Add per-layer gradient analysis for extreme cases
-                if grad_norm > 10.0:
-                    if grad_norm > 100.0:  # More detailed info for very large gradients
-                        print(f"DETAILED LARGE GRADIENT ANALYSIS:")
-                        largest_grad_param = None
-                        largest_grad_norm = 0.0
-                        largest_grad_name = ""
-                        
-                        # Find the parameter with the largest gradient
-                        for name, p in model.named_parameters():
-                            if p.grad is not None:
-                                param_norm = p.grad.data.norm(2).item()
-                                if param_norm > largest_grad_norm:
-                                    largest_grad_norm = param_norm
-                                    largest_grad_param = p
-                                    largest_grad_name = name
-                        
-                        if largest_grad_param is not None:
-                            # Report detailed statistics about the largest gradient contributor
-                            print(f"  - Largest gradient: {largest_grad_name} with norm {largest_grad_norm:.4f}")
-                            if 'semantic' in largest_grad_name.lower():
-                                print(f"  - WARNING: Largest gradient is in semantic component!")
-                            
-                            # Additional stats about this parameter's gradient
-                            try:
-                                max_val = largest_grad_param.grad.data.abs().max().item()
-                                mean_val = largest_grad_param.grad.data.abs().mean().item()
-                                print(f"  - Gradient stats: max={max_val:.4f}, mean={mean_val:.4f}, shape={largest_grad_param.shape}")
-                            except:
-                                pass
-                    
-                    max_norm = 0.1  # Even stricter clipping for extreme cases
-                    
-                    # EMERGENCY FIX: If we have SemanticAwareClassifier, completely disable semantic loss
-                    if grad_norm > 1000.0:  # Catastrophically large gradient
-                        print("EMERGENCY FIX: Disabling semantic loss component due to exploding gradients")
-                        # First try unwrapped model
-                        if hasattr(model, 'semantic_weight') and hasattr(model, 'SemanticConsistencyLoss'):
-                            print("Setting semantic_weight to 0.0 on base model")
-                            model.semantic_weight = 0.0
-                        # Try with DDP wrapper
-                        elif hasattr(model, 'module') and hasattr(model.module, 'semantic_weight'):
-                            print("Setting semantic_weight to 0.0 on module")
-                            model.module.semantic_weight = 0.0
-                        # Try finding the loss function itself
-                        for name, submodule in model.named_modules():
-                            if isinstance(submodule, nn.Module) and hasattr(submodule, 'semantic_weight'):
-                                print(f"Setting semantic_weight to 0.0 on {name}")
-                                submodule.semantic_weight = 0.0
-                
-                # Always use foreach=False for more stable gradient clipping behavior
-                # This matches the more numerically stable approach used on MPS devices
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm, foreach=False)
+
+                if is_cuda:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm, foreach=True)
+                else:
+                    # This matches the more numerically stable approach used on MPS devices
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm, foreach=False)
                 if batch == 0:  # Only print warning once
                     print(f"Note: Using slower but more stable gradient clipping method with max_norm={max_norm}")
                 
