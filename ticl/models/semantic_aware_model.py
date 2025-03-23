@@ -332,15 +332,37 @@ class SemanticAwareClassifier(nn.Module):
             # Now using sequential model with built-in normalization and dropout
             projected_features = self.semantic_projection(features)
             
-            # Extra check for NaNs after projection
+            # Extra check for NaNs after projection - CRITICAL CHECK
             if torch.isnan(projected_features).any() or torch.isinf(projected_features).any():
                 memory_logger.warning("NaN or Inf values detected after projection, using fallback")
-                #breakpoint()
                 transformer_dim = self.clip_text_model.config.hidden_size
-                projected_features = torch.zeros((features.shape[0] if len(features.shape) > 1 else 1, transformer_dim), 
-                                                device=features.device)
-                # Add small random noise for gradient flow
-                projected_features = projected_features + torch.randn_like(projected_features) * 0.01
+                
+                # Don't just replace with zeros - try to save what we can first
+                projected_features = torch.nan_to_num(projected_features, nan=0.0, posinf=1.0, neginf=-1.0)
+                
+                # Reset parameters of semantic projection to prevent continued NaNs
+                if features.device.type == 'cuda':
+                    print(f"CRITICAL: Resetting semantic projection parameters due to NaN detection on CUDA")
+                    # Get the first layer of the sequential module (the Linear layer)
+                    with torch.no_grad():
+                        for name, module in self.semantic_projection.named_modules():
+                            if isinstance(module, nn.Linear):
+                                # Reinitialize with very conservative values
+                                nn.init.normal_(module.weight, mean=0.0, std=0.001)
+                                if module.bias is not None:
+                                    nn.init.zeros_(module.bias)
+                            elif isinstance(module, nn.LayerNorm):
+                                # Reset LayerNorm parameters
+                                nn.init.ones_(module.weight)
+                                nn.init.zeros_(module.bias)
+                
+                # Check again - if still issues, fall back to completely new tensor
+                if torch.isnan(projected_features).any() or torch.isinf(projected_features).any():
+                    projected_features = torch.zeros((features.shape[0] if len(features.shape) > 1 else 1, transformer_dim), 
+                                                  device=features.device)
+                    # Add small random noise for gradient flow - use smaller values for CUDA
+                    noise_scale = 0.005 if features.device.type == 'cuda' else 0.01
+                    projected_features = projected_features + torch.randn_like(projected_features) * noise_scale
         except Exception as e:
             # Create fallback projected features with detailed error logging
             transformer_dim = self.clip_text_model.config.hidden_size
@@ -360,13 +382,34 @@ class SemanticAwareClassifier(nn.Module):
             # Feature enhancer now has built-in normalization layers
             tabular_features = self.feature_enhancer(projected_features)
             
-            # Check for NaNs after enhancement
+            # Check for NaNs after enhancement - critical stability check
             if torch.isnan(tabular_features).any() or torch.isinf(tabular_features).any():
-                #breakpoint()
                 memory_logger.warning("NaN or Inf values detected after feature enhancement, using fallback")
-                tabular_features = projected_features  # Fallback to just the projected features
-                # Apply simple normalization instead of the enhancer output
-                tabular_features = F.normalize(tabular_features, dim=1)
+                
+                # Try to fix the values in place first
+                tabular_features = torch.nan_to_num(tabular_features, nan=0.0, posinf=1.0, neginf=-1.0)
+                
+                # Reset feature enhancer parameters if on CUDA to prevent continued NaNs
+                if projected_features.device.type == 'cuda':
+                    print(f"CRITICAL: Resetting feature enhancer parameters due to NaN detection on CUDA")
+                    with torch.no_grad():
+                        for name, module in self.feature_enhancer.named_modules():
+                            if isinstance(module, nn.Linear):
+                                # Reinitialize with very conservative values
+                                nn.init.normal_(module.weight, mean=0.0, std=0.001)
+                                if module.bias is not None:
+                                    nn.init.zeros_(module.bias)
+                            elif isinstance(module, nn.LayerNorm):
+                                # Reset LayerNorm parameters
+                                nn.init.ones_(module.weight)
+                                nn.init.zeros_(module.bias)
+                
+                # If still have issues, fall back to using the projected features directly
+                if torch.isnan(tabular_features).any() or torch.isinf(tabular_features).any():
+                    print(f"Using projected features as fallback due to persistent NaNs in enhancer")
+                    tabular_features = projected_features  # Fallback to just the projected features
+                    # Apply simple normalization with higher epsilon
+                    tabular_features = F.normalize(tabular_features, dim=1, eps=1e-2)
         except Exception as e:
             memory_logger.error(f"Feature enhancement failed: {e}")
             # Fallback to just normalized projected features
@@ -376,13 +419,35 @@ class SemanticAwareClassifier(nn.Module):
         if tabular_features.dim() > 2:
             tabular_features = tabular_features.mean(dim=1)
         
-        # Final normalization with safety bounds
-        # Clip any extreme values before normalization
-        tabular_features = torch.clamp(tabular_features, min=-10.0, max=10.0)
+        # Final normalization with safety bounds - device specific settings
+        device_type = tabular_features.device.type
         
-        # Normalize feature vectors to enable proper cosine similarity
-        # Use a small epsilon to prevent division by zero
-        tabular_features = F.normalize(tabular_features, dim=1, eps=1e-3)
+        # Apply different clipping bounds based on device
+        if device_type == 'cuda':
+            # More restrictive bounds for CUDA
+            tabular_features = torch.clamp(tabular_features, min=-5.0, max=5.0)
+            # Use larger epsilon for CUDA
+            tabular_features = F.normalize(tabular_features, dim=1, eps=1e-2)
+        else:
+            # Standard bounds for MPS/CPU 
+            tabular_features = torch.clamp(tabular_features, min=-10.0, max=10.0)
+            # Standard epsilon for MPS/CPU
+            tabular_features = F.normalize(tabular_features, dim=1, eps=1e-3)
+        
+        # Extra CUDA stability check - if still have NaNs, do emergency reset
+        if device_type == 'cuda' and (torch.isnan(tabular_features).any() or torch.isinf(tabular_features).any()):
+            print(f"EMERGENCY: Persistent NaNs even after normalization - resetting all semantic model parameters")
+            # Reset the parameters of both projection and enhancer modules
+            with torch.no_grad():
+                self._initialize_parameters()
+            # Create safe random features as a fallback of last resort
+            transformer_dim = self.clip_text_model.config.hidden_size
+            batch_shape = tabular_features.shape[0]
+            tabular_features = torch.zeros((batch_shape, transformer_dim), device=tabular_features.device)
+            # Add very small noise
+            tabular_features = tabular_features + torch.randn_like(tabular_features) * 0.001
+            # Apply final normalization
+            tabular_features = F.normalize(tabular_features, dim=1, eps=1e-2)
         
         # ===== Process class texts with CLIP text encoder =====
         text_features = None
@@ -513,18 +578,47 @@ class SemanticAwareClassifier(nn.Module):
         if text_features is not None:
             # Check features for NaN values first and fix if needed
             if torch.isnan(tabular_features).any() or torch.isinf(tabular_features).any():
-                #breakpoint()
                 memory_logger.warning("NaN or inf values detected in tabular features, applying stabilization")
                 tabular_features = torch.nan_to_num(tabular_features, nan=0.0, posinf=1.0, neginf=-1.0)
-                # Re-normalize after fixing NaNs
-                tabular_features = F.normalize(tabular_features, dim=1)
+                
+                # Apply device-specific re-normalization after fixing NaNs
+                if tabular_features.device.type == 'cuda':
+                    # Check if the weights in the projection or enhancer have gone NaN
+                    # If so, this indicates a deeper problem that needs to be addressed
+                    has_nan_params = False
+                    with torch.no_grad():
+                        for name, param in self.semantic_projection.named_parameters():
+                            if torch.isnan(param).any() or torch.isinf(param).any():
+                                has_nan_params = True
+                                print(f"CRITICAL: NaN weights detected in semantic_projection.{name}")
+                        
+                        for name, param in self.feature_enhancer.named_parameters():
+                            if torch.isnan(param).any() or torch.isinf(param).any():
+                                has_nan_params = True
+                                print(f"CRITICAL: NaN weights detected in feature_enhancer.{name}")
+                    
+                    # If parameters have gone NaN, reset them
+                    if has_nan_params:
+                        print("EMERGENCY: Resetting parameters due to NaN weights")
+                        self._initialize_parameters()
+                    
+                    # Use larger epsilon for CUDA (safer)
+                    tabular_features = F.normalize(tabular_features, dim=1, eps=1e-2)
+                else:
+                    # Standard epsilon for MPS/CPU
+                    tabular_features = F.normalize(tabular_features, dim=1, eps=1e-3)
                 
             if torch.isnan(text_features).any() or torch.isinf(text_features).any():
-                #breakpoint()
                 memory_logger.warning("NaN or inf values detected in text features, applying stabilization")
                 text_features = torch.nan_to_num(text_features, nan=0.0, posinf=1.0, neginf=-1.0)
-                # Re-normalize after fixing NaNs
-                text_features = F.normalize(text_features, dim=1)
+                
+                # Apply device-specific re-normalization after fixing NaNs
+                if text_features.device.type == 'cuda':
+                    # Use larger epsilon for CUDA
+                    text_features = F.normalize(text_features, dim=1, eps=1e-2)
+                else:
+                    # Standard epsilon for MPS/CPU
+                    text_features = F.normalize(text_features, dim=1, eps=1e-3)
             
             try:
                 # Get temperature-scaled logits (similar to CLIP) with safety bounds
@@ -552,8 +646,23 @@ class SemanticAwareClassifier(nn.Module):
                 self._last_logit_scale = logit_scale.item()
                 
                 # Compute similarity: [batch_size, embed_dim] x [embed_dim, n_classes]
-                # First compute raw similarity without scaling
-                raw_similarity = torch.matmul(tabular_features, text_features.transpose(0, 1))
+                # First compute raw similarity without scaling with extra safety
+                
+                # Additional stability checks for CUDA
+                if tabular_features.device.type == 'cuda':
+                    # Double check normalization with strong epsilon before matmul
+                    tabular_features = F.normalize(tabular_features, dim=1, eps=1e-2)
+                    text_features = F.normalize(text_features, dim=1, eps=1e-2)
+                    
+                # Compute similarity matrix with more careful error handling
+                try:
+                    raw_similarity = torch.matmul(tabular_features, text_features.transpose(0, 1))
+                except Exception as e:
+                    print(f"Error in matrix multiplication: {e}")
+                    # Create fallback similarity matrix
+                    raw_similarity = torch.zeros((tabular_features.shape[0], text_features.shape[0]), 
+                                               device=tabular_features.device)
+                    raw_similarity = raw_similarity + torch.randn_like(raw_similarity) * 0.001
                 
                 # Print diagnostic info about the raw similarity values
                 raw_max = raw_similarity.abs().max().item()
@@ -568,9 +677,20 @@ class SemanticAwareClassifier(nn.Module):
                 
                 # Check for NaN or Inf in the resulting logits
                 if torch.isnan(semantic_logits).any() or torch.isinf(semantic_logits).any():
-                    #breakpoint()
                     memory_logger.warning("NaN or inf values detected in semantic_logits, applying numeric stabilization")
-                    semantic_logits = torch.nan_to_num(semantic_logits, nan=0.0, posinf=100.0, neginf=-100.0)
+                    
+                    # For CUDA, try more aggressive stabilization
+                    if semantic_logits.device.type == 'cuda':
+                        print(f"CRITICAL: NaN in semantic_logits on CUDA - applying drastic stabilization")
+                        # Apply more aggressive clamping for CUDA
+                        semantic_logits = torch.nan_to_num(semantic_logits, nan=0.0, posinf=5.0, neginf=-5.0)
+                        
+                        # Apply softmax to further stabilize - convert to probabilities then back to logits
+                        semantic_logits = F.softmax(semantic_logits, dim=-1)
+                        semantic_logits = torch.log(semantic_logits + 1e-6) * 1.0
+                    else:
+                        # Standard stabilization for MPS/CPU
+                        semantic_logits = torch.nan_to_num(semantic_logits, nan=0.0, posinf=100.0, neginf=-100.0)
             except Exception as e:
                 memory_logger.error(f"Error computing contrastive similarities: {e}")
                 # Create fallback semantic logits with small random values
