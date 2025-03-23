@@ -430,6 +430,20 @@ def train_epoch(
                 if batch == 0:  # Only print warning once
                     print(f"Note: Using slower but more stable gradient clipping method with max_norm={max_norm}")
                 
+                # Check for NaN parameters needing reset in semantic model - CUDA stability fix
+                # Important: Call this AFTER backward but BEFORE optimizer step
+                if is_cuda:
+                    # For unwrapped model
+                    if hasattr(model, 'reset_parameters_if_needed'):
+                        model.reset_parameters_if_needed()
+                    # For DDP wrapped model
+                    elif hasattr(model, 'module') and hasattr(model.module, 'reset_parameters_if_needed'):
+                        model.module.reset_parameters_if_needed()
+                    # Check for semantic components that need reset
+                    for name, submodule in model.named_modules():
+                        if hasattr(submodule, 'reset_parameters_if_needed'):
+                            submodule.reset_parameters_if_needed()
+                
                 # Use mixed precision optimizer step if enabled
                 # Be more explicit about when to use scaler
                 if use_scaler and (is_cuda or is_mps):

@@ -29,6 +29,7 @@ class SemanticAwareClassifier(nn.Module):
         self.nan_grad_counts = {}
         self.grad_stats = {}
         self.cuda_safe_init = True  # Flag to use CUDA-safe initialization
+        self._needs_reset = False   # Flag to indicate parameters need reset after backward
         
         # Store the base model
         self.base_model = base_model
@@ -149,6 +150,40 @@ class SemanticAwareClassifier(nn.Module):
                 nn.init.zeros_(module.bias)
         
         print("Initialized semantic components with CUDA-safe values")
+        
+    def reset_parameters_if_needed(self):
+        """
+        Safely reset parameters if NaNs were detected during forward pass.
+        This should be called AFTER backward() and BEFORE optimizer.step()
+        """
+        if not self._needs_reset:
+            return
+        
+        print("EXECUTING PARAMETER RESET: Reinitializing semantic components due to NaN detection")
+        with torch.no_grad():
+            # Reset projection layer
+            for name, module in self.semantic_projection.named_modules():
+                if isinstance(module, nn.Linear):
+                    nn.init.normal_(module.weight, mean=0.0, std=0.001)
+                    if module.bias is not None:
+                        nn.init.zeros_(module.bias)
+                elif isinstance(module, nn.LayerNorm):
+                    nn.init.ones_(module.weight)
+                    nn.init.zeros_(module.bias)
+                    
+            # Reset enhancer layer
+            for name, module in self.feature_enhancer.named_modules():
+                if isinstance(module, nn.Linear):
+                    nn.init.normal_(module.weight, mean=0.0, std=0.001)
+                    if module.bias is not None:
+                        nn.init.zeros_(module.bias)
+                elif isinstance(module, nn.LayerNorm):
+                    nn.init.ones_(module.weight)
+                    nn.init.zeros_(module.bias)
+                    
+        # Reset the flag
+        self._needs_reset = False
+        print("Parameter reset complete")
     
     def _gradient_hook(self, grad, param_name):
         """
@@ -340,21 +375,11 @@ class SemanticAwareClassifier(nn.Module):
                 # Don't just replace with zeros - try to save what we can first
                 projected_features = torch.nan_to_num(projected_features, nan=0.0, posinf=1.0, neginf=-1.0)
                 
-                # Reset parameters of semantic projection to prevent continued NaNs
+                # Flag parameter issues but DO NOT modify parameters in-place (breaks autograd)
                 if features.device.type == 'cuda':
-                    print(f"CRITICAL: Resetting semantic projection parameters due to NaN detection on CUDA")
-                    # Get the first layer of the sequential module (the Linear layer)
-                    with torch.no_grad():
-                        for name, module in self.semantic_projection.named_modules():
-                            if isinstance(module, nn.Linear):
-                                # Reinitialize with very conservative values
-                                nn.init.normal_(module.weight, mean=0.0, std=0.001)
-                                if module.bias is not None:
-                                    nn.init.zeros_(module.bias)
-                            elif isinstance(module, nn.LayerNorm):
-                                # Reset LayerNorm parameters
-                                nn.init.ones_(module.weight)
-                                nn.init.zeros_(module.bias)
+                    print(f"CRITICAL: NaN detected in semantic projection on CUDA")
+                    # Set a flag to trigger weight reset AFTER backward pass completes
+                    self._needs_reset = True
                 
                 # Check again - if still issues, fall back to completely new tensor
                 if torch.isnan(projected_features).any() or torch.isinf(projected_features).any():
@@ -389,20 +414,11 @@ class SemanticAwareClassifier(nn.Module):
                 # Try to fix the values in place first
                 tabular_features = torch.nan_to_num(tabular_features, nan=0.0, posinf=1.0, neginf=-1.0)
                 
-                # Reset feature enhancer parameters if on CUDA to prevent continued NaNs
+                # Flag enhancer issues but DO NOT modify parameters in-place (breaks autograd)
                 if projected_features.device.type == 'cuda':
-                    print(f"CRITICAL: Resetting feature enhancer parameters due to NaN detection on CUDA")
-                    with torch.no_grad():
-                        for name, module in self.feature_enhancer.named_modules():
-                            if isinstance(module, nn.Linear):
-                                # Reinitialize with very conservative values
-                                nn.init.normal_(module.weight, mean=0.0, std=0.001)
-                                if module.bias is not None:
-                                    nn.init.zeros_(module.bias)
-                            elif isinstance(module, nn.LayerNorm):
-                                # Reset LayerNorm parameters
-                                nn.init.ones_(module.weight)
-                                nn.init.zeros_(module.bias)
+                    print(f"CRITICAL: NaN detected in feature enhancer on CUDA")
+                    # Set a flag to trigger weight reset AFTER backward pass completes
+                    self._needs_reset = True
                 
                 # If still have issues, fall back to using the projected features directly
                 if torch.isnan(tabular_features).any() or torch.isinf(tabular_features).any():
@@ -434,12 +450,11 @@ class SemanticAwareClassifier(nn.Module):
             # Standard epsilon for MPS/CPU
             tabular_features = F.normalize(tabular_features, dim=1, eps=1e-3)
         
-        # Extra CUDA stability check - if still have NaNs, do emergency reset
+        # Extra CUDA stability check - if still have NaNs, flag for emergency reset
         if device_type == 'cuda' and (torch.isnan(tabular_features).any() or torch.isinf(tabular_features).any()):
-            print(f"EMERGENCY: Persistent NaNs even after normalization - resetting all semantic model parameters")
-            # Reset the parameters of both projection and enhancer modules
-            with torch.no_grad():
-                self._initialize_parameters()
+            print(f"EMERGENCY: Persistent NaNs even after normalization - will reset semantic model parameters")
+            # Flag for reset but DO NOT modify parameters in-place (breaks autograd)
+            self._needs_reset = True
             # Create safe random features as a fallback of last resort
             transformer_dim = self.clip_text_model.config.hidden_size
             batch_shape = tabular_features.shape[0]
@@ -597,10 +612,10 @@ class SemanticAwareClassifier(nn.Module):
                                 has_nan_params = True
                                 print(f"CRITICAL: NaN weights detected in feature_enhancer.{name}")
                     
-                    # If parameters have gone NaN, reset them
+                    # Flag for reset but DO NOT modify parameters in-place (breaks autograd)
                     if has_nan_params:
-                        print("EMERGENCY: Resetting parameters due to NaN weights")
-                        self._initialize_parameters()
+                        print("EMERGENCY: Detected NaN weights - will reset parameters after backward pass")
+                        self._needs_reset = True
                     
                     # Use larger epsilon for CUDA (safer)
                     tabular_features = F.normalize(tabular_features, dim=1, eps=1e-2)
