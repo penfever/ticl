@@ -372,6 +372,21 @@ class SemanticAwareClassifier(nn.Module):
                 memory_logger.warning(f"Very large feature values detected (max={max_val:.2f}), applying normalization")
                 # Apply feature-wise normalization to bring values to reasonable range
                 features = features / (features.norm(dim=-1, keepdim=True) + 1e-4)
+                
+        # IMPORTANT: Check for mixed precision issues on CUDA - this is critical for numerical stability
+        if features.device.type == 'cuda':
+            # BFloat16 and Float16 have significantly reduced precision which can cause NaNs
+            orig_dtype = features.dtype
+            if orig_dtype in [torch.bfloat16, torch.float16]:
+                print(f"⚠️ Mixed precision detected: {orig_dtype}. Converting to float32 for numerical stability")
+                # Always use float32 for the semantic projection on CUDA regardless of autocast settings
+                features = features.to(torch.float32)
+                
+                # Force all parameters in semantic_projection to float32 as well
+                for param in self.semantic_projection.parameters():
+                    if param.dtype != torch.float32:
+                        param.data = param.data.to(torch.float32)
+        
         print(f"Features sample (first 20):")
         if features.numel() > 0:
             print(features.flatten()[:20])
@@ -380,6 +395,11 @@ class SemanticAwareClassifier(nn.Module):
         try:
             # Now using sequential model with built-in normalization and dropout
             projected_features = self.semantic_projection(features)
+            
+            # Ensure projected features are in a stable format
+            if projected_features.device.type == 'cuda' and projected_features.dtype in [torch.bfloat16, torch.float16]:
+                print(f"Converting projected features from {projected_features.dtype} to float32")
+                projected_features = projected_features.to(torch.float32)
             print(f"Projected features sample (first 20):")
             if projected_features.numel() > 0:
                 print(projected_features.flatten()[:20])
@@ -453,6 +473,20 @@ class SemanticAwareClassifier(nn.Module):
         
         # Apply feature enhancement with extra safety checks
         try:
+            # Ensure projected features are in float32 for CUDA before feature enhancement
+            if projected_features.device.type == 'cuda':
+                # Force parameters to float32 for stable computation
+                orig_dtype = projected_features.dtype
+                if orig_dtype in [torch.bfloat16, torch.float16]:
+                    # Log the conversion since this is important for debugging
+                    print(f"Converting projected features to float32 before feature enhancer (from {orig_dtype})")
+                    projected_features = projected_features.to(torch.float32)
+                    
+                    # Also make sure the enhancer parameters are in float32
+                    for param in self.feature_enhancer.parameters():
+                        if param.dtype != torch.float32:
+                            param.data = param.data.to(torch.float32)
+            
             # Feature enhancer now has built-in normalization layers
             tabular_features = self.feature_enhancer(projected_features)
             
@@ -748,13 +782,36 @@ class SemanticAwareClassifier(nn.Module):
                 
                 # Additional stability checks for CUDA
                 if tabular_features.device.type == 'cuda':
+                    # CRITICAL: Ensure consistent data types for matrix multiplication on CUDA
+                    # This is the most likely source of NaNs in the model
+                    tabular_dtype = tabular_features.dtype
+                    text_dtype = text_features.dtype
+                    
+                    # If either tensor is in reduced precision, convert both to float32
+                    if tabular_dtype in [torch.bfloat16, torch.float16] or text_dtype in [torch.bfloat16, torch.float16]:
+                        print(f"⚠️ Mixed precision detected for similarity computation: tabular={tabular_dtype}, text={text_dtype}")
+                        print(f"Converting both tensors to float32 for stable matrix multiplication")
+                        
+                        # Convert to float32 for stable computation
+                        tabular_features = tabular_features.to(torch.float32)
+                        text_features = text_features.to(torch.float32)
+                    
                     # Double check normalization with strong epsilon before matmul
                     tabular_features = F.normalize(tabular_features, dim=1, eps=1e-2)
                     text_features = F.normalize(text_features, dim=1, eps=1e-2)
                     
+                    # Print diagnostic information about tensor shapes and devices
+                    print(f"Tensor shapes before matmul - tabular: {tabular_features.shape}, text: {text_features.shape}")
+                    print(f"Tensor dtypes before matmul - tabular: {tabular_features.dtype}, text: {text_features.dtype}")
+                    
                 # Compute similarity matrix with more careful error handling
                 try:
                     raw_similarity = torch.matmul(tabular_features, text_features.transpose(0, 1))
+                    
+                    # Debug output
+                    print(f"Raw similarity shape: {raw_similarity.shape}, dtype: {raw_similarity.dtype}")
+                    if tabular_features.device.type == 'cuda':
+                        print(f"Raw similarity sample:\n{raw_similarity[:3,:3]}")
                 except Exception as e:
                     print(f"Error in matrix multiplication: {e}")
                     # Create fallback similarity matrix
