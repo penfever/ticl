@@ -8,8 +8,11 @@ from ticl.utils import log_gpu_memory, log_tensor_info, memory_logger, track_ten
 class SemanticAwareClassifier(nn.Module):
     """
     Extension of base TabPFN or similar models with a CLIP-style semantic head.
-    This model uses CLIP's text encoder directly to compare tabular features with
-    text descriptions using a contrastive approach similar to the original CLIP paper.
+    
+    Rather than projecting numeric features to CLIP space, this model:
+    1. Takes dedicated semantic token features (which are actual text tokens)
+    2. Processes them directly with CLIP's text encoder
+    3. Uses contrastive learning to align semantic features with class distributions
     """
     
     def __init__(self, base_model, num_semantic_classes):
@@ -21,21 +24,15 @@ class SemanticAwareClassifier(nn.Module):
         base_model : nn.Module
             The base tabular model (TabPFN, MotherNet, etc.)
         num_semantic_classes : int
-            Number of semantic classes to predict (only used for compatibility)
+            Number of semantic classes to predict
         """
         super().__init__()
-        
-        # Track debugging information for numerical stability
-        self.nan_grad_counts = {}
-        self.grad_stats = {}
-        self.cuda_safe_init = True  # Flag to use CUDA-safe initialization
-        self._needs_reset = False   # Flag to indicate parameters need reset after backward
         
         # Store the base model
         self.base_model = base_model
         
-        # Embedding size from the base model
-        self.emsize = base_model.emsize
+        # Embed sizes
+        self.emsize = base_model.emsize  # For base model 
         
         # Inherit attributes from base model for compatibility with train.py
         self.n_out = base_model.n_out
@@ -49,7 +46,7 @@ class SemanticAwareClassifier(nn.Module):
         # Import CLIP-related modules
         from transformers import CLIPTokenizerFast, CLIPTextModel
         
-        # Store semantic class count for compatibility
+        # Store semantic class count
         self.num_semantic_classes = num_semantic_classes
         self.num_tokens_per_class = 5  # Top-k tokens per semantic class for interpretability
         
@@ -63,203 +60,62 @@ class SemanticAwareClassifier(nn.Module):
         # Freeze CLIP text encoder parameters by default
         for param in self.clip_text_model.parameters():
             param.requires_grad = False
-            
-        # Get transformer dimensions from the CLIP model
-        transformer_dim = self.clip_text_model.config.hidden_size  # Usually 512 for base model
         
-        # Project tabular features to CLIP embedding space with normalization
-        self.semantic_projection = nn.Sequential(
-            nn.Linear(self.emsize, transformer_dim),
-            nn.LayerNorm(transformer_dim, eps=1e-2),  # Add normalization with higher epsilon for stability
-            nn.Dropout(0.1)  # Add dropout to prevent overfitting
-        )
-        
-        # Register gradient hook on the semantic projection to catch and fix NaN/Inf values
-        for name, param in self.semantic_projection.named_parameters():
-            if param.requires_grad:
-                param.register_hook(lambda grad, pname=name: self._gradient_hook(grad, pname))
-        
-        # Feature enhancement network to better align tabular features with text space
-        # Enhanced with more normalization and activation layers + CUDA-specific stability fixes
-        self.feature_enhancer = nn.Sequential(
-            nn.LayerNorm(transformer_dim, eps=1e-2),  # Normalize inputs with higher epsilon
-            nn.Linear(transformer_dim, transformer_dim * 2),
-            nn.LayerNorm(transformer_dim * 2, eps=1e-2),
-            nn.GELU(),
-            nn.Dropout(0.2),  # Increased dropout for more regularization
-            nn.Linear(transformer_dim * 2, transformer_dim),
-            nn.LayerNorm(transformer_dim, eps=1e-2)  # Final normalization layer with higher epsilon
-        )
-        
-        # Register gradient hooks on the feature enhancer to catch and fix NaN/Inf values
-        for name, param in self.feature_enhancer.named_parameters():
-            if param.requires_grad:
-                param.register_hook(lambda grad, pname=name: self._gradient_hook(grad, f"enhancer.{pname}"))
+        # Get transformer dimensions
+        self.transformer_dim = self.clip_text_model.config.hidden_size  # Usually 512 for base model
         
         # Temperature parameter for similarity scaling (learnable but bounded)
-        # Start with a more conservative temperature (0.1 instead of 0.07)
-        # This is especially important for training stability
         initial_temp = np.log(1 / 0.1)
         self.logit_scale = nn.Parameter(torch.ones([]) * initial_temp)
         
-        # Register a hook to clamp the logit_scale parameter to prevent it from exploding
-        def clamp_logit_scale(grad):
-            # This will keep logit_scale.exp() between exp(-3) and exp(3)
-            max_val = 3.0
-            min_val = -3.0
-            current_val = self.logit_scale.data
-            if current_val > max_val or current_val < min_val:
-                self.logit_scale.data.clamp_(min=min_val, max=max_val)
-            return grad
-        
-        self.logit_scale.register_hook(clamp_logit_scale)
-        
-        # Initialize parameters with CUDA-safe values
-        self._initialize_parameters()
+        # Token statistics for interpretation
+        self.token_stats = {}
     
-    def _initialize_parameters(self):
+    def _process_semantic_tokens(self, semantic_tokens):
         """
-        Initialize model parameters with additional stability measures for CUDA.
-        - Uses smaller variance for weight initialization
-        - Ensures LayerNorm parameters are initialized in a stable range
-        """
-        if not self.cuda_safe_init:
-            return  # Skip if safe init is disabled
-        
-        # Initialize projection layer with special care
-        for name, module in self.semantic_projection.named_modules():
-            if isinstance(module, nn.Linear):
-                # Use smaller standard deviation for linear layers
-                nn.init.normal_(module.weight, mean=0.0, std=0.01)
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
-            elif isinstance(module, nn.LayerNorm):
-                # Initialize LayerNorm more carefully to avoid extreme values
-                nn.init.ones_(module.weight)
-                nn.init.zeros_(module.bias)
-                
-        # Initialize enhancer with the same careful approach
-        for name, module in self.feature_enhancer.named_modules():
-            if isinstance(module, nn.Linear):
-                # Use smaller standard deviation for linear layers
-                nn.init.normal_(module.weight, mean=0.0, std=0.01)
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
-            elif isinstance(module, nn.LayerNorm):
-                nn.init.ones_(module.weight)
-                nn.init.zeros_(module.bias)
-        
-        print("Initialized semantic components with CUDA-safe values")
-        
-    def reset_parameters_if_needed(self):
-        """
-        Safely reset parameters if NaNs were detected during forward pass.
-        This should be called AFTER backward() and BEFORE optimizer.step()
-        """
-        if not self._needs_reset:
-            return
-        
-        print("EXECUTING PARAMETER RESET: Reinitializing semantic components due to NaN detection")
-        with torch.no_grad():
-            # Reset projection layer
-            for name, module in self.semantic_projection.named_modules():
-                if isinstance(module, nn.Linear):
-                    nn.init.normal_(module.weight, mean=0.0, std=0.001)
-                    if module.bias is not None:
-                        nn.init.zeros_(module.bias)
-                elif isinstance(module, nn.LayerNorm):
-                    nn.init.ones_(module.weight)
-                    nn.init.zeros_(module.bias)
-                    
-            # Reset enhancer layer
-            for name, module in self.feature_enhancer.named_modules():
-                if isinstance(module, nn.Linear):
-                    nn.init.normal_(module.weight, mean=0.0, std=0.001)
-                    if module.bias is not None:
-                        nn.init.zeros_(module.bias)
-                elif isinstance(module, nn.LayerNorm):
-                    nn.init.ones_(module.weight)
-                    nn.init.zeros_(module.bias)
-                    
-        # Reset the flag
-        self._needs_reset = False
-        print("Parameter reset complete")
-    
-    def _gradient_hook(self, grad, param_name):
-        """
-        Custom gradient hook to catch and fix NaN/Inf values in gradients.
-        This is especially important for CUDA stability.
+        Process semantic tokens using the CLIP text encoder.
         
         Parameters:
         -----------
-        grad : torch.Tensor
-            The gradient tensor
-        param_name : str
-            Name of the parameter
+        semantic_tokens : torch.Tensor
+            Semantic token IDs [batch_size, seq_len]
             
         Returns:
         --------
         torch.Tensor
-            Fixed gradient tensor
+            CLIP text embeddings [batch_size, transformer_dim]
         """
-        if grad is None:
-            return None
-            
-        # Count NaN and Inf values
-        nan_count = torch.isnan(grad).sum().item()
-        inf_count = torch.isinf(grad).sum().item()
+        # Ensure tokens are on the right device
+        device = semantic_tokens.device
         
-        # Track counts for debugging
-        if param_name not in self.nan_grad_counts:
-            self.nan_grad_counts[param_name] = 0
+        # Format tokens for CLIP
+        attention_mask = (semantic_tokens != -100).long()
+        input_ids = torch.where(semantic_tokens == -100, 
+                                torch.tensor(self.tokenizer.pad_token_id, device=device), 
+                                semantic_tokens)
         
-        if nan_count > 0 or inf_count > 0:
-            self.nan_grad_counts[param_name] += 1
-            
-            # Print warning only occasionally to avoid spam
-            if self.nan_grad_counts[param_name] % 10 == 1:
-                device_type = grad.device.type
-                print(f"WARNING: {device_type} gradient for {param_name} contains {nan_count} NaN and {inf_count} Inf values")
-                
-                # Collect stats only on problematic gradients
-                if grad.numel() > 0:
-                    # Create masked version for valid statistics
-                    valid_mask = ~(torch.isnan(grad) | torch.isinf(grad))
-                    if valid_mask.any():
-                        valid_grad = grad[valid_mask]
-                        grad_abs_max = valid_grad.abs().max().item()
-                        grad_mean = valid_grad.mean().item()
-                        grad_std = valid_grad.std().item()
-                        print(f"  - Valid values - max abs: {grad_abs_max:.6f}, mean: {grad_mean:.6f}, std: {grad_std:.6f}")
-                
-            # Replace NaN/Inf with zeros
-            grad = torch.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0)
+        # Create input dict for CLIP
+        token_dict = {
+            'input_ids': input_ids,
+            'attention_mask': attention_mask
+        }
         
-        # Clip extremely large gradients (different thresholds for different devices)
-        if grad.device.type == 'cuda':
-            # More aggressive clipping for CUDA
-            max_norm = 1.0
-        else:
-            # Standard clipping for CPU/MPS
-            max_norm = 5.0
-            
-        # Apply per-tensor gradient clipping
-        grad_norm = grad.norm()
-        if grad_norm > max_norm:
-            grad = grad * (max_norm / (grad_norm + 1e-6))
-            
-        return grad
+        # Process with CLIP text encoder
+        with torch.set_grad_enabled(self.clip_text_model.parameters()[0].requires_grad):
+            outputs = self.clip_text_model(**token_dict)
+        
+        # Return pooled embeddings
+        return outputs.pooler_output
     
     def forward(self, x, single_eval_pos=None, class_texts=None):
         """
-        Forward pass with CLIP-style text-tabular contrastive learning.
-        This implementation directly encodes class text descriptions with CLIP
-        and computes similarities with tabular features in a shared embedding space.
+        Forward pass that directly uses CLIP to encode semantic features.
         
         Parameters:
         -----------
-        x : torch.Tensor
-            Input tensor with shape [samples, batch, features]
+        x : torch.Tensor or tuple
+            Input tensor with shape [samples, batch, features] or
+            tuple of (x_data, semantic_tokens) with semantic_tokens of shape [batch, seq_len]
         single_eval_pos : int, optional
             Position to split training and evaluation data
         class_texts : list of str, optional
@@ -270,709 +126,108 @@ class SemanticAwareClassifier(nn.Module):
         dict
             Dictionary containing class_logits and semantic_logits
         """
-        log_gpu_memory("Start of SemanticAwareClassifier.forward")
-        # Pass the input through the base model's forward method 
-        # which properly handles single_eval_pos
-        base_output = self.base_model(x, single_eval_pos=single_eval_pos)
+        # Extract semantic tokens if provided in tuple format
+        semantic_tokens = None
+        if isinstance(x, tuple) and len(x) >= 2:
+            if len(x) == 3:
+                # Format with style: (style, x_data, semantic_tokens)
+                style, x_data, semantic_tokens = x
+                # Pass style and data to base model
+                base_input = (style, x_data)
+            else:
+                # Format: (x_data, semantic_tokens)
+                x_data, semantic_tokens = x
+                base_input = x_data
+        else:
+            # Standard format
+            x_data = x
+            base_input = x
+        
+        # Forward pass on the base model
+        base_output = self.base_model(base_input, single_eval_pos=single_eval_pos)
         
         # Update semantic classes count if needed
         if isinstance(base_output, torch.Tensor) and len(base_output.shape) >= 3:
             num_output_classes = base_output.shape[-1]
             if num_output_classes != self.num_semantic_classes:
                 self.num_semantic_classes = num_output_classes
-                
-        # Store the base output for the return value, but detach it for the computation graph
-        # This prevents gradients from the semantic loss from flowing back to the base model
-        base_output_for_computation = base_output
         
-        # Extract features based on model type
-        if hasattr(self.base_model, 'features') and self.base_model.features is not None:
-            # If the base model directly exposes features (preferred method)
-            features = self.base_model.features.detach()  # Detach to prevent gradient flow back to base model
+        # Process semantic tokens directly with CLIP if provided
+        semantic_embeddings = None
+        if semantic_tokens is not None:
+            semantic_embeddings = self._process_semantic_tokens(semantic_tokens)
         
-        # Check for TabFlex model
-        elif hasattr(self.base_model, 'get_cls_embedding'):
-            # TabFlex models have a get_cls_embedding method for classification token
-            features = self.base_model.get_cls_embedding().detach()  # Detach from graph
-            
-            # Handle test set specific features for TabFlex
-            if single_eval_pos is not None and hasattr(features, 'shape') and len(features.shape) > 1:
-                if single_eval_pos < features.shape[0]:
-                    # Use only evaluation samples for semantic features
-                    features = features[single_eval_pos:]
-                    # Average over samples if needed
-                    if len(features.shape) > 2:
-                        features = features.mean(dim=0)
-        
-        # Check for TabPFN model with encoder + transformer structure
-        elif hasattr(self.base_model, 'transformer_encoder') and hasattr(self.base_model, 'encoder'):
-            if len(x) == 3:  # style is given
-                style_src, x_src, y_src = x
-            else:
-                x_src, y_src = x
-            
-            # Encode input features and detach from base model computation graph
-            # We need to run encoder with no_grad to ensure we don't backprop through it
-            with torch.no_grad():
-                x_encoded = self.base_model.encoder(x_src)
-            
-            # Create a detached copy that requires grad for semantic model
-            x_encoded = x_encoded.detach().clone().requires_grad_(True)
-            
-            # For semantic features, we'll use features from the test set
-            if single_eval_pos is not None and single_eval_pos < x_encoded.shape[0]:
-                # Use only evaluation samples for semantic features
-                features = x_encoded[single_eval_pos:]
-                # Average over samples to get a [batch_size, emsize] tensor
-                features = features.mean(dim=0)
-            else:
-                # Fallback: use all samples and average them
-                features = x_encoded.mean(dim=0)
-                
-        # Check for MotherNet or other models with hidden states
-        elif hasattr(self.base_model, 'hidden_states') and self.base_model.hidden_states is not None:
-            # Use last layer's hidden states but detach from base model computation graph
-            features = self.base_model.hidden_states[-1].detach().clone().requires_grad_(True)
-            
-            # Extract test set features if applicable
-            if single_eval_pos is not None and single_eval_pos < features.shape[0]:
-                features = features[single_eval_pos:]
-                
-            # Average if needed
-            if len(features.shape) > 2:
-                features = features.mean(dim=0)
-                
-        else:
-            # Last resort fallback - try to extract from the output
-            if len(base_output.shape) == 3:
-                # Average over samples to get [batch_size, output_dim]
-                # Detach from base model computation graph
-                features = base_output.detach().clone().requires_grad_(True).mean(dim=0)
-            else:
-                # Otherwise use as is, but detached
-                features = base_output.detach().clone().requires_grad_(True)
-        
-        # Handle feature dimension mismatch
-        if features.shape[-1] != self.emsize:
-            # Reshape features if possible to match emsize
-            if features.numel() > 0 and features.numel() % self.emsize == 0:
-                features = features.reshape(-1, self.emsize)
-            else:
-                # Create default features as fallback for training to continue
-                features = torch.zeros((features.shape[0] if len(features.shape) > 1 else 1, self.emsize), 
-                                       device=features.device, dtype=features.dtype)
-        
-        # Check features for extreme or NaN values before projection
-        if torch.isnan(features).any() or torch.isinf(features).any():
-            features = torch.nan_to_num(features, nan=0.0, posinf=1.0, neginf=-1.0)
-            
-            # Detect if values are very large, which could indicate instability
-            max_val = features.abs().max().item()
-            if max_val > 100.0:
-                memory_logger.warning(f"Very large feature values detected (max={max_val:.2f}), applying normalization")
-                # Apply feature-wise normalization to bring values to reasonable range
-                features = features / (features.norm(dim=-1, keepdim=True) + 1e-4)
-                
-        # IMPORTANT: Check for mixed precision issues on CUDA - this is critical for numerical stability
-        if features.device.type == 'cuda':
-            # BFloat16 and Float16 have significantly reduced precision which can cause NaNs
-            orig_dtype = features.dtype
-            if orig_dtype in [torch.bfloat16, torch.float16]:
-                print(f"⚠️ Mixed precision detected: {orig_dtype}. Converting to float32 for numerical stability")
-                # Always use float32 for the semantic projection on CUDA regardless of autocast settings
-                features = features.to(torch.float32)
-                
-                # Force all parameters in semantic_projection to float32 as well
-                for param in self.semantic_projection.parameters():
-                    if param.dtype != torch.float32:
-                        param.data = param.data.to(torch.float32)
-        
-        print(f"Features sample (first 20):")
-        if features.numel() > 0:
-            print(features.flatten()[:20])
-
-        # Project features to CLIP text model dimension with enhanced error handling
-        try:
-            # Now using sequential model with built-in normalization and dropout
-            projected_features = self.semantic_projection(features)
-            
-            # Ensure projected features are in a stable format
-            if projected_features.device.type == 'cuda' and projected_features.dtype in [torch.bfloat16, torch.float16]:
-                print(f"Converting projected features from {projected_features.dtype} to float32")
-                projected_features = projected_features.to(torch.float32)
-            print(f"Projected features sample (first 20):")
-            if projected_features.numel() > 0:
-                print(projected_features.flatten()[:20])
-            
-            # Extra check for NaNs after projection - CRITICAL CHECK
-            if torch.isnan(projected_features).any() or torch.isinf(projected_features).any():
-                memory_logger.warning("NaN or Inf values detected after projection, using fallback")
-                transformer_dim = self.clip_text_model.config.hidden_size
-                
-                # Insert breakpoint if on CUDA for inspection when NaNs first happen
-                if features.device.type == 'cuda':
-                    print(f"CRITICAL: NaN detected in semantic projection on CUDA - ADDING BREAKPOINT")
-                    print(f"Features shape: {features.shape}, Projected features shape: {projected_features.shape}")
-                    
-                    # Print information about the state before the breakpoint
-                    nan_positions = torch.isnan(projected_features)
-                    inf_positions = torch.isinf(projected_features)
-                    nan_count = nan_positions.sum().item()
-                    inf_count = inf_positions.sum().item()
-                    print(f"NaN count: {nan_count}, Inf count: {inf_count}")
-                    
-                    # Sample some values from features
-                    
-                        
-                    # Check the weights of the semantic projection module
-                    print(f"Semantic projection weights sample:")
-                    for name, param in self.semantic_projection.named_parameters():
-                        if 'weight' in name:
-                            print(f"  {name} shape: {param.shape}")
-                            print(f"  {name} stats - min: {param.min().item():.6f}, max: {param.max().item():.6f}")
-                            print(f"  {name} sample (first 5): {param.flatten()[:5]}")
-                            
-                            # Check if there are NaNs in weights
-                            if torch.isnan(param).any() or torch.isinf(param).any():
-                                nan_weight_count = torch.isnan(param).sum().item()
-                                inf_weight_count = torch.isinf(param).sum().item()
-                                print(f"  WARNING: {name} has {nan_weight_count} NaNs and {inf_weight_count} Infs")
-                            
-                    # Add an interactive breakpoint
-                    import pdb; pdb.set_trace()
-                
-                # Don't just replace with zeros - try to save what we can first
-                projected_features = torch.nan_to_num(projected_features, nan=0.0, posinf=1.0, neginf=-1.0)
-                
-                # Flag parameter issues but DO NOT modify parameters in-place (breaks autograd)
-                if features.device.type == 'cuda':
-                    print(f"CRITICAL: NaN detected in semantic projection on CUDA")
-                    # Set a flag to trigger weight reset AFTER backward pass completes
-                    self._needs_reset = True
-                
-                # Check again - if still issues, fall back to completely new tensor
-                if torch.isnan(projected_features).any() or torch.isinf(projected_features).any():
-                    projected_features = torch.zeros((features.shape[0] if len(features.shape) > 1 else 1, transformer_dim), 
-                                                  device=features.device)
-                    # Add small random noise for gradient flow - use smaller values for CUDA
-                    noise_scale = 0.005 if features.device.type == 'cuda' else 0.01
-                    projected_features = projected_features + torch.randn_like(projected_features) * noise_scale
-        except Exception as e:
-            # Create fallback projected features with detailed error logging
-            transformer_dim = self.clip_text_model.config.hidden_size
-            projected_features = torch.zeros((features.shape[0] if len(features.shape) > 1 else 1, transformer_dim), 
-                                            device=features.device)
-            # Add small random noise for gradient flow
-            projected_features = projected_features + torch.randn_like(projected_features) * 0.01
-        
-        # Add batch dimension if needed (for single sample case)
-        if len(projected_features.shape) == 1:
-            projected_features = projected_features.unsqueeze(0)
-        
-        batch_size = projected_features.shape[0]
-        
-        # Apply feature enhancement with extra safety checks
-        try:
-            # Ensure projected features are in float32 for CUDA before feature enhancement
-            if projected_features.device.type == 'cuda':
-                # Force parameters to float32 for stable computation
-                orig_dtype = projected_features.dtype
-                if orig_dtype in [torch.bfloat16, torch.float16]:
-                    # Log the conversion since this is important for debugging
-                    print(f"Converting projected features to float32 before feature enhancer (from {orig_dtype})")
-                    projected_features = projected_features.to(torch.float32)
-                    
-                    # Also make sure the enhancer parameters are in float32
-                    for param in self.feature_enhancer.parameters():
-                        if param.dtype != torch.float32:
-                            param.data = param.data.to(torch.float32)
-            
-            # Feature enhancer now has built-in normalization layers
-            tabular_features = self.feature_enhancer(projected_features)
-            
-            # Check for NaNs after enhancement - critical stability check
-            if torch.isnan(tabular_features).any() or torch.isinf(tabular_features).any():
-                memory_logger.warning("NaN or Inf values detected after feature enhancement, using fallback")
-                
-                # Insert breakpoint if on CUDA for inspection when NaNs first happen
-                if projected_features.device.type == 'cuda':
-                    print(f"CRITICAL: NaN detected in feature enhancer on CUDA - ADDING BREAKPOINT")
-                    print(f"Projected features shape: {projected_features.shape}, Tabular features shape: {tabular_features.shape}")
-                    
-                    # Print information about the state before the breakpoint
-                    nan_positions = torch.isnan(tabular_features)
-                    inf_positions = torch.isinf(tabular_features)
-                    nan_count = nan_positions.sum().item()
-                    inf_count = inf_positions.sum().item()
-                    print(f"NaN count: {nan_count}, Inf count: {inf_count}")
-                    
-                    # Sample some values from projected features (input to enhancer)
-                    print(f"Projected features sample (first 5):")
-                    if projected_features.numel() > 0:
-                        print(projected_features.flatten()[:5])
-                        
-                    # Check the weights of the feature enhancer module
-                    print(f"Feature enhancer weights sample:")
-                    for name, param in self.feature_enhancer.named_parameters():
-                        if 'weight' in name:
-                            print(f"  {name} shape: {param.shape}")
-                            print(f"  {name} stats - min: {param.min().item():.6f}, max: {param.max().item():.6f}")
-                            print(f"  {name} sample (first 5): {param.flatten()[:5]}")
-                            
-                            # Check if there are NaNs in weights
-                            if torch.isnan(param).any() or torch.isinf(param).any():
-                                nan_weight_count = torch.isnan(param).sum().item()
-                                inf_weight_count = torch.isinf(param).sum().item()
-                                print(f"  WARNING: {name} has {nan_weight_count} NaNs and {inf_weight_count} Infs")
-                    
-                    # Add an interactive breakpoint
-                    import pdb; pdb.set_trace()
-                
-                # Try to fix the values in place first
-                tabular_features = torch.nan_to_num(tabular_features, nan=0.0, posinf=1.0, neginf=-1.0)
-                
-                # Flag enhancer issues but DO NOT modify parameters in-place (breaks autograd)
-                if projected_features.device.type == 'cuda':
-                    print(f"CRITICAL: NaN detected in feature enhancer on CUDA")
-                    # Set a flag to trigger weight reset AFTER backward pass completes
-                    self._needs_reset = True
-                
-                # If still have issues, fall back to using the projected features directly
-                if torch.isnan(tabular_features).any() or torch.isinf(tabular_features).any():
-                    print(f"Using projected features as fallback due to persistent NaNs in enhancer")
-                    tabular_features = projected_features  # Fallback to just the projected features
-                    # Apply simple normalization with higher epsilon
-                    tabular_features = F.normalize(tabular_features, dim=1, eps=1e-2)
-        except Exception as e:
-            memory_logger.error(f"Feature enhancement failed: {e}")
-            # Fallback to just normalized projected features
-            tabular_features = F.normalize(projected_features, dim=1)
-        
-        # Average pooling over batch if needed
-        if tabular_features.dim() > 2:
-            tabular_features = tabular_features.mean(dim=1)
-        
-        # Final normalization with safety bounds - device specific settings
-        device_type = tabular_features.device.type
-        
-        # Apply different clipping bounds based on device
-        if device_type == 'cuda':
-            # More restrictive bounds for CUDA
-            tabular_features = torch.clamp(tabular_features, min=-5.0, max=5.0)
-            # Use larger epsilon for CUDA
-            tabular_features = F.normalize(tabular_features, dim=1, eps=1e-2)
-        else:
-            # Standard bounds for MPS/CPU 
-            tabular_features = torch.clamp(tabular_features, min=-10.0, max=10.0)
-            # Standard epsilon for MPS/CPU
-            tabular_features = F.normalize(tabular_features, dim=1, eps=1e-3)
-        
-        # Extra CUDA stability check - if still have NaNs, flag for emergency reset
-        if device_type == 'cuda' and (torch.isnan(tabular_features).any() or torch.isinf(tabular_features).any()):
-            print(f"EMERGENCY: Persistent NaNs even after normalization - will reset semantic model parameters")
-            # Flag for reset but DO NOT modify parameters in-place (breaks autograd)
-            self._needs_reset = True
-            # Create safe random features as a fallback of last resort
-            transformer_dim = self.clip_text_model.config.hidden_size
-            batch_shape = tabular_features.shape[0]
-            tabular_features = torch.zeros((batch_shape, transformer_dim), device=tabular_features.device)
-            # Add very small noise
-            tabular_features = tabular_features + torch.randn_like(tabular_features) * 0.001
-            # Apply final normalization
-            tabular_features = F.normalize(tabular_features, dim=1, eps=1e-2)
-        
-        # ===== Process class texts with CLIP text encoder =====
+        # Process class texts with CLIP if provided
         text_features = None
         all_token_texts = []
-        text_tokens = None  # Track for memory management
         
-        # Process class texts if available
+        # Process provided class texts with CLIP
         if class_texts and len(class_texts) > 0:
-            
-            # Create CLIP embeddings for class texts
-            # Using a balanced approach for different devices
             with torch.no_grad():
-                # Determine the best device for running CLIP
-                # For MPS (Apple Silicon) and CUDA, use the same device as model
-                # This prevents "Expected all tensors to be on the same device" errors
-                if tabular_features.device.type in ['mps', 'cuda']:
-                    # For MPS and CUDA, it's safer to run on the same device
-                    clip_device = tabular_features.device
-                else:
-                    # For CPU, continue using CPU
-                    clip_device = "cpu"
-                
-                text_features_list = []
-                
-                # Process in batches to control memory usage
+                # Process text descriptions in batches to manage memory
                 batch_size = min(16, len(class_texts))
+                text_features_list = []
                 
                 for i in range(0, len(class_texts), batch_size):
                     batch_texts = class_texts[i:i+batch_size]
                     
-                    # Tokenize text batch with CLIP tokenizer
+                    # Tokenize texts
                     text_tokens = self.tokenizer(
                         batch_texts,
                         padding="max_length",
                         truncation=True,
                         max_length=77,
                         return_tensors="pt"
-                    )
+                    ).to(semantic_tokens.device if semantic_tokens is not None else base_output.device)
                     
-                    # Move tokens to the appropriate device
-                    text_tokens = {k: v.to(clip_device) for k, v in text_tokens.items()}
+                    # Get text embeddings
+                    batch_outputs = self.clip_text_model(**text_tokens)
+                    batch_text_features = batch_outputs.pooler_output
+                    text_features_list.append(batch_text_features)
                     
-                    try:
-                        # Extract text features with CLIP text encoder
-                        batch_outputs = self.clip_text_model(**text_tokens)
-                        batch_text_features = batch_outputs.pooler_output
-                        text_features_list.append(batch_text_features)
-                    except Exception as e:
-                        memory_logger.error(f"Error processing text batch: {e}")
-                        # Try again with CPU as fallback for any device-specific error
-                        try:
-                            check = clip_device.type != 'cpu'
-                        except:
-                            check = clip_device != 'cpu'
-                        if check:
-                            # Move tokens to CPU
-                            cpu_tokens = {k: v.to('cpu') for k, v in text_tokens.items()}
-                            try:
-                                # Process on CPU
-                                batch_outputs = self.clip_text_model.to('cpu')(**cpu_tokens)
-                                batch_text_features = batch_outputs.pooler_output
-                                text_features_list.append(batch_text_features)
-                                # Move model back to original device
-                                self.clip_text_model.to(clip_device)
-                            except Exception as e2:
-                                memory_logger.error(f"CPU fallback also failed: {e2}")
-                                # Return empty features as ultimate fallback
-                                continue
-                    
-                    # Store token information for interpretability
+                    # Store tokenization info for interpretability
                     for j, text in enumerate(batch_texts):
-                        # Access tokens through the dictionary (we converted text_tokens to a dict earlier)
                         token_ids = text_tokens['input_ids'][j].tolist()
+                        token_texts = self.tokenizer.convert_ids_to_tokens(token_ids)
+                        token_texts = [t for t in token_texts if t not in 
+                                     ['<pad>', '<|startoftext|>', '<|endoftext|>']]
                         
-                        try:
-                            # Convert token IDs to actual token texts
-                            token_texts = self.tokenizer.convert_ids_to_tokens(token_ids)
-                            # Filter out special tokens
-                            token_texts = [t for t in token_texts if t not in ['<pad>', '<|startoftext|>', '<|endoftext|>']]
-                            
-                            # Create token info dictionary
-                            class_tokens = {
-                                'text': text,
-                                'tokens': token_texts[:self.num_tokens_per_class],
-                                'class_idx': i + j,
-                            }
-                            all_token_texts.append(class_tokens)
-                        except Exception as e:
-                            # Add a simpler version without tokenization
-                            class_tokens = {
-                                'text': text,
-                                'tokens': ['<token_error>'],
-                                'class_idx': i + j,
-                            }
-                            all_token_texts.append(class_tokens)
-                    
-                    # Clean up batch tensors
-                    del text_tokens
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
+                        all_token_texts.append({
+                            'text': text,
+                            'tokens': token_texts[:self.num_tokens_per_class],
+                            'class_idx': i + j
+                        })
                 
-                # If we have any features, concatenate them
-                if len(text_features_list) > 0:
+                # Concatenate all text features
+                if text_features_list:
                     text_features = torch.cat(text_features_list, dim=0)
                     
-                    # Move to same device as tabular features if needed for computation
-                    if tabular_features.device.type != text_features.device.type:
-                        try:
-                            # Try to move text features to match tabular features
-                            text_features = text_features.to(tabular_features.device)
-                        except RuntimeError as e:
-                            memory_logger.error(f"Failed to move text features to {tabular_features.device}: {e}")
-                            # Fall back to moving tabular features to text device as a last resort
-                            tabular_features = tabular_features.to(text_features.device)
+                    # Ensure text features are on the same device
+                    device = semantic_embeddings.device if semantic_embeddings is not None else base_output.device
+                    text_features = text_features.to(device)
                     
-                    # Normalize text features for cosine similarity
+                    # Normalize for similarity computation
                     text_features = F.normalize(text_features, dim=1)
-                else:
-                    # Handle the case where all batches failed
-                    memory_logger.warning(f"No text features were successfully processed")
-                    text_features = None
-                
-                # Clean up intermediates
-                del text_features_list
         
-        # ===== Compute CLIP-style contrastive similarities =====
-        # If we have text features, compute cosine similarity scaled by temperature
-        if text_features is not None:
-            # Check features for NaN values first and fix if needed
-            if torch.isnan(tabular_features).any() or torch.isinf(tabular_features).any():
-                memory_logger.warning("NaN or inf values detected in tabular features, applying stabilization")
-                tabular_features = torch.nan_to_num(tabular_features, nan=0.0, posinf=1.0, neginf=-1.0)
-                
-                # Apply device-specific re-normalization after fixing NaNs
-                if tabular_features.device.type == 'cuda':
-                    # Check if the weights in the projection or enhancer have gone NaN
-                    # If so, this indicates a deeper problem that needs to be addressed
-                    has_nan_params = False
-                    with torch.no_grad():
-                        for name, param in self.semantic_projection.named_parameters():
-                            if torch.isnan(param).any() or torch.isinf(param).any():
-                                has_nan_params = True
-                                print(f"CRITICAL: NaN weights detected in semantic_projection.{name}")
-                        
-                        for name, param in self.feature_enhancer.named_parameters():
-                            if torch.isnan(param).any() or torch.isinf(param).any():
-                                has_nan_params = True
-                                print(f"CRITICAL: NaN weights detected in feature_enhancer.{name}")
-                    
-                    # Flag for reset but DO NOT modify parameters in-place (breaks autograd)
-                    if has_nan_params:
-                        print("EMERGENCY: Detected NaN weights - will reset parameters after backward pass")
-                        self._needs_reset = True
-                    
-                    # Use larger epsilon for CUDA (safer)
-                    tabular_features = F.normalize(tabular_features, dim=1, eps=1e-2)
-                else:
-                    # Standard epsilon for MPS/CPU
-                    tabular_features = F.normalize(tabular_features, dim=1, eps=1e-3)
-                
-            if torch.isnan(text_features).any() or torch.isinf(text_features).any():
-                memory_logger.warning("NaN or inf values detected in text features, applying stabilization")
-                text_features = torch.nan_to_num(text_features, nan=0.0, posinf=1.0, neginf=-1.0)
-                
-                # Apply device-specific re-normalization after fixing NaNs
-                if text_features.device.type == 'cuda':
-                    # Use larger epsilon for CUDA
-                    text_features = F.normalize(text_features, dim=1, eps=1e-2)
-                else:
-                    # Standard epsilon for MPS/CPU
-                    text_features = F.normalize(text_features, dim=1, eps=1e-3)
+        # Calculate semantic similarity if we have both semantic embeddings and text features
+        semantic_logits = None
+        if semantic_embeddings is not None and text_features is not None:
+            # Normalize semantic embeddings
+            semantic_embeddings_norm = F.normalize(semantic_embeddings, dim=1)
             
-            try:
-                # Get temperature-scaled logits (similar to CLIP) with safety bounds
-                # Clamp logit_scale to avoid extreme values which can cause overflow
-                logit_scale_raw = self.logit_scale.clamp(min=-5, max=5)  # Much tighter bounds
-                
-                # Use a fixed small scale value for the first few epochs to stabilize training
-                # After training stabilizes, we can switch to using the learned parameter
-                epoch_count = getattr(self, '_epoch_count', 0)
-                warmup_epochs = 10  # Use fixed scale for this many epochs
-                
-                if epoch_count < warmup_epochs:
-                    # Use fixed small scale during warmup 
-                    logit_scale = torch.tensor(5.0, device=tabular_features.device)
-                else:
-                    # Exponential moving average to smooth scale changes
-                    logit_scale = torch.exp(logit_scale_raw)
-                
-                # Additional safety check on the scale
-                if torch.isnan(logit_scale) or torch.isinf(logit_scale) or logit_scale > 100:
-                    print(f"FORWARD DIAGNOSTIC: Invalid logit scale: {logit_scale.item():.6f}, using safe default")
-                    logit_scale = torch.tensor(5.0, device=tabular_features.device)
-                
-                # Track the scale value used for metrics
-                self._last_logit_scale = logit_scale.item()
-                
-                # Compute similarity: [batch_size, embed_dim] x [embed_dim, n_classes]
-                # First compute raw similarity without scaling with extra safety
-                
-                # Additional stability checks for CUDA
-                if tabular_features.device.type == 'cuda':
-                    # CRITICAL: Ensure consistent data types for matrix multiplication on CUDA
-                    # This is the most likely source of NaNs in the model
-                    tabular_dtype = tabular_features.dtype
-                    text_dtype = text_features.dtype
-                    
-                    # Force float32 precision for critical computation regardless of autocast
-                    print(f"⚠️ Using float32 for critical similarity computation (overriding autocast)")
-                    print(f"Original dtypes - tabular: {tabular_dtype}, text: {text_dtype}")
-                    
-                    # Convert both tensors to float32 explicitly
-                    tabular_features_fp32 = tabular_features.to(torch.float32)
-                    text_features_fp32 = text_features.to(torch.float32)
-                    
-                    # Double check normalization with strong epsilon before matmul
-                    tabular_features_fp32 = F.normalize(tabular_features_fp32, dim=1, eps=1e-2)
-                    text_features_fp32 = F.normalize(text_features_fp32, dim=1, eps=1e-2)
-                    
-                    # Print diagnostic information about tensor shapes and devices
-                    print(f"Tensor shapes before matmul - tabular: {tabular_features_fp32.shape}, text: {text_features_fp32.shape}")
-                    print(f"Tensor dtypes before matmul - tabular: {tabular_features_fp32.dtype}, text: {text_features_fp32.dtype}")
-                    
-                    # CRITICAL: Disable autocast temporarily for this computation
-                    # This ensures the matrix multiplication is done in full precision
-                    autocast_enabled = torch.is_autocast_enabled()
-                    if autocast_enabled:
-                        print("🔍 Autocast is enabled - temporarily disabling it for stable computation")
-                
-                # Compute similarity matrix with more careful error handling
-                try:
-                    # Use different computation paths based on device
-                    if tabular_features.device.type == 'cuda':
-                        # For CUDA: Temporarily disable autocast and use float32
-                        if autocast_enabled:
-                            with torch.cuda.amp.autocast(enabled=False):
-                                # This computation will be in full precision regardless of surrounding context
-                                raw_similarity = torch.matmul(tabular_features_fp32, text_features_fp32.transpose(0, 1))
-                                print(f"Matrix multiplication performed with autocast disabled")
-                        else:
-                            # Use the float32 tensors we prepared
-                            raw_similarity = torch.matmul(tabular_features_fp32, text_features_fp32.transpose(0, 1))
-                    else:
-                        # For CPU/MPS: Use regular computation
-                        raw_similarity = torch.matmul(tabular_features, text_features.transpose(0, 1))
-                    
-                    # Debug output
-                    print(f"Raw similarity shape: {raw_similarity.shape}, dtype: {raw_similarity.dtype}")
-                    if tabular_features.device.type == 'cuda':
-                        print(f"Raw similarity sample:\n{raw_similarity[:3,:3]}")
-                except Exception as e:
-                    print(f"Error in matrix multiplication: {e}")
-                    # Create fallback similarity matrix
-                    raw_similarity = torch.zeros((tabular_features.shape[0], text_features.shape[0]), 
-                                               device=tabular_features.device)
-                    raw_similarity = raw_similarity + torch.randn_like(raw_similarity) * 0.001
-                
-                # Print diagnostic info about the raw similarity values
-                raw_max = raw_similarity.abs().max().item()
-                
-                # Force raw_similarity to float32 on CUDA for numerical stability
-                if tabular_features.device.type == 'cuda' and raw_similarity.dtype != torch.float32:
-                    print(f"Converting raw_similarity from {raw_similarity.dtype} to float32 for stable scaling")
-                    raw_similarity = raw_similarity.to(torch.float32)
-                
-                # Apply a hard safety cap on the scale when raw values are already high
-                if raw_max > 0.5:  # If raw cosine similarity is already high
-                    adjusted_scale = min(logit_scale.item(), 5.0)
-                    print(f"FORWARD DIAGNOSTIC: Raw similarity high ({raw_max:.6f}), capping scale to {adjusted_scale:.6f}")
-                    
-                    # Use explicit dtype control for CUDA
-                    if tabular_features.device.type == 'cuda' and autocast_enabled:
-                        with torch.cuda.amp.autocast(enabled=False):
-                            # Force computation in float32 by explicitly creating the scale tensor in float32
-                            scale_tensor = torch.tensor(adjusted_scale, dtype=torch.float32, device=raw_similarity.device)
-                            semantic_logits = scale_tensor * raw_similarity
-                    else:
-                        # Convert logit_scale to float32 explicitly for consistent computation
-                        scale_tensor = torch.tensor(adjusted_scale, dtype=torch.float32, device=raw_similarity.device)
-                        semantic_logits = scale_tensor * raw_similarity
-                else:
-                    # Regular scaling with careful type handling
-                    if tabular_features.device.type == 'cuda' and autocast_enabled:
-                        with torch.cuda.amp.autocast(enabled=False):
-                            # Force computation in float32
-                            scale_tensor = logit_scale.to(torch.float32)
-                            semantic_logits = scale_tensor * raw_similarity
-                    else:
-                        # Convert to consistent dtype
-                        scale_tensor = logit_scale.to(raw_similarity.dtype)
-                        semantic_logits = scale_tensor * raw_similarity
-                        
-                # Print diagnostic info about the semantic logits
-                if tabular_features.device.type == 'cuda':
-                    print(f"Semantic logits dtype: {semantic_logits.dtype}, min: {semantic_logits.min().item():.4f}, max: {semantic_logits.max().item():.4f}")
-                
-                # Check for NaN or Inf in the resulting logits
-                if torch.isnan(semantic_logits).any() or torch.isinf(semantic_logits).any():
-                    memory_logger.warning("NaN or inf values detected in semantic_logits, applying numeric stabilization")
-                    
-                    # For CUDA, try more aggressive stabilization
-                    if semantic_logits.device.type == 'cuda':
-                        print(f"CRITICAL: NaN in semantic_logits on CUDA - ADDING BREAKPOINT")
-                        
-                        # Print detailed diagnostic information
-                        print(f"Raw similarity - min: {raw_similarity.min().item():.6f}, max: {raw_similarity.max().item():.6f}")
-                        print(f"Raw similarity - mean: {raw_similarity.mean().item():.6f}, std: {raw_similarity.std().item():.6f}")
-                        print(f"Logit scale used: {logit_scale.item():.6f}")
-                        
-                        # Check where the NaNs are coming from
-                        nan_positions = torch.isnan(semantic_logits)
-                        inf_positions = torch.isinf(semantic_logits)
-                        nan_count = nan_positions.sum().item()
-                        inf_count = inf_positions.sum().item()
-                        print(f"NaN count: {nan_count}, Inf count: {inf_count}")
-                        
-                        # Check the text and tabular features that were used in the computation
-                        print(f"Tabular features - min: {tabular_features.min().item():.6f}, max: {tabular_features.max().item():.6f}")
-                        print(f"Text features - min: {text_features.min().item():.6f}, max: {text_features.max().item():.6f}")
-                        
-                        # Check for any NaNs in the input features
-                        tabular_has_nan = torch.isnan(tabular_features).any().item()
-                        tabular_has_inf = torch.isinf(tabular_features).any().item()
-                        text_has_nan = torch.isnan(text_features).any().item()
-                        text_has_inf = torch.isinf(text_features).any().item()
-                        
-                        if tabular_has_nan or tabular_has_inf:
-                            print(f"WARNING: Input tabular features contain NaNs: {tabular_has_nan} or Infs: {tabular_has_inf}")
-                            
-                        if text_has_nan or text_has_inf:
-                            print(f"WARNING: Input text features contain NaNs: {text_has_nan} or Infs: {text_has_inf}")
-                        
-                        # Add an interactive breakpoint
-                        import pdb; pdb.set_trace()
-                        
-                        print(f"CRITICAL: NaN in semantic_logits on CUDA - applying drastic stabilization")
-                        # Apply more aggressive clamping for CUDA
-                        semantic_logits = torch.nan_to_num(semantic_logits, nan=0.0, posinf=5.0, neginf=-5.0)
-                        
-                        # Apply softmax to further stabilize - convert to probabilities then back to logits
-                        semantic_logits = F.softmax(semantic_logits, dim=-1)
-                        semantic_logits = torch.log(semantic_logits + 1e-6) * 1.0
-                    else:
-                        # Standard stabilization for MPS/CPU
-                        semantic_logits = torch.nan_to_num(semantic_logits, nan=0.0, posinf=100.0, neginf=-100.0)
-            except Exception as e:
-                memory_logger.error(f"Error computing contrastive similarities: {e}")
-                # Create fallback semantic logits with small random values
-                semantic_logits = torch.randn(
-                    (tabular_features.shape[0], text_features.shape[0]),
-                    device=tabular_features.device
-                ) * 0.01
-        else:
-            # No class texts provided - use fallback approach
-            
-            # Import the semantic data on demand
-            try:
-                # Instead of using the huge semantic data, create a smaller tensor with the right class count
-                semantic_logits = torch.zeros(
-                    (tabular_features.shape[0], self.num_semantic_classes),
-                    device=tabular_features.device
-                )
-                
-                # Fill with small random values to prevent all-zero gradients
-                semantic_logits = torch.randn_like(semantic_logits) * 0.01
-            except (ImportError, Exception) as e:
-                # Fallback to zeros
-                semantic_logits = torch.zeros(
-                    (tabular_features.shape[0], self.num_semantic_classes),
-                    device=tabular_features.device
-                )
+            # Calculate similarity with temperature scaling
+            scaled_logit = self.logit_scale.exp()
+            semantic_logits = scaled_logit * torch.matmul(semantic_embeddings_norm, text_features.t())
         
-        # Create the return dictionary with CLIP-style outputs
-        # Use original base_output for class_logits (non-detached)
-        # This ensures gradients from class loss flow normally to the base model
+        # Create return dictionary
         result = {
-            'class_logits': base_output,  # Original non-detached output from base model
-            'semantic_logits': semantic_logits,    # [batch_size, num_classes] - Connected to semantic model only
-            'tabular_features': tabular_features,  # Normalized tabular features - Connected to semantic model only
-            'text_features': text_features,        # Normalized text features (if available)
-            'token_texts': all_token_texts,        # Text tokenization info
+            'class_logits': base_output,
+            'semantic_logits': semantic_logits,
+            'semantic_embeddings': semantic_embeddings,
+            'text_features': text_features,
+            'token_texts': all_token_texts
         }
         
-        # Clean up intermediate tensors
-        del projected_features
-        if 'text_tokens' in locals() and text_tokens is not None:
-            del text_tokens
-        
-        # Memory cleanup
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            
-        log_gpu_memory("End of SemanticAwareClassifier.forward")
         return result
     
     def predict(self, x):
@@ -981,84 +236,43 @@ class SemanticAwareClassifier(nn.Module):
         
         Parameters:
         -----------
-        x : torch.Tensor
-            Input tensor
+        x : torch.Tensor or tuple
+            Input tensor or tuple of (x_data, semantic_tokens)
             
         Returns:
         --------
         dict
-            Dictionary containing class predictions, semantic predictions, and token sets
+            Dictionary containing class predictions and semantic predictions
         """
-        # Get model outputs and immediately move tensors to CPU to free GPU memory
+        # Get model outputs
         outputs = self.forward(x)
         
-        # Get class predictions from class logits and move to CPU
+        # Get class predictions
         class_preds = outputs['class_logits'].argmax(dim=-1).cpu()
         
-        # Get semantic class predictions and move to CPU
-        semantic_preds = outputs['semantic_logits'].argmax(dim=-1).cpu()
+        # Get semantic predictions if available
+        semantic_preds = None
+        if outputs['semantic_logits'] is not None:
+            semantic_preds = outputs['semantic_logits'].argmax(dim=-1).cpu()
         
-        # Process token predictions for interpretability
+        # Get token texts for interpretability
         token_texts = outputs['token_texts']
         
-        # Clean up GPU memory from forward pass
-        if 'token_logits' in outputs:
-            del outputs['token_logits']
-        
-        # Decode the predicted tokens using the CLIP tokenizer
-        decoded_tokens = []
-        for class_tokens in token_texts:
-            # Map to full CLIP vocabulary
-            class_idx = class_tokens['class_idx']
-            indices = class_tokens['indices']
-            scores = class_tokens['scores']
-            
-            # Decode indices to actual words (if needed)
-            try:
-                # Process on CPU to save GPU memory
-                with torch.no_grad():
-                    # This would map the predicted indices back to full CLIP vocab indices
-                    # For simplicity, we're just using the indices as-is for now
-                    token_words = [self.tokenizer.decode([idx]) for idx in indices]
-                
-                decoded = {
-                    'class_idx': class_idx,
-                    'tokens': token_words,
-                    'scores': scores,
-                }
-                decoded_tokens.append(decoded)
-            except Exception as e:
-                # Fallback if decoding fails
-                decoded_tokens.append({
-                    'class_idx': class_idx,
-                    'tokens': [f"token_{idx}" for idx in indices],
-                    'scores': scores,
-                })
-        
-        # Final cleanup of any remaining tensors
-        del outputs
-        
-        # Explicit GPU memory cleanup
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        
-        # Return predictions with interpretable token sets
+        # Return predictions
         return {
             'class_preds': class_preds,
             'semantic_preds': semantic_preds,
-            'token_sets': decoded_tokens
+            'token_texts': token_texts
         }
     
     def predict_from_text(self, x, text_description, semantic_data=None, text_mapper=None):
         """
         Make predictions using text description to map to classes.
-        This method uses the pretrained CLIP text encoder to process the description
-        and find the most semantically similar class.
         
         Parameters:
         -----------
-        x : torch.Tensor
-            Input tensor
+        x : torch.Tensor or tuple
+            Input tensor or tuple of (x_data, semantic_tokens)
         text_description : str
             Text description of the class
         semantic_data : torch.Tensor, optional
@@ -1071,292 +285,83 @@ class SemanticAwareClassifier(nn.Module):
         dict
             Dictionary containing class predictions based on text mapping
         """
-        # Process tabular data with our model
-        if torch.cuda.is_available() and x.device.type == 'cuda':
-            with torch.cuda.amp.autocast(enabled=True):
-                outputs = self.forward(x)
-        else:
-            outputs = self.forward(x)
+        # Process input data
+        outputs = self.forward(x)
         
-        # Process text description with CLIP
+        # Process query text with CLIP
         with torch.no_grad():
-            # Determine device
-            if torch.cuda.is_available():
-                process_device = "cuda"
-            elif hasattr(torch, 'mps') and torch.backends.mps.is_available():
-                process_device = "mps"
-            else:
-                process_device = "cpu"
-            
-            # Tokenize the input text with the CLIP tokenizer
+            # Tokenize the input text
             text_tokens = self.tokenizer(
                 text_description,
                 padding="max_length",
                 truncation=True,
                 max_length=77,
                 return_tensors="pt"
-            )
+            ).to(outputs['semantic_embeddings'].device if outputs['semantic_embeddings'] is not None else 'cpu')
             
-            # Move to appropriate device
-            text_tokens = {k: v.to(process_device) for k, v in text_tokens.items()}
+            # Get text embeddings
+            query_features = self.clip_text_model(**text_tokens).pooler_output
             
-            try:
-                # Get text embeddings from CLIP text encoder
-                text_features = self.clip_text_model(**text_tokens).pooler_output  # [1, hidden_size]
-            except Exception as e:
-                memory_logger.error(f"Error processing text: {e}")
-                # Try with CPU as fallback
-                if process_device != 'cpu':
-                    cpu_tokens = {k: v.to('cpu') for k, v in text_tokens.items()}
-                    model_device = next(self.clip_text_model.parameters()).device
-                    self.clip_text_model = self.clip_text_model.to('cpu')
-                    text_features = self.clip_text_model(**cpu_tokens).pooler_output
-                    self.clip_text_model = self.clip_text_model.to(model_device)
+            # Normalize for similarity computation
+            query_features = F.normalize(query_features, dim=1)
+        
+        # Calculate similarity with semantic features if available
+        best_class = torch.tensor(-1)
+        max_similarity = torch.tensor(0.0)
+        
+        if outputs['semantic_embeddings'] is not None:
+            # Normalize semantic embeddings
+            semantic_norm = F.normalize(outputs['semantic_embeddings'], dim=1)
             
-            # Extract the tokenized text for interpretability
-            try:
-                # Access tokens through dictionary
-                token_ids = text_tokens['input_ids'][0].tolist()
-                # Filter out special tokens and get the actual tokens
-                token_texts = self.tokenizer.convert_ids_to_tokens(token_ids)
-                # Remove padding, BOS, EOS tokens
-                token_texts = [t for t in token_texts if t not in ['<pad>', '<|startoftext|>', '<|endoftext|>']]
-                query_token_texts = token_texts[:self.num_tokens_per_class]  # Keep just the first few tokens
-            except Exception as e:
-                # Fallback to a default value
-                query_token_texts = ["<token_error>"]
+            # Calculate similarity
+            similarities = torch.matmul(query_features, semantic_norm.t())
             
-        # Move text features to same device as model outputs if needed
-        if outputs.get('semantic_logits', None) is not None:
-            device = outputs['semantic_logits'].device
-            text_features = text_features.to(device)
-            
-            # Normalize feature vectors
-            text_features = F.normalize(text_features, p=2, dim=1)
-            
-            # Use feature-enhanced dot product to compute similarity with semantic classes
-            # Get the similarity between the text embedding and our semantic class embeddings
-            text_class_similarities = torch.matmul(
-                text_features,  # [1, hidden_size]
-                self.semantic_class_embeddings.transpose(0, 1)  # [hidden_size, num_classes]
-            )  # [1, num_classes]
-            
-            # Find best matching semantic class
-            best_class_idx = text_class_similarities.argmax(dim=1)
-            max_similarity = text_class_similarities.max(dim=1)[0]
-            
-            # Move to CPU for return
-            best_class = best_class_idx.cpu()
+            # Find best match
+            max_similarity, best_idx = similarities.max(dim=1)
+            best_class = best_idx.cpu()
             max_similarity = max_similarity.cpu()
-        else:
-            best_class = torch.tensor(-1)
-            max_similarity = torch.tensor(0.0)
         
-        # Get class predictions from the base model
-        class_logits = outputs.get('class_logits', None)
-        if class_logits is not None:
-            class_logits_cpu = class_logits.cpu()
-            class_preds = class_logits_cpu.argmax(dim=-1)
-        else:
-            class_preds = torch.full((1,), -1, dtype=torch.long, device='cpu')
+        # Get base model predictions
+        class_preds = outputs['class_logits'].argmax(dim=-1).cpu()
         
-        # Clean up tensors to free GPU memory
-        del outputs
-        if 'semantic_logits' in locals():
-            del semantic_logits
-        if 'class_logits' in locals():
-            del class_logits
-        if 'text_features' in locals():
-            del text_features
-        if 'text_tokens' in locals():
-            del text_tokens
-        
-        # Force GPU memory cleanup
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        
-        # Extract token information for interpretability
+        # Extract tokenization info
         token_texts = []
-        if 'token_texts' in outputs:
+        if len(outputs['token_texts']) > 0:
             token_texts = outputs['token_texts']
-            
-        # Get matched class information
-        matched_token_info = []
-        if best_class.item() >= 0 and best_class.item() < len(token_texts):
-            matched_token_info = [token_texts[best_class.item()]]
         
-        # Return results (all on CPU)
+        # Get query tokens for interpretability
+        query_token_ids = text_tokens['input_ids'][0].tolist()
+        query_token_texts = self.tokenizer.convert_ids_to_tokens(query_token_ids)
+        query_token_texts = [t for t in query_token_texts if t not in 
+                           ['<pad>', '<|startoftext|>', '<|endoftext|>']]
+        
+        # Return results
         return {
             'class_preds': class_preds,
             'mapped_class': best_class.item(),
             'similarity': max_similarity.item(),
-            'query_tokens': query_token_texts,
-            'matched_tokens': matched_token_info
-        }
-    
-    def generate_boundaries_from_text(self, x, class_descriptions, semantic_data=None, text_mapper=None):
-        """
-        Generate new class boundaries directly from text descriptions using pretrained CLIP.
-        This method processes all class descriptions with the CLIP text encoder and
-        finds the most similar tabular features for each description.
-        
-        Parameters:
-        -----------
-        x : torch.Tensor
-            Input tensor
-        class_descriptions : Dict[str, str]
-            Dictionary mapping class names to text descriptions
-        semantic_data : torch.Tensor, optional
-            Not used in this implementation as we use CLIP directly
-        text_mapper : object, optional
-            Not used in this implementation
-            
-        Returns:
-        --------
-        dict
-            Dictionary containing new class predictions based on text descriptions
-        """       
-        
-        # Pass class descriptions to the forward method for processing together with tabular data
-        class_texts = list(class_descriptions.values())
-        
-        # Run model forward pass with the text descriptions
-        if torch.cuda.is_available() and x.device.type == 'cuda':
-            with torch.cuda.amp.autocast(enabled=True):
-                model_outputs = self.forward(x, class_texts=class_texts)
-        else:
-            model_outputs = self.forward(x, class_texts=class_texts)
-        
-        # Create class name to index mapping for the output results
-        class_name_to_idx = {name: i for i, name in enumerate(class_descriptions.keys())}
-        
-        # Extract semantic logits for tabular data
-        semantic_logits = model_outputs.get('semantic_logits', None)
-        class_logits = model_outputs.get('class_logits', None)
-        
-        # Process text descriptions with CLIP text encoder (batched processing)
-        
-        class_token_mappings = {}
-        text_embeddings = []
-        
-        # Process in smaller batches to manage memory
-        batch_size = 5
-        with torch.no_grad():
-            for i in range(0, len(class_texts), batch_size):
-                batch_texts = class_texts[i:i+batch_size]
-                
-                # Tokenize on CPU
-                text_tokens = self.tokenizer(
-                    batch_texts,
-                    padding="max_length",
-                    truncation=True,
-                    max_length=77,
-                    return_tensors="pt"
-                ).to("cpu")
-                
-                # Process with CLIP text encoder
-                batch_embeddings = self.clip_text_model(**text_tokens).pooler_output
-                text_embeddings.append(batch_embeddings)
-                
-                # Create token mappings for interpretability
-                for j, text in enumerate(batch_texts):
-                    class_idx = i + j
-                    class_name = list(class_descriptions.keys())[class_idx] if class_idx < len(class_descriptions) else f"unknown_{class_idx}"
-                    
-                    # Get tokens for this text
-                    try:
-                        # Access tokens through dictionary
-                        token_ids = text_tokens['input_ids'][j].tolist()
-                        token_texts = self.tokenizer.convert_ids_to_tokens(token_ids)
-                        token_texts = [t for t in token_texts if t not in ['<pad>', '<|startoftext|>', '<|endoftext|>']]
-                    except Exception as e:
-                        
-                        token_texts = ["<token_error>"]
-                    
-                    # Store token mapping
-                    class_token_mappings[class_name] = {
-                        'text': text,
-                        'tokens': token_texts[:self.num_tokens_per_class],
-                        'class_idx': class_idx
-                    }
-                
-                # Clean up batch resources
-                del text_tokens
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-        
-        # Concatenate all text embeddings
-        all_text_embeddings = torch.cat(text_embeddings, dim=0)
-        
-        # Create predictions tensor on CPU
-        if semantic_logits is not None:
-            semantic_logits_cpu = semantic_logits.cpu()
-            predictions_shape = semantic_logits_cpu.shape[:-1]  # Remove class dimension
-            
-            # For each sample, find the most similar class description
-            if len(predictions_shape) > 1:  # Handle multi-dimensional case
-                predictions = semantic_logits_cpu.argmax(dim=-1)
-            else:  # Handle single dimension case
-                predictions = semantic_logits_cpu.argmax(dim=-1).unsqueeze(0)
-        elif class_logits is not None:
-            class_logits_cpu = class_logits.cpu()
-            predictions_shape = class_logits_cpu.shape[:-1]
-            
-            # Fallback to class predictions if no semantic logits
-            if len(predictions_shape) > 1:
-                predictions = class_logits_cpu.argmax(dim=-1)
-            else:
-                predictions = class_logits_cpu.argmax(dim=-1).unsqueeze(0)
-        else:
-            # Default case if no logits available
-            predictions = torch.zeros((1, 1), dtype=torch.long)
-        
-        # Clean up tensors to free memory
-        if 'semantic_logits' in locals():
-            del semantic_logits
-            del semantic_logits_cpu
-        if 'class_logits' in locals():
-            del class_logits
-            del class_logits_cpu
-        if 'all_text_embeddings' in locals():
-            del all_text_embeddings
-        for embedding in text_embeddings:
-            del embedding
-        del text_embeddings
-        
-        # Force memory cleanup
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        
-        # Return results
-        return {
-            'class_preds': predictions,
-            'class_mapping': class_name_to_idx,
-            'class_token_mappings': class_token_mappings
+            'query_tokens': query_token_texts[:self.num_tokens_per_class],
+            'token_texts': token_texts
         }
 
 
 class SemanticConsistencyLoss(nn.Module):
     """
-    CLIP-style contrastive loss for aligning text descriptions with tabular features.
-    This implements the InfoNCE/NT-Xent contrastive loss from the CLIP paper, combined
-    with standard classification loss.
+    CLIP-style contrastive loss for aligning semantic tokens with class distributions.
+    This implements the InfoNCE/NT-Xent contrastive loss from the CLIP paper.
     """
     
-    def __init__(self, semantic_weight=0.2, cuda_weight=0.1):  # Different weights for CUDA
+    def __init__(self, semantic_weight=0.2):
         """
-        Initialize the loss function with device-specific settings.
+        Initialize the loss function.
         
         Parameters:
         -----------
         semantic_weight : float
-            Weight for the semantic contrastive loss component on CPU/MPS. Default is 0.2.
-        cuda_weight : float
-            Weight for the semantic contrastive loss component on CUDA. Default is 0.1 (lower).
+            Weight for the semantic contrastive loss component
         """
         super().__init__()
         self.semantic_weight = semantic_weight
-        self.cuda_weight = cuda_weight  # Separate weight for CUDA devices
         
         # Main classification loss
         self.class_loss = nn.CrossEntropyLoss()
@@ -1364,465 +369,133 @@ class SemanticConsistencyLoss(nn.Module):
         # Component loss values for logging
         self.last_class_loss = 0.0
         self.last_semantic_loss = 0.0
-        
-        # Set epsilon values for different devices (larger for CUDA)
-        self.eps = 1e-3          # Standard epsilon for CPU/MPS
-        self.cuda_eps = 1e-2      # Larger epsilon for CUDA to improve stability
-        
+    
     def forward(self, outputs, targets):
         """
-        Compute the combined loss with true CLIP-style contrastive learning.
-        This implements symmetric cross-entropy loss over the similarity matrix
-        using the InfoNCE formulation from the CLIP paper.
+        Compute the combined loss with CLIP-style contrastive learning.
+        
         Parameters:
         -----------
         outputs : dict
             Model outputs containing 'class_logits', 'semantic_logits',
-            'tabular_features', and 'text_features'
+            'semantic_embeddings', and 'text_features'
         targets : dict
             Target values containing 'class_targets' and 'semantic_targets'
-            semantic targets are semantic feature types (age, name)
-            there can be more or fewer semantic targets than class targets
+            
         Returns:
         --------
         torch.Tensor
             Combined loss value
         """
-        # Get class prediction outputs (?, batch_size, n_classes)
+        # Get class prediction outputs and targets
         class_logits = outputs['class_logits'].permute(1, 2, 0)
-        # Get targets for standard classification
         class_targets = targets['class_targets'].permute(1, 0)
-        print("Class logits")
-        print(class_logits)
-        print("Class targets")
-        print(class_targets)
         
-        # Calculate classification loss - this will backpropagate to the base model only
+        # Calculate standard classification loss
         class_loss = self.class_loss(class_logits, class_targets)
         
-        # Important note: The semantic computation graph is completely separate from the 
-        # base model computation graph due to the detach() operations in the forward method.
-        # This ensures class_loss gradients only flow to the base model, while semantic_loss
-        # gradients only flow to the semantic components.
+        # Initialize semantic loss
+        semantic_loss = torch.tensor(0.0, device=class_loss.device, requires_grad=True)
         
-        # Get normalized feature vectors
-        tabular_features = outputs['tabular_features']
-        text_features = outputs['text_features']
-        print("Tabular and text features")
-        print(tabular_features)
-        print(text_features)
-        
-        # Note: These are already normalized vectors, so this is cosine similarity
-        # Reduced multiplier factor from 4.5 to 2.0 to improve numerical stability
-        
-        # First, detect device type
-        device_type = tabular_features.device.type
-        
-        # Track device for debugging and diagnostic info
-        self.last_device = device_type
-        
-        # Check for mixed precision issues on CUDA
-        if device_type == 'cuda':
-            # Check if we need to convert to float32 for stability
-            tab_dtype, text_dtype = tabular_features.dtype, text_features.dtype
-            autocast_enabled = torch.is_autocast_enabled()
+        # Calculate semantic contrastive loss if we have necessary components
+        if (outputs['semantic_logits'] is not None and 
+            'semantic_targets' in targets and 
+            targets['semantic_targets'] is not None):
             
-            if autocast_enabled or tab_dtype in [torch.bfloat16, torch.float16] or text_dtype in [torch.bfloat16, torch.float16]:
-                print(f"⚠️ Mixed precision detected in loss function - converting to float32 for stability")
-                print(f"Current dtypes - tabular: {tab_dtype}, text: {text_dtype}, autocast: {autocast_enabled}")
+            # Get logits and targets
+            semantic_logits = outputs['semantic_logits']
+            semantic_targets = targets['semantic_targets']
+            
+            # Check for valid semantic targets (not -100)
+            valid_mask = semantic_targets != -100
+            valid_count = valid_mask.sum().item()
+            
+            if valid_count > 0:
+                # Transpose targets for batch processing
+                targets_transposed = semantic_targets.permute(1, 0)
+                batch_size = targets_transposed.shape[0]
                 
-                # Convert to float32 for stable computation
-                tabular_features = tabular_features.to(torch.float32)
-                text_features = text_features.to(torch.float32)
-        
-        # Compute raw similarity matrix - need to be explicit about autocast with CUDA
-        if device_type == 'cuda' and torch.is_autocast_enabled():
-            # Temporarily disable autocast for this critical computation
-            with torch.cuda.amp.autocast(enabled=False):
-                # Force computation in float32
-                raw_similarity = torch.matmul(tabular_features.float(), text_features.float().t())
-                print("Raw similarity (computed with autocast disabled)")
-                print(raw_similarity)
-        else:
-            # Standard computation for CPU/MPS or when autocast is already disabled
-            raw_similarity = torch.matmul(tabular_features, text_features.t())
-            print("Raw similarity")
-            print(raw_similarity)
-        
-        # Apply device-specific stabilization techniques
-        if device_type == 'cuda':
-            # Ensure raw_similarity is in float32 for numerical stability
-            if raw_similarity.dtype != torch.float32:
-                raw_similarity = raw_similarity.to(torch.float32)
+                # Initialize loss accumulation
+                total_loss = 0
+                total_rows = 0
                 
-            # Apply stronger normalization for CUDA with our larger epsilon
-            raw_similarity = raw_similarity / (raw_similarity.abs().max() + self.cuda_eps)
-            
-            # Track raw similarity for debugging
-            raw_max_val = raw_similarity.abs().max().item()
-            if raw_max_val > 10.0:
-                print(f"WARNING: Very large raw similarity value on CUDA: {raw_max_val:.2f}")
-            
-            # Use a smaller scaling factor on CUDA to prevent gradient explosion
-            raw_logits = raw_similarity * 1.0
-            
-            # Apply more aggressive clamping for CUDA to prevent extreme values
-            raw_logits = torch.clamp(raw_logits, min=-5.0, max=5.0)
-            
-            # Extra safety: apply softmax normalization to stabilize CUDA training
-            if raw_max_val > 5.0:
-                # Apply row-wise softmax as an additional safety measure
-                normalized_logits = F.softmax(raw_logits, dim=-1)
-                # Convert back to logits with safe scaling
-                raw_logits = torch.log(normalized_logits + 1e-6) * 2.0
-        else:
-            # Standard MPS/CPU approach which has been stable
-            raw_similarity = raw_similarity / (raw_similarity.abs().max() + self.eps)
-            
-            # Scale with a standard factor for MPS/CPU
-            raw_logits = raw_similarity * 2.0
-            
-            # Standard clipping for MPS/CPU
-            raw_logits = torch.clamp(raw_logits, min=-10.0, max=10.0)
-        
-        # Get semantic targets
-        semantic_targets = targets['semantic_targets']
-        
-        # Check for all -100 values which would indicate invalid targets
-        valid_mask = semantic_targets != -100
-        valid_count = valid_mask.sum().item()
-        
-        if valid_count == 0:
-            # No valid semantic targets, skip semantic loss
-            normalized_loss = torch.tensor(0.0, device=raw_logits.device, requires_grad=True)
-            print("WARNING: No valid semantic targets found (all -100)")
-        else:
-            # Transpose targets to [batch_size, n_rows]
-            targets_transposed = semantic_targets.permute(1, 0)  # [4, 302]
-            batch_size = targets_transposed.shape[0]
-    
-            # Initialize loss
-            total_loss = 0
-            total_rows = 0
-    
-            # For each batch item
-            for i in range(batch_size):
-                # Get logits for this batch item [n_classes]
-                batch_logits = raw_logits[i]  # [n_classes]
-    
-                # Get all target rows for this batch item [n_rows]
-                batch_targets = targets_transposed[i]  # [n_rows]
-                
-                # Filter out -100 ignore indices
-                valid_indices = batch_targets != -100
-                valid_target_count = valid_indices.sum().item()
-                
-                if valid_target_count > 0:  # Only process if we have valid targets
-                    valid_targets = batch_targets[valid_indices]
+                # Process each batch item
+                for i in range(batch_size):
+                    # Get logits and targets for this batch item
+                    batch_logits = semantic_logits[i]
+                    batch_targets = targets_transposed[i]
                     
-                    # Ensure targets are in valid range for CE loss
-                    num_classes = batch_logits.size(0)
-                    if valid_targets.max() >= num_classes:
-                        print(f"WARNING: Target max {valid_targets.max().item()} >= num_classes {num_classes}")
-                        valid_targets = valid_targets.clamp(max=num_classes-1)
+                    # Filter out ignore indices (-100)
+                    valid_indices = batch_targets != -100
+                    valid_target_count = valid_indices.sum().item()
                     
-                    # Compute cross-entropy only on valid targets
-                    # Ensure proper data types for CUDA stability
-                    if device_type == 'cuda':
-                        # Ensure the input logits are in float32 for stable computation
-                        batch_logits_expanded = batch_logits.unsqueeze(0).expand(valid_target_count, -1)
+                    if valid_target_count > 0:
+                        # Get valid targets
+                        valid_targets = batch_targets[valid_indices]
                         
-                        # Check if autocast is enabled
-                        if torch.is_autocast_enabled():
-                            # Temporarily disable autocast for this critical computation
-                            with torch.cuda.amp.autocast(enabled=False):
-                                # Force computation in float32
-                                if batch_logits_expanded.dtype != torch.float32:
-                                    batch_logits_expanded = batch_logits_expanded.to(torch.float32)
-                                batch_loss = F.cross_entropy(batch_logits_expanded, valid_targets)
-                        else:
-                            # Ensure float32 even without autocast
-                            if batch_logits_expanded.dtype != torch.float32:
-                                batch_logits_expanded = batch_logits_expanded.to(torch.float32)
-                            batch_loss = F.cross_entropy(batch_logits_expanded, valid_targets)
-                    else:
-                        # Standard approach for CPU/MPS
+                        # Ensure targets are in valid range
+                        num_classes = batch_logits.size(0)
+                        if valid_targets.max() >= num_classes:
+                            valid_targets = valid_targets.clamp(max=num_classes-1)
+                        
+                        # Compute cross-entropy loss
                         batch_loss = F.cross_entropy(
                             batch_logits.unsqueeze(0).expand(valid_target_count, -1),
                             valid_targets
                         )
-    
-                    # Add to total loss, weighted by number of valid targets
-                    total_loss += batch_loss * valid_target_count
-                    total_rows += valid_target_count
-    
-            # Normalize loss by total number of valid rows across all batch items
-            if total_rows > 0:
-                normalized_loss = total_loss / total_rows
-            else:
-                normalized_loss = torch.tensor(0.0, device=raw_logits.device, requires_grad=True)
-
-        # Use the configured semantic weight with device-specific handling
-        semantic_loss = normalized_loss
-        
-        # Store component losses for logging/debugging
-        self.last_class_loss = class_loss.item()
-        self.last_semantic_loss = semantic_loss.item() if isinstance(semantic_loss, torch.Tensor) else 0.0
-        
-        # Apply device-specific stabilization based on the device we detected earlier
-        if getattr(self, 'last_device', '') == 'cuda':
-            # Use the CUDA-specific weight (lower) to reduce the semantic loss contribution
-            weight = self.cuda_weight
-            
-            # Extra clamping for the semantic loss on CUDA
-            clamped_semantic_loss = torch.clamp(semantic_loss, min=-5.0, max=5.0)
-            
-            # Scale it with the CUDA-specific weight
-            scaled_semantic_loss = weight * clamped_semantic_loss
-            
-            # Add class loss
-            total_loss = scaled_semantic_loss + class_loss
-            
-            # Register a custom gradient hook for CUDA stability
-            def grad_hook(grad):
-                if grad is None:
-                    return None
-                    
-                # First check if we need to convert dtype for stability
-                orig_dtype = grad.dtype
-                if orig_dtype in [torch.bfloat16, torch.float16]:
-                    print(f"⚠️ Graduate hook: Converting from {orig_dtype} to float32 for stability")
-                    grad = grad.to(torch.float32)
-                
-                # Handle NaN/Inf values
-                if torch.isnan(grad).any() or torch.isinf(grad).any():
-                    # Print diagnostic info
-                    nan_count = torch.isnan(grad).sum().item()
-                    inf_count = torch.isinf(grad).sum().item()
-                    if nan_count > 0 or inf_count > 0:
-                        print(f"WARNING: CUDA gradient contains {nan_count} NaN and {inf_count} Inf values (shape: {grad.shape})")
                         
-                        # Print a sample of the gradient tensor for debugging
-                        print(f"Gradient sample (first few elements): {grad.flatten()[:5]}")
-                    
-                    # Replace NaN/Inf with zeros to allow training to continue
-                    grad = torch.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0)
+                        # Add to total loss
+                        total_loss += batch_loss * valid_target_count
+                        total_rows += valid_target_count
                 
-                # Apply aggressive gradient clipping
-                grad_norm = grad.norm()
-                max_norm = 0.5  # Very strict clipping threshold for CUDA stability
-                if grad_norm > max_norm:
-                    grad = grad * (max_norm / (grad_norm + 1e-6))
-                    print(f"Gradient clipped from {grad_norm:.4f} to {max_norm:.4f}")
-                
-                return grad
-                
-            # Only register hook if semantic loss contributes to the total
-            if weight > 0 and isinstance(semantic_loss, torch.Tensor) and semantic_loss.requires_grad:
-                total_loss.register_hook(grad_hook)
-        else:
-            # Standard approach for MPS/CPU with the original semantic weight
-            total_loss = (self.semantic_weight * semantic_loss) + class_loss
-            
+                # Normalize by total valid targets
+                if total_rows > 0:
+                    semantic_loss = total_loss / total_rows
+        
+        # Store component losses for logging
+        self.last_class_loss = class_loss.item()
+        self.last_semantic_loss = semantic_loss.item()
+        
+        # Combine losses with weighting
+        total_loss = class_loss + (self.semantic_weight * semantic_loss)
+        
         return total_loss
 
 
-def get_semantic_class_count():
+def create_semantic_aware_model(base_model, num_semantic_classes=None, freeze_clip=True):
     """
-    Get the current count of semantic classes from the semantic data loader.
-    
-    Returns:
-    --------
-    int
-        Number of semantic classes available
-    """
-    try:
-        from ticl.datasets.semantic_prior_data_loader import load_semantic_prior_data
-        
-        # Try to load real data to get column count
-        column_names, _ = load_semantic_prior_data()
-        num_classes = len(column_names)
-        
-        # Ensure we have at least 3 classes (minimum reasonable number)
-        return max(num_classes, 3)
-    except (ImportError, FileNotFoundError, Exception) as e:
-        # Fallback to default if loading fails
-        return 3
-
-
-def get_clip_text_embeddings(texts, clip_model, tokenizer, batch_size=5, device=None):
-    """
-    Process texts using a CLIP text encoder to get their embeddings.
-    Memory-optimized version that processes texts in batches.
-    Works with CPU, CUDA, and MPS devices.
-    
-    Parameters:
-    -----------
-    texts : list of str
-        The texts to encode
-    clip_model : transformers.CLIPTextModel
-        The CLIP text model to use for encoding
-    tokenizer : transformers.CLIPTokenizerFast
-        The CLIP tokenizer to use
-    batch_size : int
-        Maximum batch size for processing texts
-    device : str, optional
-        Device to use for processing. If None, will auto-detect.
-        
-    Returns:
-    --------
-    torch.Tensor
-        Text embeddings with shape [len(texts), hidden_size]
-    """
-    # Setup logging
-    memory_logger = logging.getLogger("memory_profiling")
-    
-    # Auto-detect device if not specified
-    if device is None:
-        if torch.cuda.is_available():
-            processing_device = "cuda"
-        elif hasattr(torch, 'mps') and torch.backends.mps.is_available():
-            processing_device = "mps"
-        else:
-            processing_device = "cpu"
-    else:
-        processing_device = device
-        
-    # Get the device of the first input tensor if applicable
-    # This helps ensure we process on the same device as our data
-    if isinstance(clip_model, torch.nn.Module):
-        model_device = next(clip_model.parameters()).device
-        # If the model is on CUDA or MPS, prefer that device
-        if model_device.type in ['cuda', 'mps']:
-            processing_device = model_device
-    
-    # Get model's current device for restoration later
-    model_device = next(clip_model.parameters()).device
-    
-    # Move model to processing device if needed
-    if model_device != processing_device:
-        clip_model = clip_model.to(processing_device)
-    
-    # Tokenize and encode texts in batches to save memory
-    all_embeddings = []
-    
-    with torch.no_grad():
-        for i in range(0, len(texts), batch_size):
-            # Extract batch
-            batch_texts = texts[i:i+batch_size]
-            
-            try:
-                # Tokenize with CLIP tokenizer and move to device
-                tokens = tokenizer(
-                    batch_texts, 
-                    return_tensors="pt",
-                    padding="max_length",
-                    truncation=True,
-                    max_length=77  # CLIP's standard context length
-                )
-                tokens = {k: v.to(processing_device) for k, v in tokens.items()}
-                
-                # Get embeddings from CLIP model
-                outputs = clip_model(**tokens)
-                embeddings = outputs.pooler_output
-                
-                # Store batch results
-                all_embeddings.append(embeddings)
-                
-                # Clean up this batch's tensors
-                del tokens
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    
-            except Exception as e:
-                memory_logger.error(f"Error processing batch of texts: {e}")
-                if processing_device != 'cpu':
-                    try:
-                        # Get tokens on CPU
-                        cpu_tokens = tokenizer(
-                            batch_texts, 
-                            return_tensors="pt",
-                            padding="max_length",
-                            truncation=True,
-                            max_length=77
-                        )
-                        
-                        # Process on CPU
-                        cpu_model = clip_model.to('cpu')
-                        outputs = cpu_model(**cpu_tokens)
-                        embeddings = outputs.pooler_output
-                        
-                        # Move embeddings to original device
-                        embeddings = embeddings.to(processing_device)
-                        all_embeddings.append(embeddings)
-                        
-                        # Move model back
-                        clip_model = clip_model.to(processing_device)
-                    except Exception as e2:
-                        memory_logger.error(f"CPU fallback also failed: {e2}")
-                        # Continue with next batch
-    
-    # Move model back to original device if needed
-    if model_device != processing_device:
-        clip_model = clip_model.to(model_device)
-    
-    # Concatenate all batches
-    if all_embeddings:
-        text_embeddings = torch.cat(all_embeddings, dim=0)
-        return text_embeddings
-    else:
-        # Return empty tensor if no texts were provided or all batches failed
-        memory_logger.warning(f"No embeddings were generated - returning empty tensor")
-        return torch.zeros((0, clip_model.config.hidden_size), device=processing_device)
-
-
-def create_semantic_aware_model(base_model, num_semantic_classes=None, freeze_clip=True, semantic_column_metadata=None, cuda_safe=True):
-    """
-    Factory function to create a CLIP-style semantic-aware model.
+    Factory function to create a semantic-aware model.
     
     Parameters:
     -----------
     base_model : nn.Module
         The base model to extend
     num_semantic_classes : int, optional
-        Number of semantic classes to predict. If None, will be determined 
-        automatically from available semantic data.
+        Number of semantic classes to predict
     freeze_clip : bool
-        Whether to freeze the CLIP text encoder parameters (recommended)
-    semantic_column_metadata : dict, optional
-        Metadata about semantic columns in the dataset
-    cuda_safe : bool
-        Whether to apply additional CUDA-specific stability optimizations
+        Whether to freeze the CLIP text encoder parameters
         
     Returns:
     --------
     SemanticAwareClassifier
-        The extended model with CLIP contrastive learning
+        The semantic-aware model
     """
-    # Check if we're using CUDA and warn about numerical stability
-    using_cuda = torch.cuda.is_available()
-    if using_cuda:
-        print("=" * 80)
-        print("IMPORTANT: Using CUDA with semantic model. Special stability measures will be applied.")
-        print("For best stability:")
-        print("  1. Use a lower learning rate (0.0001 or lower)")
-        print("  2. Consider using a larger epsilon for LayerNorm (default: 1e-2)")
-        print("  3. Use the modified SemanticConsistencyLoss with CUDA-specific settings")
-        print("  4. Gradient hooks will automatically catch and fix NaN/Inf values")
-        print("=" * 80)
+    # Determine number of semantic classes if not provided
     if num_semantic_classes is None:
-        num_semantic_classes = get_semantic_class_count()
-        print(f"Creating semantic-aware model with {num_semantic_classes} semantic classes")
+        try:
+            # Try to load from semantic data
+            from ticl.datasets.semantic_prior_data_loader import load_semantic_prior_data
+            column_names, _ = load_semantic_prior_data()
+            num_semantic_classes = len(column_names)
+            num_semantic_classes = max(num_semantic_classes, 3)  # Ensure at least 3 classes
+        except:
+            # Default fallback
+            num_semantic_classes = 3
     
+    # Create model
     model = SemanticAwareClassifier(base_model, num_semantic_classes)
-    model.cuda_safe_init = cuda_safe
     
-    # If we have semantic column metadata, store it in the model
-    if semantic_column_metadata:
-        model.semantic_column_metadata = semantic_column_metadata
-        print(f"Added semantic column metadata for {len(semantic_column_metadata)} columns")
-    
-    # Set CLIP text encoder parameters to frozen/trainable based on flag
+    # Configure CLIP encoder freezing
     if freeze_clip:
         print("Freezing CLIP text encoder parameters")
         for param in model.clip_text_model.parameters():
@@ -1832,20 +505,5 @@ def create_semantic_aware_model(base_model, num_semantic_classes=None, freeze_cl
         for param in model.clip_text_model.parameters():
             param.requires_grad = True
     
-    # Count parameters for semantic head components
-    clip_params = sum(p.numel() for p in model.clip_text_model.parameters())
-    trainable_clip_params = sum(p.numel() for p in model.clip_text_model.parameters() if p.requires_grad)
-    projection_params = sum(p.numel() for p in model.semantic_projection.parameters())
-    enhancer_params = sum(p.numel() for p in model.feature_enhancer.parameters())
-    logit_scale_params = 1  # Single temperature parameter
-    
-    trainable_params = projection_params + enhancer_params + trainable_clip_params + logit_scale_params
-    total_params = clip_params + projection_params + enhancer_params + logit_scale_params
-    
-    print(f"Semantic head has {total_params:,} parameters ({trainable_params:,} trainable)")
-    print(f"  - CLIP Text Encoder: {clip_params:,} ({trainable_clip_params:,} trainable)")
-    print(f"  - Projection: {projection_params:,}")
-    print(f"  - Feature enhancer: {enhancer_params:,}")
-    print(f"  - Logit scale: {logit_scale_params}")
-    
+    # Return configured model
     return model
