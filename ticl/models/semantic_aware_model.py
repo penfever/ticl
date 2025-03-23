@@ -1289,6 +1289,10 @@ class SemanticConsistencyLoss(nn.Module):
         class_logits = outputs['class_logits'].permute(1, 2, 0)
         # Get targets for standard classification
         class_targets = targets['class_targets'].permute(1, 0)
+        print("Class logits")
+        print(class_logits)
+        print("Class targets")
+        print(class_targets)
         
         # Calculate classification loss - this will backpropagate to the base model only
         class_loss = self.class_loss(class_logits, class_targets)

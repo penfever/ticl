@@ -38,7 +38,7 @@ def get_criterion(max_num_classes, use_semantic_loss=False):
         if max_num_classes == 0:
             loss = nn.MSELoss(reduction='none')
         elif max_num_classes == 2:
-            loss = nn.BCEWithLogitsLoss(reduction='none')
+            loss = nn.BCEWithLogitsLoss(reduction='none', ignore_index=IGNORE_INDEX)
         elif max_num_classes > 2:
             loss = nn.CrossEntropyLoss(reduction='none', ignore_index=IGNORE_INDEX)
         else:
