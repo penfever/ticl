@@ -409,7 +409,6 @@ def train_epoch(
                     
                     # EMERGENCY FIX: If we have SemanticAwareClassifier, completely disable semantic loss
                     if grad_norm > 1000.0:  # Catastrophically large gradient
-                        breakpoint()
                         print("EMERGENCY FIX: Disabling semantic loss component due to exploding gradients")
                         # First try unwrapped model
                         if hasattr(model, 'semantic_weight') and hasattr(model, 'SemanticConsistencyLoss'):
