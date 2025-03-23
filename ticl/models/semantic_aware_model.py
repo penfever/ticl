@@ -280,16 +280,20 @@ class SemanticAwareClassifier(nn.Module):
             num_output_classes = base_output.shape[-1]
             if num_output_classes != self.num_semantic_classes:
                 self.num_semantic_classes = num_output_classes
+                
+        # Store the base output for the return value, but detach it for the computation graph
+        # This prevents gradients from the semantic loss from flowing back to the base model
+        base_output_for_computation = base_output
         
         # Extract features based on model type
         if hasattr(self.base_model, 'features') and self.base_model.features is not None:
             # If the base model directly exposes features (preferred method)
-            features = self.base_model.features
+            features = self.base_model.features.detach()  # Detach to prevent gradient flow back to base model
         
         # Check for TabFlex model
         elif hasattr(self.base_model, 'get_cls_embedding'):
             # TabFlex models have a get_cls_embedding method for classification token
-            features = self.base_model.get_cls_embedding()
+            features = self.base_model.get_cls_embedding().detach()  # Detach from graph
             
             # Handle test set specific features for TabFlex
             if single_eval_pos is not None and hasattr(features, 'shape') and len(features.shape) > 1:
@@ -307,8 +311,13 @@ class SemanticAwareClassifier(nn.Module):
             else:
                 x_src, y_src = x
             
-            # Encode input features
-            x_encoded = self.base_model.encoder(x_src)
+            # Encode input features and detach from base model computation graph
+            # We need to run encoder with no_grad to ensure we don't backprop through it
+            with torch.no_grad():
+                x_encoded = self.base_model.encoder(x_src)
+            
+            # Create a detached copy that requires grad for semantic model
+            x_encoded = x_encoded.detach().clone().requires_grad_(True)
             
             # For semantic features, we'll use features from the test set
             if single_eval_pos is not None and single_eval_pos < x_encoded.shape[0]:
@@ -322,7 +331,8 @@ class SemanticAwareClassifier(nn.Module):
                 
         # Check for MotherNet or other models with hidden states
         elif hasattr(self.base_model, 'hidden_states') and self.base_model.hidden_states is not None:
-            features = self.base_model.hidden_states[-1]  # Use last layer's hidden states
+            # Use last layer's hidden states but detach from base model computation graph
+            features = self.base_model.hidden_states[-1].detach().clone().requires_grad_(True)
             
             # Extract test set features if applicable
             if single_eval_pos is not None and single_eval_pos < features.shape[0]:
@@ -336,10 +346,11 @@ class SemanticAwareClassifier(nn.Module):
             # Last resort fallback - try to extract from the output
             if len(base_output.shape) == 3:
                 # Average over samples to get [batch_size, output_dim]
-                features = base_output.mean(dim=0)
+                # Detach from base model computation graph
+                features = base_output.detach().clone().requires_grad_(True).mean(dim=0)
             else:
-                # Otherwise use as is
-                features = base_output
+                # Otherwise use as is, but detached
+                features = base_output.detach().clone().requires_grad_(True)
         
         # Handle feature dimension mismatch
         if features.shape[-1] != self.emsize:
@@ -835,10 +846,12 @@ class SemanticAwareClassifier(nn.Module):
                 )
         
         # Create the return dictionary with CLIP-style outputs
+        # Use original base_output for class_logits (non-detached)
+        # This ensures gradients from class loss flow normally to the base model
         result = {
-            'class_logits': base_output,
-            'semantic_logits': semantic_logits,    # [batch_size, num_classes]
-            'tabular_features': tabular_features,  # Normalized tabular features
+            'class_logits': base_output,  # Original non-detached output from base model
+            'semantic_logits': semantic_logits,    # [batch_size, num_classes] - Connected to semantic model only
+            'tabular_features': tabular_features,  # Normalized tabular features - Connected to semantic model only
             'text_features': text_features,        # Normalized text features (if available)
             'token_texts': all_token_texts,        # Text tokenization info
         }
@@ -1272,7 +1285,14 @@ class SemanticConsistencyLoss(nn.Module):
         class_logits = outputs['class_logits'].permute(1, 2, 0)
         # Get targets for standard classification
         class_targets = targets['class_targets'].permute(1, 0)
+        
+        # Calculate classification loss - this will backpropagate to the base model only
         class_loss = self.class_loss(class_logits, class_targets)
+        
+        # Important note: The semantic computation graph is completely separate from the 
+        # base model computation graph due to the detach() operations in the forward method.
+        # This ensures class_loss gradients only flow to the base model, while semantic_loss
+        # gradients only flow to the semantic components.
         
         # Get normalized feature vectors
         tabular_features = outputs['tabular_features']
