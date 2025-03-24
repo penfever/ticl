@@ -67,12 +67,21 @@ def set_log_level(level_name):
     """Set the console log level based on command line argument"""
     global _current_log_level
     level = getattr(logging, level_name.upper(), logging.INFO)
+    
     # Store the current log level
     _current_log_level = level
+    
+    # Update the memory_logger's level itself to control what messages are processed at all
+    # This is critical because debug messages in ClassificationAdapter are using the logger directly
+    if level > logging.DEBUG:
+        # Only change the logger level if it's above DEBUG to allow file logging to still work
+        memory_logger.setLevel(level)
+    
     # Update console handler level
     for handler in memory_logger.handlers:
         if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
             handler.setLevel(level)
+            
     memory_logger.info(f"Log level set to {level_name}")
     return level
 
@@ -733,6 +742,17 @@ def validate_model(model, config):
     """
     # Store the current log level before validation
     original_log_level = get_current_log_level()
+    
+    # Store the original memory_logger level to ensure it gets restored
+    original_logger_level = memory_logger.level
+    
+    # Store the original console handler level
+    original_console_level = None
+    for handler in memory_logger.handlers:
+        if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+            original_console_level = handler.level
+            break
+    
     from ticl.datasets import load_openml_list, open_cc_valid_dids, open_cc_valid_dids_regression, open_cc_large_dids, new_valid_dids
 
     from ticl.models.gamformer import GAMformer
@@ -759,202 +779,216 @@ def validate_model(model, config):
     else:
         raise ValueError(f"Unknown attention type")
     
-    # Classification validation
-    if config[attention_type]['classification_task'] or config['openmlloader']['valid_data'] in ['large', 'new']:
-        # Select appropriate validation datasets
-        if config['openmlloader']['valid_data'] == 'new':
-            open_cc_dids = new_valid_dids
-            print(f"Using new validation datasets with {len(new_valid_dids)} datasets")
-        elif config['openmlloader']['valid_data'] == 'large':
-            open_cc_dids = open_cc_large_dids
-            print(f"Using large validation datasets with {len(open_cc_large_dids)} datasets")
-        else:
-            open_cc_dids = open_cc_valid_dids
-            print(f"Using standard validation datasets with {len(open_cc_valid_dids)} datasets")
-            
-        # Load validation datasets
-        cc_valid_datasets_multiclass, _ = load_openml_list(
-            open_cc_dids, 
-            multiclass=True, 
-            shuffled=True, 
-            filter_for_nan=False, 
-            max_samples=1000000,
-            num_feats=5000, 
-            max_num_classes=100,
-            return_capped=True, 
-            classification=True,
-        )
+    try:
+        # Classification validation
+        if config[attention_type]['classification_task'] or config['openmlloader']['valid_data'] in ['large', 'new']:
+            # Select appropriate validation datasets
+            if config['openmlloader']['valid_data'] == 'new':
+                open_cc_dids = new_valid_dids
+                print(f"Using new validation datasets with {len(new_valid_dids)} datasets")
+            elif config['openmlloader']['valid_data'] == 'large':
+                open_cc_dids = open_cc_large_dids
+                print(f"Using large validation datasets with {len(open_cc_large_dids)} datasets")
+            else:
+                open_cc_dids = open_cc_valid_dids
+                print(f"Using standard validation datasets with {len(open_cc_valid_dids)} datasets")
+                
+            # Load validation datasets
+            cc_valid_datasets_multiclass, _ = load_openml_list(
+                open_cc_dids, 
+                multiclass=True, 
+                shuffled=True, 
+                filter_for_nan=False, 
+                max_samples=1000000,
+                num_feats=5000, 
+                max_num_classes=100,
+                return_capped=True, 
+                classification=True,
+            )
 
-        # Create appropriate classifier based on model type
-        if isinstance(model, (GAMformer, MotherNetAdditive)):
-            clf = GAMformerClassifier(
-                device=config['device'], 
-                model=model, 
-                config=config
-            )
-            print(f"Using GAMformerClassifier for validation")
-        elif isinstance(model, (MotherNet, SSMMotherNet)):
-            clf = MotherNetClassifier(
-                device=config['device'], 
-                model=model, 
-                config=config
-            )
-            print(f"Using MotherNetClassifier for validation")
-        elif isinstance(model, (TabPFN, BiAttentionTabPFN, TabFlex)):
-            clf = TabPFNClassifier(
-                device=config['device'], 
-                model=model, 
-                config=config, 
-                N_ensemble_configurations=1
-            )
-            print(f"Using TabPFNClassifier for validation with 1 ensemble configuration")
-        elif isinstance(model, SemanticAwareClassifier):
-            # Get semantic feature probability from config
-            if 'transformer' in config:
-                semantic_feature_p = config['transformer'].get('semantic_feature_p', 0.0)
-            elif 'linear_attention' in config:
-                semantic_feature_p = config['linear_attention'].get('semantic_feature_p', 0.0)
+            # Create appropriate classifier based on model type
+            if isinstance(model, (GAMformer, MotherNetAdditive)):
+                clf = GAMformerClassifier(
+                    device=config['device'], 
+                    model=model, 
+                    config=config
+                )
+                print(f"Using GAMformerClassifier for validation")
+            elif isinstance(model, (MotherNet, SSMMotherNet)):
+                clf = MotherNetClassifier(
+                    device=config['device'], 
+                    model=model, 
+                    config=config
+                )
+                print(f"Using MotherNetClassifier for validation")
+            elif isinstance(model, (TabPFN, BiAttentionTabPFN, TabFlex)):
+                clf = TabPFNClassifier(
+                    device=config['device'], 
+                    model=model, 
+                    config=config, 
+                    N_ensemble_configurations=1
+                )
+                print(f"Using TabPFNClassifier for validation with 1 ensemble configuration")
+            elif isinstance(model, SemanticAwareClassifier):
+                # Get semantic feature probability from config
+                if 'transformer' in config:
+                    semantic_feature_p = config['transformer'].get('semantic_feature_p', 0.0)
+                elif 'linear_attention' in config:
+                    semantic_feature_p = config['linear_attention'].get('semantic_feature_p', 0.0)
+                else:
+                    semantic_feature_p = 0.0
+                    
+                # Detect semantic columns using semantic_feature_p parameter
+                # In real data, semantic columns would be identified by data type or metadata
+                # For validation with random data, we'll simulate this by considering a percentage
+                # of columns as semantic based on the semantic_feature_p setting
+                if semantic_feature_p > 0:
+                    # For validation purposes, we'll mark approximately semantic_feature_p 
+                    # percentage of columns as semantic
+                    num_features = config['prior']['num_features']
+                    num_semantic = max(1, int(num_features * semantic_feature_p))
+                    semantic_column_indices = list(range(num_semantic))
+                    
+                    # Create simple semantic class descriptions for testing
+                    semantic_class_descriptions = {
+                        f"Class {i}": f"This is the class {i} in the validation dataset" 
+                        for i in range(config['prior']['classification']['max_num_classes'])
+                    }
+                    
+                    if config.get('debug_level', 'INFO') == 'DEBUG':
+                        print(f"Identified {num_semantic} columns as semantic for validation")
+                        print(f"Using synthetic class descriptions for validation")
+                else:
+                    semantic_column_indices = []
+                    semantic_class_descriptions = None
+                
+                # Create the classifier wrapper with ensemble support
+                clf = SemanticAwareClassifierWrapper(
+                    device=config['device'],
+                    model=model,
+                    config=config,
+                    batch_size=32,
+                    verbose=(config.get('debug_level', 'INFO') == 'DEBUG'),
+                    N_ensemble_configurations=3,  # Use smaller ensemble for validation
+                    seed=42,
+                    semantic_column_indices=semantic_column_indices,
+                    semantic_class_descriptions=semantic_class_descriptions
+                )
+                print(f"Using SemanticAwareClassifierWrapper for validation with ensemble support")
             else:
-                semantic_feature_p = 0.0
+                raise ValueError(f"Model {model.__class__.__name__} not supported for validation")
                 
-            # Detect semantic columns using semantic_feature_p parameter
-            # In real data, semantic columns would be identified by data type or metadata
-            # For validation with random data, we'll simulate this by considering a percentage
-            # of columns as semantic based on the semantic_feature_p setting
-            if semantic_feature_p > 0:
-                # For validation purposes, we'll mark approximately semantic_feature_p 
-                # percentage of columns as semantic
-                num_features = config['prior']['num_features']
-                num_semantic = max(1, int(num_features * semantic_feature_p))
-                semantic_column_indices = list(range(num_semantic))
-                
-                # Create simple semantic class descriptions for testing
-                semantic_class_descriptions = {
-                    f"Class {i}": f"This is the class {i} in the validation dataset" 
-                    for i in range(config['prior']['classification']['max_num_classes'])
-                }
-                
-                if config.get('debug_level', 'INFO') == 'DEBUG':
-                    print(f"Identified {num_semantic} columns as semantic for validation")
-                    print(f"Using synthetic class descriptions for validation")
-            else:
-                semantic_column_indices = []
-                semantic_class_descriptions = None
+            # Set validation parameters
+            base_path = 'models_diff/validation'
+            run_id = f"valid_run_{uuid4()}"
             
-            # Create the classifier wrapper with ensemble support
-            clf = SemanticAwareClassifierWrapper(
+            # Run validation
+            print(f"Starting classification validation on {len(cc_valid_datasets_multiclass)} datasets")
+            results = eval_on_datasets(
+                'multiclass', 
+                clf, 
+                run_id, 
+                cc_valid_datasets_multiclass,
+                metric_used=tabular_metrics.auc_metric, 
+                split_numbers=[1, 2, 3, 4, 5], 
+                eval_positions=[None],
+                max_times=[1], 
+                n_samples=config['openmlloader']['max_samples'], 
+                base_path=base_path, 
+                overwrite=False, 
+                n_jobs=1, 
                 device=config['device'],
-                model=model,
-                config=config,
-                batch_size=32,
-                verbose=(config.get('debug_level', 'INFO') == 'DEBUG'),
-                N_ensemble_configurations=3,  # Use smaller ensemble for validation
-                seed=42,
-                semantic_column_indices=semantic_column_indices,
-                semantic_class_descriptions=semantic_class_descriptions
+                save=False,
+                max_features=config['prior']['num_features'],
+                pca=config['openmlloader']['pca'],
             )
-            print(f"Using SemanticAwareClassifierWrapper for validation with ensemble support")
-        else:
-            raise ValueError(f"Model {model.__class__.__name__} not supported for validation")
             
-        # Set validation parameters
-        base_path = 'models_diff/validation'
-        run_id = f"valid_run_{uuid4()}"
+            # Calculate validation scores
+            mean_auc = np.array([r['mean_metric'] for r in results]).mean()
+            per_dataset_scores = {key: np.mean([g['mean_metric'] for g in group]) 
+                                for key, group in itertools.groupby(results, lambda x: x['dataset'])}
+            
+            print(f"Validation complete. Mean AUC: {mean_auc:.4f} across {len(per_dataset_scores)} datasets")
+            
+            return mean_auc, per_dataset_scores
         
-        # Run validation
-        print(f"Starting classification validation on {len(cc_valid_datasets_multiclass)} datasets")
-        results = eval_on_datasets(
-            'multiclass', 
-            clf, 
-            run_id, 
-            cc_valid_datasets_multiclass,
-            metric_used=tabular_metrics.auc_metric, 
-            split_numbers=[1, 2, 3, 4, 5], 
-            eval_positions=[None],
-            max_times=[1], 
-            n_samples=config['openmlloader']['max_samples'], 
-            base_path=base_path, 
-            overwrite=False, 
-            n_jobs=1, 
-            device=config['device'],
-            save=False,
-            max_features=config['prior']['num_features'],
-            pca=config['openmlloader']['pca'],
-        )
-        
-        # Calculate validation scores
-        mean_auc = np.array([r['mean_metric'] for r in results]).mean()
-        per_dataset_scores = {key: np.mean([g['mean_metric'] for g in group]) 
-                              for key, group in itertools.groupby(results, lambda x: x['dataset'])}
-        
-        print(f"Validation complete. Mean AUC: {mean_auc:.4f} across {len(per_dataset_scores)} datasets")
-        
-        # Restore the original log level after validation
-        set_log_level(logging.getLevelName(original_log_level))
-        
-        return mean_auc, per_dataset_scores
-    
-    # Regression validation
-    else:
-        # Load regression validation datasets
-        cc_valid_datasets_regression, _ = load_openml_list(
-            open_cc_valid_dids_regression, 
-            multiclass=False, 
-            shuffled=True, 
-            filter_for_nan=False, 
-            max_samples=10000,
-            num_feats=100, 
-            return_capped=False, 
-            classification=False
-        )
+        # Regression validation
+        else:
+            # Load regression validation datasets
+            cc_valid_datasets_regression, _ = load_openml_list(
+                open_cc_valid_dids_regression, 
+                multiclass=False, 
+                shuffled=True, 
+                filter_for_nan=False, 
+                max_samples=10000,
+                num_feats=100, 
+                return_capped=False, 
+                classification=False
+            )
 
-        # Create appropriate regressor based on model type
-        if isinstance(model, (GAMformer, MotherNetAdditive)):
-            clf = GAMformerRegressor(
-                device=config['device'], 
-                model=model, 
-                config=config
-            )
-            print(f"Using GAMformerRegressor for validation")
-        else:
-            raise ValueError(f"Model {model.__class__.__name__} not supported for regression validation")
+            # Create appropriate regressor based on model type
+            if isinstance(model, (GAMformer, MotherNetAdditive)):
+                clf = GAMformerRegressor(
+                    device=config['device'], 
+                    model=model, 
+                    config=config
+                )
+                print(f"Using GAMformerRegressor for validation")
+            else:
+                raise ValueError(f"Model {model.__class__.__name__} not supported for regression validation")
+                
+            # Set validation parameters
+            base_path = 'models_diff/validation'
+            run_id = f"valid_run_{uuid4()}"
             
-        # Set validation parameters
-        base_path = 'models_diff/validation'
-        run_id = f"valid_run_{uuid4()}"
+            # Run validation
+            print(f"Starting regression validation on {len(cc_valid_datasets_regression)} datasets")
+            results = eval_on_datasets(
+                'regression', 
+                clf, 
+                run_id, 
+                cc_valid_datasets_regression,
+                metric_used=tabular_metrics.root_mean_squared_error_metric, 
+                split_numbers=[1, 2, 3, 4, 5],
+                eval_positions=[1000], 
+                max_times=[1], 
+                n_samples=2000, 
+                base_path=base_path,
+                overwrite=False, 
+                n_jobs=1, 
+                device=config['device'], 
+                save=False, 
+                max_features=config['prior']['num_features'],
+                pca=config['openmlloader']['pca'],
+            )
+            
+            # Calculate validation scores
+            mean_rmse = np.array([r['mean_metric'] for r in results]).mean()
+            per_dataset_scores = {key: np.mean([g['mean_metric'] for g in group]) 
+                                for key, group in itertools.groupby(results, lambda x: x['dataset'])}
+            
+            print(f"Validation complete. Mean RMSE: {mean_rmse:.4f} across {len(per_dataset_scores)} datasets")
+            
+            return mean_rmse, per_dataset_scores
+            
+    finally:
+        # ALWAYS restore log levels, even if an exception occurs
         
-        # Run validation
-        print(f"Starting regression validation on {len(cc_valid_datasets_regression)} datasets")
-        results = eval_on_datasets(
-            'regression', 
-            clf, 
-            run_id, 
-            cc_valid_datasets_regression,
-            metric_used=tabular_metrics.root_mean_squared_error_metric, 
-            split_numbers=[1, 2, 3, 4, 5],
-            eval_positions=[1000], 
-            max_times=[1], 
-            n_samples=2000, 
-            base_path=base_path,
-            overwrite=False, 
-            n_jobs=1, 
-            device=config['device'], 
-            save=False, 
-            max_features=config['prior']['num_features'],
-            pca=config['openmlloader']['pca'],
-        )
+        # Restore the original memory_logger level 
+        if original_logger_level is not None:
+            memory_logger.setLevel(original_logger_level)
         
-        # Calculate validation scores
-        mean_rmse = np.array([r['mean_metric'] for r in results]).mean()
-        per_dataset_scores = {key: np.mean([g['mean_metric'] for g in group]) 
-                              for key, group in itertools.groupby(results, lambda x: x['dataset'])}
-        
-        print(f"Validation complete. Mean RMSE: {mean_rmse:.4f} across {len(per_dataset_scores)} datasets")
-        
-        # Restore the original log level after validation
+        # Restore the original console handler level
+        if original_console_level is not None:
+            for handler in memory_logger.handlers:
+                if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+                    handler.setLevel(original_console_level)
+                    
+        # Also restore using the original method for backward compatibility
         set_log_level(logging.getLevelName(original_log_level))
         
-        return mean_rmse, per_dataset_scores
+        print(f"Log levels restored to original settings after validation")
+    
     
 def broadcast_for_normal(mean, std):
     """
