@@ -73,6 +73,9 @@ def transformer_metric(x, y, test_x, test_y, cat_features, metric_used, max_time
         classifier.fit(x, y)
     except Exception as e:
         print(f"Error during classifier fitting: {e}")
+        # Print full stack trace for debugging
+        import traceback
+        traceback.print_exc()
         # Create a fallback classifier if fit fails
         from sklearn.dummy import DummyClassifier
         print("Using fallback DummyClassifier for this dataset due to fitting error")

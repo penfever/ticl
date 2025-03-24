@@ -5,6 +5,8 @@ import itertools
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.preprocessing import LabelEncoder
 from sklearn.utils.validation import check_is_fitted, check_X_y, check_array
+from sklearn.utils import column_or_1d
+from sklearn.utils.multiclass import check_classification_targets
 import pandas as pd
 from transformers import CLIPTokenizerFast
 
@@ -131,7 +133,7 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
             print(f"Using {N_ensemble_configurations} ensemble configurations")
             print(f"Semantic feature probability: {self.semantic_feature_p}")
         
-    def fit(self, X, y, semantic_column_indices=None, X_semantic_text=None):
+    def fit(self, X, y, semantic_column_indices=None, X_semantic_text=None, overwrite_warning=False):
         """
         Fit the classifier to the training data.
         
@@ -145,104 +147,150 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
             Indices of columns that are semantic (text-based) features
         X_semantic_text : array-like or dict, optional
             Semantic text data corresponding to semantic columns
-        
+        overwrite_warning : bool, optional
+            Whether to ignore warnings about dataset size limitations
+            
         Returns:
         --------
         self : object
             Returns self
         """
-        # Handle NaN values in input data
-        if isinstance(X, np.ndarray) and (np.isnan(X).any() or np.isinf(X).any()):
-            # Replace NaN and Inf values with suitable defaults
-            if self.verbose:
-                print(f"Warning: Input contains {np.isnan(X).sum()} NaN values and {np.isinf(X).sum()} Inf values. Replacing with zeros.")
-            X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
-        elif hasattr(X, 'values'):  # Handle pandas DataFrame
-            if X.isna().any().any() or np.isinf(X.values).any():
-                if self.verbose:
-                    print(f"Warning: Input DataFrame contains NaN or Inf values. Replacing with zeros.")
-                X = X.fillna(0)
-                X = X.replace([np.inf, -np.inf], 0)
-                
-        # Now validate inputs with fixed data
-        try:
-            X, y = check_X_y(X, y, force_all_finite='allow-nan')
-            # If we got here with allow-nan, we still need to clean the data
-            if np.isnan(X).any() or np.isinf(X).any():
-                X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
-        except Exception as e:
-            # If check_X_y fails completely, attempt to proceed with minimal validation
-            if self.verbose:
-                print(f"Warning: Input validation failed: {e}. Attempting to proceed with minimal validation.")
-            if not isinstance(X, np.ndarray):
-                X = np.array(X, dtype=np.float32)
-            if not isinstance(y, np.ndarray):
-                y = np.array(y)
-            # Replace any remaining NaN/Inf values
-            X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+        # Check that X and y have correct shape
+        X, y = check_X_y(X, y)
         
-        # Store classes seen during fit
-        self.classes_ = np.unique(y)
-        if len(self.classes_) < 2:
-            raise ValueError("Need samples of at least 2 classes in the data, "
-                             f"but the data contains only one class: {self.classes_[0]}")
+        # Store the classes seen during fit
+        self._validate_targets(y)
         
-        # Encode class labels
-        self.label_encoder = LabelEncoder()
-        y_encoded = self.label_encoder.fit_transform(y)
-        
-        # Handle semantic columns
+        # Keep track of semantic column indices if provided
         if semantic_column_indices is not None:
             self.semantic_column_indices = semantic_column_indices
-        
-        # If we have semantic column indices but no textual data, try to infer it from X
-        if self.semantic_column_indices and X_semantic_text is None:
-            # In a real implementation, you might extract text from a pandas DataFrame here
-            self.has_semantic_data = False
-        elif X_semantic_text is not None:
-            self.X_semantic_text = X_semantic_text
             self.has_semantic_data = True
         else:
+            # If not provided, assume no semantic features in X
             self.has_semantic_data = False
             
-        # Convert to torch tensors and store - ensuring proper dtype compatibility for MPS
+        # Store semantic text data if provided
+        if X_semantic_text is not None:
+            self.X_semantic_text = X_semantic_text
+            self.has_semantic_data = True
+            
+        # Process input dimensions
+        if X.shape[1] > self.max_num_features_with_semantic:
+            if self.verbose:
+                print(f"Warning: Input has {X.shape[1]} features, but model only supports {self.max_num_features_with_semantic}")
+                
+            # Determine which features to keep
+            if self.semantic_column_indices:
+                # Prioritize semantic features if we have any
+                semantic_indices = set(self.semantic_column_indices)
+                remaining_indices = set(range(X.shape[1])) - semantic_indices
+                
+                # Calculate how many non-semantic features we can keep
+                remaining_slots = self.max_num_features_with_semantic - len(semantic_indices)
+                
+                if remaining_slots > 0:
+                    # Set random seed for reproducibility
+                    np.random.seed(self.seed)
+                    # Choose from remaining indices
+                    remaining_selected = sorted(np.random.choice(
+                        list(remaining_indices), 
+                        min(remaining_slots, len(remaining_indices)), 
+                        replace=False
+                    ))
+                    # Combine selected indices
+                    self.feature_indices = sorted(list(semantic_indices) + remaining_selected)
+                else:
+                    # Only room for some or all semantic features
+                    self.feature_indices = sorted(list(semantic_indices))[:self.max_num_features_with_semantic]
+            else:
+                # No semantic features, just select random features
+                np.random.seed(self.seed)
+                self.feature_indices = sorted(np.random.choice(
+                    X.shape[1], 
+                    self.max_num_features_with_semantic, 
+                    replace=False
+                ))
+                
+            # Apply feature selection
+            X = X[:, self.feature_indices]
+            
+            # Update semantic column indices if they exist
+            if self.semantic_column_indices:
+                # Create mapping from old indices to new positions
+                old_to_new = {old_idx: new_idx for new_idx, old_idx in enumerate(self.feature_indices)}
+                # Update semantic column indices
+                self.semantic_column_indices = [old_to_new[idx] for idx in self.semantic_column_indices 
+                                             if idx in old_to_new]
+                
+        # Check class count
+        if len(self.classes_) > self.max_num_classes:
+            if self.verbose:
+                print(f"Warning: Input has {len(self.classes_)} classes, but model only supports {self.max_num_classes}")
+                print(f"Only using the first {self.max_num_classes} classes")
+                
+            # Get the most frequent classes
+            unique_classes, counts = np.unique(y, return_counts=True)
+            class_order = np.argsort(-counts)  # Sort by descending count
+            top_classes = unique_classes[class_order[:self.max_num_classes]]
+            
+            # Create mask for examples belonging to top classes
+            mask = np.isin(y, top_classes)
+            
+            # Filter X and y
+            X = X[mask]
+            y = y[mask]
+            
+            # Update classes
+            self.classes_ = np.array(top_classes)
+            
+            # Re-encode labels to be consecutive integers
+            label_encoder = LabelEncoder()
+            y = label_encoder.fit_transform(y)
+            self.label_map_ = dict(zip(range(len(label_encoder.classes_)), label_encoder.classes_))
+        
+        # Convert to PyTorch tensors
         if self.device == 'mps':
             # MPS doesn't support float64, explicitly convert to float32
             self.X_ = torch.tensor(X, dtype=torch.float32, device=self.device)
         else:
             self.X_ = torch.tensor(X, device=self.device).float()
-        self.y_ = torch.tensor(y_encoded, device=self.device).long()
-        
-        # Handle feature count constraints
-        if X.shape[1] > self.max_num_features:
-            if self.verbose:
-                print(f"Warning: Input has {X.shape[1]} features, but model supports {self.max_num_features}. "
-                      f"Random features will be selected.")
-            # Randomly select features
-            self.feature_indices = np.random.choice(X.shape[1], self.max_num_features, replace=False)
-            self.X_ = self.X_[:, self.feature_indices]
             
-            # Update semantic column indices if we have them
-            if self.semantic_column_indices:
-                self.semantic_column_indices = [i for i in self.semantic_column_indices if i in self.feature_indices]
-        else:
-            self.feature_indices = None
+        self.y_ = torch.tensor(y, dtype=torch.long, device=self.device)
         
-        # Prepare class descriptions if we have semantic aware model
-        if self.semantic_class_descriptions is None and hasattr(self.model, 'generate_boundaries_from_text'):
-            # If no descriptions provided, create simple class names
-            self.semantic_class_descriptions = {
-                f"Class {i}": f"This is class {self.label_encoder.inverse_transform([i])[0]}"
-                for i in range(len(self.classes_))
-            }
-            if self.verbose:
-                print(f"Created default class descriptions: {self.semantic_class_descriptions}")
+        # Set model to eval mode
+        self.model.eval()
         
-        # Track if the model has been fitted
+        # Mark as fitted
         self.is_fitted_ = True
-            
+        
         return self
     
+    def _validate_targets(self, y):
+        """
+        Validate and format target values y
+        
+        Parameters:
+        -----------
+        y : array-like
+            Target values
+            
+        Returns:
+        --------
+        array
+            Validated target values
+        """
+        y_ = column_or_1d(y, warn=True)
+        check_classification_targets(y)
+        cls, y = np.unique(y_, return_inverse=True)
+        if len(cls) < 2:
+            raise ValueError(
+                "The number of classes has to be greater than one; got %d class"
+                % len(cls)
+            )
+        
+        self.classes_ = cls
+        return np.asarray(y, dtype=np.float64, order="C")
+
     def get_ensemble_configurations(self):
         """
         Generate ensemble configurations for prediction.
@@ -262,7 +310,7 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
         
         # 2. Semantic variations if we have semantic columns
         semantic_configurations = []
-        if self.semantic_column_indices and self.has_semantic_data:
+        if self.semantic_column_indices and hasattr(self, 'has_semantic_data') and self.has_semantic_data:
             # Create different ways to sample semantic text
             semantic_configurations = [f"semantic_sample_{i}" for i in range(3)]
         
@@ -304,239 +352,159 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
         y_proba : array-like of shape (n_samples, n_classes)
             Class probabilities for each sample
         """
-        try:
-                
-            # Check if fit had been called
-            check_is_fitted(self, ['is_fitted_'])
+        # Check if fit has been called
+        check_is_fitted(self, ['is_fitted_'])
+        
+        # Input validation
+        X = check_array(X)
+        
+        # Apply feature selection if needed
+        if hasattr(self, 'feature_indices') and self.feature_indices is not None:
+            X = X[:, self.feature_indices]
             
-            # Input validation
-            X = check_array(X)
+        # Convert to torch tensor
+        if self.device == 'mps':
+            # MPS doesn't support float64, explicitly convert to float32
+            X_test = torch.tensor(X, dtype=torch.float32, device=self.device)
+        else:
+            X_test = torch.tensor(X, device=self.device).float()
             
-            # Apply feature selection if needed
-            if self.feature_indices is not None:
-                X = X[:, self.feature_indices]
-                
-            # Concatenate training and test data
-            if torch.is_tensor(X):
-                # Both are already tensors
-                X_test = X.to(self.device)
+        # Combine training and test data for in-context learning
+        X_full = torch.cat([self.X_, X_test], dim=0).unsqueeze(1)
+        
+        # Create zeros tensor for test labels
+        test_zeros = torch.zeros(len(X_test), dtype=torch.long, device=self.device)
+        
+        # Combine train and test labels
+        y_full = torch.cat([self.y_, test_zeros], dim=0).unsqueeze(1)
+        
+        # Get number of classes
+        num_classes = len(torch.unique(self.y_))
+        
+        # Generate ensemble configurations
+        ensemble_configs = self.get_ensemble_configurations()
+        
+        # Create a helper function to track and process semantic columns
+        categorical_feats = []
+        if self.semantic_column_indices:
+            categorical_feats = self.semantic_column_indices
+            
+        # Store evaluation position (separate train from test)
+        eval_pos = self.X_.shape[0]
+        
+        # Set random seed for reproducible predictions
+        if self.seed is not None:
+            random.seed(self.seed)
+            np.random.seed(self.seed)
+            torch.manual_seed(self.seed)
+            
+        # Initialize output storage
+        output = None
+        eval_xs_transformed = {}
+        
+        # Process each ensemble configuration
+        for ensemble_idx, config in enumerate(ensemble_configs):
+            # Unpack configuration
+            feature_perm, semantic_config, preprocess_type, label_perm = config
+            
+            # Create a copy of input data for this configuration
+            X_ensemble = X_full.clone()
+            y_ensemble = y_full.clone()
+            
+            # Preprocess features
+            if preprocess_type in eval_xs_transformed:
+                # Reuse already preprocessed data
+                X_processed = eval_xs_transformed[preprocess_type].clone()
             else:
-                # Convert test data to tensor with proper dtype for device
-                if self.device == 'mps':
-                    # MPS doesn't support float64, explicitly convert to float32
-                    X_test = torch.tensor(X, dtype=torch.float32, device=self.device)
-                else:
-                    X_test = torch.tensor(X, device=self.device).float()
+                # Apply preprocessing
+                X_processed = self._preprocess_input(
+                    X_ensemble,
+                    y_ensemble,
+                    preprocess_transform=preprocess_type,
+                    max_features=self.max_num_features_with_semantic,
+                    normalize_with_test=normalize_with_test,
+                    eval_position=eval_pos,
+                    categorical_feats=categorical_feats,
+                    device=self.device,
+                    scale=True,
+                    normalize_by_used_features=True
+                )
+                # Store for potential reuse
+                eval_xs_transformed[preprocess_type] = X_processed
                 
-            # Make sure both tensors are on the same device
-            if self.X_.device != X_test.device:
-                X_test = X_test.to(self.X_.device)
-                
-            X_full = torch.cat((self.X_, X_test), dim=0).float().unsqueeze(1)
-                
-            # Create targets tensor - being careful with device
-            if torch.is_tensor(self.y_):
-                # If y is a tensor, we need to move it to CPU before converting to numpy
-                y_train_np = self.y_.cpu().numpy()
-            else:
-                # It's already a numpy array
-                y_train_np = self.y_
-                
-            # Create y for test samples (zeros)
-            y_test_np = np.zeros(shape=X.shape[0])
-            
-            # Combine and convert to tensor on correct device
-            y_full_np = np.concatenate([y_train_np, y_test_np], axis=0)
-            y_full = torch.tensor(y_full_np, device=self.device).float().unsqueeze(1)
-            
-            # Position for evaluation
-            eval_pos = len(self.X_)
-            
-            # Use the class descriptions if provided, otherwise use stored ones
-            descriptions = class_descriptions or self.semantic_class_descriptions
-            
-            # Detect if we should use zero-padding from config (TabPFN approach)
-            extend_features = True
-            try:
-                if hasattr(self.model.base_model, 'c') and 'prior' in self.model.base_model.c:
-                    extend_features = self.model.base_model.c['prior']['classification'].get('pad_zeros', True)
-                elif hasattr(self.model, 'c') and 'prior' in self.model.c:
-                    extend_features = self.model.c['prior']['classification'].get('pad_zeros', True)
-                elif hasattr(self.config, 'get') and 'prior' in self.config:
-                    extend_features = self.config['prior']['classification'].get('pad_zeros', True)
-            except (KeyError, AttributeError):
-                pass
-                
-            # Get maximum number of features the model supports
-            max_features = self.max_num_features
-            
-            # Prepare prediction configurations
-            preprocess_transform = 'none' if getattr(self, 'no_preprocess_mode', False) else 'mix'
-            preprocess_transform_configurations = ['none', 'power_all'] if preprocess_transform == 'mix' else [preprocess_transform]
-            
-            # Determine categorical features (semantic features should be treated as categorical)
-            categorical_feats = self.semantic_column_indices or []
-            
-            # Set random seed
-            if self.seed is not None:
-                torch.manual_seed(self.seed)
-                random.seed(self.seed)
-                np.random.seed(self.seed)
-                
-            # Create ensemble configurations (following TabPFN approach)
-            feature_shift_configurations = torch.randperm(X_full.shape[2]) if getattr(self, 'feature_shift_decoder', True) else [0]
-            class_shift_configurations = torch.randperm(len(torch.unique(y_full[:eval_pos]))) if getattr(self, 'multiclass_decoder', 'permutation') == 'permutation' else [0]
-            
-            ensemble_configurations = list(itertools.product(class_shift_configurations, feature_shift_configurations))
-            
-            # Shuffle configurations
-            rng = random.Random(self.seed)
-            rng.shuffle(ensemble_configurations)
-            ensemble_configurations = list(itertools.product(ensemble_configurations, preprocess_transform_configurations))
-            ensemble_configurations = ensemble_configurations[0:self.N_ensemble_configurations]
-                
-            # Start ensemble prediction
-            output = None
-            X_transformed = {}
-            inputs, labels = [], []
-            
-            for ensemble_configuration in ensemble_configurations:
-                (class_shift_configuration, feature_shift_configuration), preprocess_transform_configuration = ensemble_configuration
-                
-                X_, y_ = X_full.clone(), y_full.clone()
-                
-                # Check if we have already transformed this configuration
-                if preprocess_transform_configuration in X_transformed:
-                    X_ = X_transformed[preprocess_transform_configuration].clone()
-                else:
-                    # Use TabPFN's preprocess_input function with our semantic column awareness
-                    X_ = self._preprocess_input(
-                        X_, 
-                        y_full[:eval_pos], 
-                        preprocess_transform=preprocess_transform_configuration, 
-                        max_features=max_features,
-                        normalize_with_test=normalize_with_test, 
-                        eval_position=eval_pos, 
-                        categorical_feats=categorical_feats,
-                        scale=getattr(self, 'scale', True), 
-                        normalize_by_used_features=extend_features
-                    )
-                    X_transformed[preprocess_transform_configuration] = X_
+            # Apply feature permutation if needed
+            if len(feature_perm) > 1:  # Only permute if we have a meaningful permutation
+                # Compute feature permutation
+                n_features = X_processed.shape[2]
+                # Create a permutation that respects categorical features
+                if categorical_feats:
+                    # Keep semantic columns in place, permute others
+                    feature_indices = list(range(n_features))
+                    semantic_set = set(categorical_feats)
+                    non_semantic = [i for i in feature_indices if i not in semantic_set]
                     
-                # Apply class shift (label permutation)
-                y_ = ((y_[:eval_pos] + class_shift_configuration) % len(self.classes_)).float()
-                
-                # Apply feature shift
-                X_ = torch.cat([X_[..., feature_shift_configuration:], X_[..., :feature_shift_configuration]], dim=-1)
-                
-                # Extend features if needed (zero padding)
-                if extend_features and X_.shape[2] < max_features:
-                    X_ = torch.cat(
-                        [X_, torch.zeros((X_.shape[0], X_.shape[1], max_features - X_.shape[2])).to(self.device)], -1)
+                    # Permute non-semantic features
+                    perm_non_semantic = [non_semantic[i] for i in feature_perm[:len(non_semantic)]]
                     
-                inputs += [X_]
-                labels += [y_]
+                    # Create full permutation
+                    full_perm = list(categorical_feats) + perm_non_semantic
+                else:
+                    # Permute all features
+                    full_perm = [int(i) for i in feature_perm[:n_features]]
+                    
+                # Apply permutation
+                X_processed = X_processed[:, :, full_perm]
                 
-            # Combine all configurations into batches
-            inputs = torch.cat(inputs, 1)
-            inputs = torch.split(inputs, self.batch_size, dim=1)
-            labels = torch.cat(labels, 1)
-            labels = torch.split(labels, self.batch_size, dim=1)
+            # Apply class label permutation if needed
+            if len(label_perm) > 1:  # Only permute if we have a meaningful permutation
+                # Permute class labels for training portion
+                perm = [int(i) for i in label_perm]
+                y_train_permuted = torch.tensor([(perm[int(y)] if int(y) < len(perm) else y) 
+                                               for y in y_ensemble[:eval_pos].cpu().numpy().flatten()],
+                                              device=self.device)
+                # Keep test labels as zeros
+                y_ensemble = torch.cat([y_train_permuted.unsqueeze(1), y_ensemble[eval_pos:]], dim=0)
             
-            # Run prediction on batches
-            outputs = []
-            num_classes = len(self.classes_)
-            softmax_temperature = getattr(self, 'temperature', torch.log(torch.tensor([0.8], device=self.device)))
-    
-            # Process each batch
+            # Forward pass through model
             with torch.no_grad():
-                for batch_input, batch_label in zip(inputs, labels):
-                    # Get model prediction
-                    # Run the model in evaluation mode
-                    self.model.eval()
-                    
-                    # Handle case where the model yields different outputs
-                    if hasattr(self.model, 'generate_boundaries_from_text') and descriptions and len(descriptions) > 0:
-                        # Use text-based boundary generation if available
-                        model_output = self.model.generate_boundaries_from_text(
-                            (batch_input, batch_label.float()), 
-                            class_descriptions=descriptions
-                        )
-                        if isinstance(model_output, dict) and 'class_logits' in model_output:
-                            output_batch = model_output['class_logits']
-                        else:
-                            # Get predictions from other fields if class_logits not available
-                            output_batch = model_output.get('logits', model_output.get('class_preds', None))
-                            if output_batch is None:
-                                raise ValueError("Could not extract predictions from model output")
-                    else:
-                        # Standard forward pass
-                        output = self.model(
-                            (batch_input, batch_label.float()),
-                            single_eval_pos=eval_pos
-                        )
-                        
-                        # Handle different output formats
-                        if isinstance(output, dict) and 'class_logits' in output:
-                            output_batch = output['class_logits']
-                        elif isinstance(output, dict) and 'logits' in output:
-                            output_batch = output['logits']
-                        else:
-                            # Direct tensor output (base model pass-through)
-                            output_batch = output
-                    
-                    # Apply temperature scaling if needed
-                    output_batch = output_batch[:, :, 0:num_classes] / torch.exp(softmax_temperature)
-                    outputs.append(output_batch)
-            
-            # Combine all batch outputs
-            if outputs:
-                outputs = torch.cat(outputs, 1)
+                # Get model predictions
+                outputs = self.model((X_processed, y_ensemble.float()), single_eval_pos=eval_pos)
                 
-                # Process each ensemble configuration
-                output = None
-                for i, ensemble_configuration in enumerate(ensemble_configurations):
-                    (class_shift_configuration, feature_shift_configuration), preprocess_transform_configuration = ensemble_configuration
-                    output_ = outputs[:, i:i+1, :]
-                    
-                    # Reverse class shift
-                    output_ = torch.cat([output_[..., class_shift_configuration:], output_[..., :class_shift_configuration]], dim=-1)
-                    
-                    # Average or convert to probabilities
-                    if not return_logits:
-                        # Apply softmax to convert to probabilities
-                        output_ = torch.nn.functional.softmax(output_, dim=-1)
-                    
-                    # Add to ensemble output
-                    output = output_ if output is None else output + output_
+                # Keep only outputs for classes we care about
+                outputs = outputs[:, :, 0:num_classes]
                 
-                # Average ensemble outputs
-                output = output / len(ensemble_configurations)
+                # Apply temperature scaling
+                outputs = outputs / torch.exp(torch.tensor([0.8], device=self.device).log())
                 
-                # Apply final softmax if needed
+                # Convert to probabilities if not returning logits
                 if not return_logits:
-                    # Already applied softmax to each configuration
-                    pass
-                
-                # Get test set predictions (transpose to match sklearn format)
-                output = torch.transpose(output, 0, 1)
-                prediction = output.detach().cpu().numpy()
-                
-                # Return prediction probabilities for all classes
-                return prediction
-            else:
-                # Fallback if no predictions could be generated
-                return np.zeros((X.shape[0], len(self.classes_)))
-                
-        except Exception as e:
-            # Log the error and return a fallback prediction
-            if self.verbose:
-                print(f"Error during prediction: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                    outputs = torch.nn.functional.softmax(outputs, dim=-1)
+                    
+                # Reverse label permutation if applied
+                if len(label_perm) > 1:
+                    inv_perm = torch.zeros_like(label_perm)
+                    for i, p in enumerate(label_perm):
+                        inv_perm[p] = i
+                    outputs = outputs[:, :, inv_perm]
+                    
+                # Add to ensemble output
+                if output is None:
+                    output = outputs
+                else:
+                    output = output + outputs
+        
+        # Average ensemble outputs
+        output = output / len(ensemble_configs)
+        
+        # Apply softmax if averaging logits
+        if return_logits is False and len(ensemble_configs) > 1:
+            output = torch.nn.functional.softmax(output, dim=-1)
             
-            # Return zero probabilities as fallback
-            return np.zeros((len(X), len(self.classes_)))
+        # Transpose to get [batch, samples, classes]
+        output = torch.transpose(output, 0, 1)
+        
+        # Return numpy array
+        return output.squeeze(0).cpu().numpy()
             
     def _preprocess_input(self, eval_xs, eval_ys, preprocess_transform, max_features, 
                          normalize_with_test, eval_position, categorical_feats, 
@@ -1193,14 +1161,235 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
         y_pred : array-like of shape (n_samples,)
             Predicted class labels
         """
-        # Get probability predictions
         proba = self.predict_proba(X, class_descriptions=class_descriptions)
+        y_pred = np.argmax(proba, axis=1)
+        return self.classes_[y_pred]
+    
+    def predict_semantic(self, X, X_semantic_text=None, class_descriptions=None):
+        """
+        Predict class labels for the input samples X using semantic features.
         
-        # Get the most likely class
-        indices = np.argmax(proba, axis=1)
+        Parameters:
+        -----------
+        X : array-like of shape (n_samples, n_features)
+            Test samples
+        X_semantic_text : array-like or dict, optional
+            Semantic text data for test samples
+        class_descriptions : dict or list, optional
+            Text descriptions for each class
+            
+        Returns:
+        --------
+        y_pred : array-like of shape (n_samples,)
+            Predicted class labels
+        class_similarities : array-like of shape (n_samples, n_classes)
+            Similarity scores between input and each class
+        """
+        # Check if fit has been called
+        check_is_fitted(self, ['is_fitted_'])
         
-        # Map indices back to original classes
-        return self.classes_[indices]
+        # Check if model has semantic capabilities
+        if not hasattr(self.model, 'process_semantic_features'):
+            raise NotImplementedError("The underlying model does not support semantic feature processing")
+        
+        # Input validation
+        X = check_array(X)
+        
+        # Apply feature selection if needed
+        if hasattr(self, 'feature_indices') and self.feature_indices is not None:
+            X = X[:, self.feature_indices]
+            
+        # Convert to torch tensor
+        if self.device == 'mps':
+            # MPS doesn't support float64, explicitly convert to float32
+            X_test = torch.tensor(X, dtype=torch.float32, device=self.device)
+        else:
+            X_test = torch.tensor(X, device=self.device).float()
+            
+        # Combine training and test data for in-context learning
+        X_full = torch.cat([self.X_, X_test], dim=0).unsqueeze(1)
+        
+        # Create zeros tensor for test labels
+        test_zeros = torch.zeros(len(X_test), dtype=torch.long, device=self.device)
+        
+        # Combine train and test labels
+        y_full = torch.cat([self.y_, test_zeros], dim=0).unsqueeze(1)
+        
+        # Process semantic text data if provided
+        semantic_batch_info = None
+        if X_semantic_text is not None:
+            semantic_batch_info = self._prepare_semantic_batch_info(X_semantic_text, class_descriptions)
+            
+        # Process class descriptions if provided
+        class_tokens = None
+        if class_descriptions is not None:
+            class_tokens = self._process_class_descriptions(class_descriptions)
+            
+        # Forward pass through model with semantic info
+        with torch.no_grad():
+            # Store evaluation position (separates train from test)
+            eval_pos = self.X_.shape[0]
+            
+            # Get predictions with semantic information
+            results = self.model(
+                (X_full, y_full.float()), 
+                single_eval_pos=eval_pos,
+                semantic_batch_info=semantic_batch_info,
+                class_tokens=class_tokens
+            )
+            
+            # Extract semantic similarities if available
+            if isinstance(results, dict) and 'class_semantic_similarities' in results:
+                class_similarities = results['class_semantic_similarities'].cpu().numpy()
+            else:
+                # Generate dummy similarities based on logits
+                logits = results[:, :, 0:len(self.classes_)]
+                class_similarities = torch.nn.functional.softmax(logits, dim=-1).cpu().numpy()
+                
+            # Get class predictions
+            pred_class_indices = np.argmax(class_similarities, axis=-1)
+            pred_classes = self.classes_[pred_class_indices]
+            
+            # Return both predictions and similarity scores
+            return pred_classes, class_similarities
+            
+    def _prepare_semantic_batch_info(self, X_semantic_text, class_descriptions=None):
+        """
+        Prepare semantic batch info from semantic text data
+        
+        Parameters:
+        -----------
+        X_semantic_text : array-like or dict
+            Semantic text data for input samples
+        class_descriptions : dict or list, optional
+            Text descriptions for each class
+            
+        Returns:
+        --------
+        dict
+            Batch info for semantic processing
+        """
+        # If no semantic text data, return None
+        if X_semantic_text is None:
+            return None
+            
+        # Basic structure for semantic batch info
+        batch_info = {
+            'semantic_targets': [],
+            'class_token_patterns': []
+        }
+        
+        # Process class descriptions if available
+        if class_descriptions is not None:
+            # Convert to standard format if needed
+            if isinstance(class_descriptions, list):
+                class_descriptions = {i: desc for i, desc in enumerate(class_descriptions)}
+                
+            # Create class token patterns
+            for class_idx, description in class_descriptions.items():
+                # Find corresponding numeric class if needed
+                if isinstance(class_idx, str) and hasattr(self, 'classes_') and any(isinstance(c, str) for c in self.classes_):
+                    # Try to find class index
+                    try:
+                        numeric_idx = np.where(self.classes_ == class_idx)[0][0]
+                    except:
+                        numeric_idx = -1  # Unknown class
+                else:
+                    numeric_idx = class_idx
+                    
+                # Create token pattern for this class
+                token_pattern = {
+                    'tokens': description,
+                    'column_name': f"class_{numeric_idx}",
+                    'class_name': str(class_idx),
+                    'semantic_class': numeric_idx
+                }
+                
+                batch_info['class_token_patterns'].append(token_pattern)
+                
+        # Process semantic text data
+        if isinstance(X_semantic_text, dict):
+            # Dictionary format with column names as keys
+            for col_name, col_text in X_semantic_text.items():
+                batch_info['semantic_targets'].append({
+                    'column_name': col_name,
+                    'text': col_text
+                })
+        elif isinstance(X_semantic_text, list):
+            # List format with text entries
+            for i, text in enumerate(X_semantic_text):
+                batch_info['semantic_targets'].append({
+                    'column_name': f"feature_{i}",
+                    'text': text
+                })
+        else:
+            # Unknown format, try to convert to string
+            batch_info['semantic_targets'].append({
+                'column_name': "text",
+                'text': str(X_semantic_text)
+            })
+            
+        return batch_info
+        
+    def _process_class_descriptions(self, class_descriptions):
+        """
+        Process class descriptions into tokens for model
+        
+        Parameters:
+        -----------
+        class_descriptions : dict or list
+            Text descriptions for each class
+            
+        Returns:
+        --------
+        dict
+            Processed tokens for each class
+        """
+        # Check if we need to process
+        if class_descriptions is None:
+            return None
+            
+        # Convert to standard format if needed
+        if isinstance(class_descriptions, list):
+            class_descriptions = {i: desc for i, desc in enumerate(class_descriptions)}
+            
+        # Initialize tokenizer
+        try:
+            from transformers import CLIPTokenizerFast
+            tokenizer = CLIPTokenizerFast.from_pretrained("openai/clip-vit-base-patch32")
+        except ImportError:
+            if self.verbose:
+                print("Could not import CLIPTokenizerFast, using raw text for class descriptions")
+            # Return raw text without tokenization
+            return class_descriptions
+            
+        # Process each class description
+        class_tokens = {}
+        for class_idx, description in class_descriptions.items():
+            # Find corresponding numeric class if needed
+            if isinstance(class_idx, str) and hasattr(self, 'classes_') and any(isinstance(c, str) for c in self.classes_):
+                # Try to find class index
+                try:
+                    numeric_idx = np.where(self.classes_ == class_idx)[0][0]
+                except:
+                    # If class not found, use raw text
+                    class_tokens[class_idx] = description
+                    continue
+            else:
+                numeric_idx = class_idx
+                
+            # Tokenize description
+            tokens = tokenizer(
+                description,
+                return_tensors="pt",
+                padding="max_length",
+                max_length=77,
+                truncation=True
+            ).to(self.device)
+            
+            class_tokens[numeric_idx] = tokens
+            
+        return class_tokens
     
     def _standardize_features(self, X_train, X_test, exclude_columns=None):
         """

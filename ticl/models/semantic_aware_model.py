@@ -95,7 +95,6 @@ class SemanticAwareClassifier(nn.Module):
         # CLIP has a maximum context length of 77 tokens, so we need to truncate if longer
         max_length = 77
         if semantic_tokens.shape[-1] > max_length:
-            memory_logger.debug(f"Truncating tokens from {semantic_tokens.shape[-1]} to {max_length}")
             semantic_tokens = semantic_tokens[..., :max_length]
             
         # Format tokens for CLIP
@@ -111,10 +110,7 @@ class SemanticAwareClassifier(nn.Module):
         # Ensure input_ids have the right shape (batch_size, seq_len)
         if input_ids.dim() == 1:
             input_ids = input_ids.unsqueeze(0)
-            
-        # Log shapes for debugging
-        memory_logger.debug(f"Input IDs shape: {input_ids.shape}, Attention mask shape: {attention_mask.shape}")
-        
+                    
         # Sanity check for sequence length
         if input_ids.shape[-1] > max_length:
             memory_logger.warning(f"Input IDs still too long ({input_ids.shape[-1]}), truncating to {max_length}")
@@ -172,17 +168,14 @@ class SemanticAwareClassifier(nn.Module):
             # Get semantic targets if available
             if 'semantic_targets' in batch_info:
                 semantic_targets = batch_info['semantic_targets']
-                memory_logger.debug(f"Found semantic_targets in batch_info with shape: {semantic_targets.shape}")
                 
             # Get class token patterns if available
             if 'class_token_patterns' in batch_info:
                 class_token_patterns = batch_info['class_token_patterns']
-                memory_logger.debug(f"Found class_token_patterns in batch_info with {len(class_token_patterns)} classes")
                 
             # Get direct semantic tokens if available (fallback)
             if 'semantic_tokens' in batch_info:
                 semantic_tokens = batch_info['semantic_tokens']
-                memory_logger.debug(f"Found direct semantic_tokens in batch_info with shape: {semantic_tokens.shape}")
         
         # As a backup, try to extract semantic info from the input tuple structure
         if (semantic_tokens is None or class_token_patterns is None) and isinstance(x, tuple):
@@ -202,15 +195,12 @@ class SemanticAwareClassifier(nn.Module):
             if info_dict is not None:
                 if 'semantic_tokens' in info_dict and semantic_tokens is None:
                     semantic_tokens = info_dict['semantic_tokens']
-                    memory_logger.debug(f"Found semantic_tokens in input structure with shape: {semantic_tokens.shape}")
                     
                 if 'class_token_patterns' in info_dict and class_token_patterns is None:
                     class_token_patterns = info_dict['class_token_patterns']
-                    memory_logger.debug(f"Found class_token_patterns in input structure with {len(class_token_patterns)} classes")
                     
                 if 'semantic_targets' in info_dict and semantic_targets is None:
                     semantic_targets = info_dict['semantic_targets']
-                    memory_logger.debug(f"Found semantic_targets in input structure with shape: {semantic_targets.shape}")
         
         # Extract features from the base model for record keeping, but we don't use these
         extracted_features = None
@@ -230,7 +220,6 @@ class SemanticAwareClassifier(nn.Module):
         
         # Process if we have class token patterns available
         if class_token_patterns is not None and len(class_token_patterns) > 0:
-            memory_logger.debug(f"Processing {len(class_token_patterns)} class token patterns")
             
             # For each class token pattern, get CLIP embeddings of:
             # 1. The token sequence itself
@@ -260,7 +249,6 @@ class SemanticAwareClassifier(nn.Module):
             # Fallback: use direct semantic tokens if available
             fallback_embedding = self._process_semantic_tokens(semantic_tokens)
             pattern_embeddings[0] = fallback_embedding
-            memory_logger.debug(f"Using fallback semantic tokens with shape: {fallback_embedding.shape}")
         
         # Check if we managed to get any embeddings
         if not pattern_embeddings:
@@ -271,7 +259,6 @@ class SemanticAwareClassifier(nn.Module):
         
         # If class_texts are provided, use them directly
         if class_texts and len(class_texts) > 0:
-            memory_logger.debug(f"Processing {len(class_texts)} provided class texts")
             with torch.no_grad():
                 for i, text in enumerate(class_texts):
                     text_tokens = self.tokenizer(
@@ -286,7 +273,6 @@ class SemanticAwareClassifier(nn.Module):
                     class_embeddings[i] = text_output.pooler_output
         # Otherwise, try to use class_name from token patterns
         elif class_token_patterns is not None:
-            memory_logger.debug("Using class_name from token patterns for semantic classes")
             with torch.no_grad():
                 for class_idx, pattern in class_token_patterns.items():
                     if 'class_name' in pattern and pattern['class_name'] is not None:
@@ -328,9 +314,7 @@ class SemanticAwareClassifier(nn.Module):
         batch_size = 1
         if isinstance(base_output, torch.Tensor) and base_output.dim() >= 3:
             batch_size = base_output.shape[1]
-        
-        memory_logger.debug(f"Using batch size {batch_size} for semantic logits")
-        
+                
         # For tracking tokenization info
         all_token_texts = []
         
@@ -409,9 +393,6 @@ class SemanticAwareClassifier(nn.Module):
             class_embeddings_norm.t()
         )
         
-        memory_logger.debug(f"Raw similarities shape: {raw_similarities.shape}, "
-                           f"({len(pattern_to_class_mapping)} patterns, {len(class_indices)} classes)")
-        
         # Now reshape for loss calculation - we need [batch_size, num_embeddings, num_classes]
         # Different cases depending on number of embeddings vs batch size:
         num_patterns = len(pattern_to_class_mapping)
@@ -427,9 +408,7 @@ class SemanticAwareClassifier(nn.Module):
         else:
             # More patterns than batch size - use the first batch_size
             semantic_logits = raw_similarities[:batch_size].unsqueeze(1)  # [batch, 1, num_classes]
-        
-        memory_logger.debug(f"Final semantic logits shape: {semantic_logits.shape}")
-        
+                
         # Create return dictionary
         result = {
             'class_logits': base_output,
@@ -618,10 +597,6 @@ class SemanticConsistencyLoss(nn.Module):
         # Get logits and targets
         semantic_logits = outputs['semantic_logits']  # [batch_size, num_embeddings, num_classes]
         semantic_targets = targets['semantic_targets']  # [samples, batch_size]
-        
-        # Log shapes for debugging
-        memory_logger.debug(f"In loss function - semantic_logits shape: {semantic_logits.shape}")
-        memory_logger.debug(f"In loss function - semantic_targets shape: {semantic_targets.shape}")
         
         # Check for valid semantic targets (not -100)
         valid_mask = semantic_targets != -100
