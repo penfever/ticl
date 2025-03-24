@@ -59,16 +59,28 @@ try:
 except Exception as e:
     print(f"Could not create log files for debugging: {e}")
 
+# Store the current log level to avoid losing it during validation
+_current_log_level = logging.INFO
+
 # Function to set log level from command line
 def set_log_level(level_name):
     """Set the console log level based on command line argument"""
+    global _current_log_level
     level = getattr(logging, level_name.upper(), logging.INFO)
+    # Store the current log level
+    _current_log_level = level
     # Update console handler level
     for handler in memory_logger.handlers:
         if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
             handler.setLevel(level)
     memory_logger.info(f"Log level set to {level_name}")
     return level
+
+# Function to get the current log level
+def get_current_log_level():
+    """Get the current log level that was set by set_log_level"""
+    global _current_log_level
+    return _current_log_level
 
 from pathlib import Path
 from torch import nn
@@ -719,6 +731,8 @@ def validate_model(model, config):
         mean_score: Mean metric score across all datasets
         per_dataset_scores: Dictionary of scores by dataset
     """
+    # Store the current log level before validation
+    original_log_level = get_current_log_level()
     from ticl.datasets import load_openml_list, open_cc_valid_dids, open_cc_valid_dids_regression, open_cc_large_dids, new_valid_dids
 
     from ticl.models.gamformer import GAMformer
@@ -874,6 +888,10 @@ def validate_model(model, config):
                               for key, group in itertools.groupby(results, lambda x: x['dataset'])}
         
         print(f"Validation complete. Mean AUC: {mean_auc:.4f} across {len(per_dataset_scores)} datasets")
+        
+        # Restore the original log level after validation
+        set_log_level(logging.getLevelName(original_log_level))
+        
         return mean_auc, per_dataset_scores
     
     # Regression validation
@@ -932,6 +950,10 @@ def validate_model(model, config):
                               for key, group in itertools.groupby(results, lambda x: x['dataset'])}
         
         print(f"Validation complete. Mean RMSE: {mean_rmse:.4f} across {len(per_dataset_scores)} datasets")
+        
+        # Restore the original log level after validation
+        set_log_level(logging.getLevelName(original_log_level))
+        
         return mean_rmse, per_dataset_scores
     
 def broadcast_for_normal(mean, std):
