@@ -419,7 +419,17 @@ def preprocess_input(
     eval_xs = eval_xs[:, 0, :]
 
     def check_col_values(col_tensor):
-        return len(torch.unique(col_tensor[~col_tensor.isnan()])) > 1
+        # Check if this is a torch tensor
+        if torch.is_tensor(col_tensor):
+            # Use torch.isnan() for torch tensors
+            nan_mask = torch.isnan(col_tensor)
+            # Use ~ to invert the mask (get non-NaN values)
+            return len(torch.unique(col_tensor[~nan_mask])) > 1
+        else:
+            # Fallback for numpy arrays or pandas Series
+            import numpy as np
+            nan_mask = np.isnan(col_tensor)
+            return len(np.unique(col_tensor[~nan_mask])) > 1
     sel = [check_col_values(eval_xs[0:eval_ys.shape[0], col]) for col in range(eval_xs.shape[1])]
     # sel = eval_xs[0:eval_ys.shape[0]].var(dim=0) > 0
     eval_xs = eval_xs[:, sel]
