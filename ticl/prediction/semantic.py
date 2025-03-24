@@ -780,13 +780,7 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
                 self._fill_semantic_features_with_numeric_semanticization(eval_xs, device, categorical_feats)
         
         # Initialize preprocessing transformer based on type
-        if preprocess_transform != 'none':
-            if preprocess_transform == 'power' or preprocess_transform == 'power_all':
-                pt = PowerTransformer(standardize=True)
-            elif preprocess_transform == 'quantile' or preprocess_transform == 'quantile_all':
-                pt = QuantileTransformer(output_distribution='normal')
-            elif preprocess_transform == 'robust' or preprocess_transform == 'robust_all':
-                pt = RobustScaler(unit_variance=True)
+        # (This is now handled in the main transformation section to avoid code duplication)
         
         # Apply normalization if scaling is enabled
         if scale:
@@ -855,6 +849,19 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
         # Apply feature transformation
         warnings.simplefilter('error')
         if preprocess_transform != 'none':
+            # Initialize preprocessor transformer
+            if preprocess_transform == 'power' or preprocess_transform == 'power_all':
+                pt = PowerTransformer(standardize=True)
+            elif preprocess_transform == 'quantile' or preprocess_transform == 'quantile_all':
+                pt = QuantileTransformer(output_distribution='normal')
+            elif preprocess_transform == 'robust' or preprocess_transform == 'robust_all':
+                pt = RobustScaler(unit_variance=True)
+            else:
+                # Default to robust if transform name is not recognized
+                pt = RobustScaler(unit_variance=True)
+                if self.verbose:
+                    print(f"Unknown transform {preprocess_transform}, using RobustScaler")
+            
             # Convert to numpy for sklearn transformers
             eval_xs = eval_xs.cpu().numpy()
             
