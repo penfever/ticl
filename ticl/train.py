@@ -301,7 +301,7 @@ def train_epoch(
             if single_eval_pos is not None:
                 targets = targets[single_eval_pos:]
                 
-                if batch_info is not None and 'semantic_targets' in batch_info:
+                if batch_info is not None and 'semantic_targets' in batch_info and batch_info['semantic_targets'] is not None:
                     batch_info['semantic_targets'] = batch_info['semantic_targets'][single_eval_pos:]
                     
                     # Ensure semantic targets are long tensor type (for bincount and loss functions)
