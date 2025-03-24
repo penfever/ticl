@@ -65,6 +65,8 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
         column_names : list, optional
             Actual column names for the input data (for semantic feature enhancment)
         """
+        # Set fitted flag to False initially
+        self.is_fitted_ = False
         if model is None:
             raise ValueError("Model must be provided")
         if config is None:
@@ -353,7 +355,7 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
             Class probabilities for each sample
         """
         # Check if fit has been called
-        check_is_fitted(self, ['is_fitted_'])
+        check_is_fitted(self)
         
         # Input validation
         X = check_array(X)
@@ -362,6 +364,18 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
         if hasattr(self, 'feature_indices') and self.feature_indices is not None:
             X = X[:, self.feature_indices]
             
+        # Check feature count alignment
+        if self.X_.shape[1] != X.shape[1]:
+            # Adjust X dimensions to match training data
+            if X.shape[1] < self.X_.shape[1]:
+                # Pad with zeros
+                X_padded = np.zeros((X.shape[0], self.X_.shape[1]))
+                X_padded[:, :X.shape[1]] = X
+                X = X_padded
+            else:
+                # Truncate
+                X = X[:, :self.X_.shape[1]]
+                
         # Convert to torch tensor
         if self.device == 'mps':
             # MPS doesn't support float64, explicitly convert to float32
@@ -432,6 +446,20 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
                 # Store for potential reuse
                 eval_xs_transformed[preprocess_type] = X_processed
                 
+            # Check if we need to extend features to match model expectations
+            if X_processed.shape[2] < self.max_num_features:
+                # Extend with zeros to expected feature count
+                padding = torch.zeros(
+                    (X_processed.shape[0], X_processed.shape[1], self.max_num_features - X_processed.shape[2]),
+                    device=X_processed.device,
+                    dtype=X_processed.dtype
+                )
+                X_processed = torch.cat([X_processed, padding], dim=2)
+                
+                # Update categorical features indices if needed
+                if categorical_feats:
+                    # No need to update indices as we're adding to the end
+                
             # Apply feature permutation if needed
             if len(feature_perm) > 1:  # Only permute if we have a meaningful permutation
                 # Compute feature permutation
@@ -444,26 +472,43 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
                     non_semantic = [i for i in feature_indices if i not in semantic_set]
                     
                     # Permute non-semantic features
-                    perm_non_semantic = [non_semantic[i] for i in feature_perm[:len(non_semantic)]]
+                    perm_indices = feature_perm % len(non_semantic)  # Ensure we don't go out of bounds
+                    perm_non_semantic = [non_semantic[i] for i in perm_indices[:len(non_semantic)]]
                     
                     # Create full permutation
                     full_perm = list(categorical_feats) + perm_non_semantic
                 else:
                     # Permute all features
-                    full_perm = [int(i) for i in feature_perm[:n_features]]
+                    perm_indices = feature_perm % n_features  # Ensure we don't go out of bounds
+                    full_perm = [int(i) for i in perm_indices[:n_features]]
                     
                 # Apply permutation
-                X_processed = X_processed[:, :, full_perm]
+                if len(full_perm) > 0:  # Only apply if we have a valid permutation
+                    # Handle case where full_perm might not cover all features
+                    if len(full_perm) < X_processed.shape[2]:
+                        # Include remaining features
+                        remaining = list(set(range(X_processed.shape[2])) - set(full_perm))
+                        full_perm = full_perm + remaining
+                    # Apply permutation
+                    X_processed = X_processed[:, :, full_perm]
                 
             # Apply class label permutation if needed
             if len(label_perm) > 1:  # Only permute if we have a meaningful permutation
                 # Permute class labels for training portion
-                perm = [int(i) for i in label_perm]
-                y_train_permuted = torch.tensor([(perm[int(y)] if int(y) < len(perm) else y) 
-                                               for y in y_ensemble[:eval_pos].cpu().numpy().flatten()],
-                                              device=self.device)
+                y_train = y_ensemble[:eval_pos].cpu()
+                y_train_permuted = y_train.clone()
+                
+                # Apply permutation safely
+                for i in range(len(y_train)):
+                    orig_label = int(y_train[i].item())
+                    if orig_label < len(label_perm):
+                        y_train_permuted[i] = int(label_perm[orig_label])
+                
+                # Convert back to device
+                y_train_permuted = y_train_permuted.to(self.device)
+                
                 # Keep test labels as zeros
-                y_ensemble = torch.cat([y_train_permuted.unsqueeze(1), y_ensemble[eval_pos:]], dim=0)
+                y_ensemble = torch.cat([y_train_permuted, y_ensemble[eval_pos:]], dim=0)
             
             # Forward pass through model
             with torch.no_grad():
@@ -482,10 +527,19 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
                     
                 # Reverse label permutation if applied
                 if len(label_perm) > 1:
-                    inv_perm = torch.zeros_like(label_perm)
+                    # Create inverse permutation mapping
+                    inv_perm = torch.zeros(len(label_perm), dtype=torch.long, device=self.device)
                     for i, p in enumerate(label_perm):
-                        inv_perm[p] = i
-                    outputs = outputs[:, :, inv_perm]
+                        if p < len(inv_perm):
+                            inv_perm[p] = i
+                    
+                    # Apply inverse permutation to outputs
+                    permuted_outputs = outputs.clone()
+                    for i in range(len(label_perm)):
+                        if i < outputs.shape[2] and inv_perm[i] < outputs.shape[2]:
+                            permuted_outputs[:, :, inv_perm[i]] = outputs[:, :, i]
+                    
+                    outputs = permuted_outputs
                     
                 # Add to ensemble output
                 if output is None:
@@ -1186,7 +1240,7 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
             Similarity scores between input and each class
         """
         # Check if fit has been called
-        check_is_fitted(self, ['is_fitted_'])
+        check_is_fitted(self)
         
         # Check if model has semantic capabilities
         if not hasattr(self.model, 'process_semantic_features'):
@@ -1199,6 +1253,18 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
         if hasattr(self, 'feature_indices') and self.feature_indices is not None:
             X = X[:, self.feature_indices]
             
+        # Check feature count alignment
+        if self.X_.shape[1] != X.shape[1]:
+            # Adjust X dimensions to match training data
+            if X.shape[1] < self.X_.shape[1]:
+                # Pad with zeros
+                X_padded = np.zeros((X.shape[0], self.X_.shape[1]))
+                X_padded[:, :X.shape[1]] = X
+                X = X_padded
+            else:
+                # Truncate
+                X = X[:, :self.X_.shape[1]]
+            
         # Convert to torch tensor
         if self.device == 'mps':
             # MPS doesn't support float64, explicitly convert to float32
@@ -1208,6 +1274,16 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
             
         # Combine training and test data for in-context learning
         X_full = torch.cat([self.X_, X_test], dim=0).unsqueeze(1)
+        
+        # Ensure we're using the right number of features
+        if X_full.shape[2] < self.max_num_features:
+            # Pad to the model's expected feature count
+            padding = torch.zeros(
+                (X_full.shape[0], X_full.shape[1], self.max_num_features - X_full.shape[2]),
+                device=X_full.device,
+                dtype=X_full.dtype
+            )
+            X_full = torch.cat([X_full, padding], dim=2)
         
         # Create zeros tensor for test labels
         test_zeros = torch.zeros(len(X_test), dtype=torch.long, device=self.device)
@@ -1497,7 +1573,7 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
             raise NotImplementedError("The underlying model does not support text-based prediction")
             
         # Check if fit has been called
-        check_is_fitted(self, ['is_fitted_'])
+        check_is_fitted(self)
         
         # Input validation
         X = check_array(X)

@@ -116,7 +116,16 @@ def transformer_metric(x, y, test_x, test_y, cat_features, metric_used, max_time
             # Create random probability predictions based on class distribution
             classes = np.unique(y)
             num_classes = len(classes)
-            class_probs = np.bincount(y.astype(int)) / len(y)
+            
+            # Handle tensor inputs by converting to numpy array
+            if torch.is_tensor(y):
+                y_np = y.cpu().numpy()
+            else:
+                y_np = np.asarray(y)
+                
+            # Create class probability distribution
+            class_probs = np.bincount(y_np.astype(int)) / len(y_np)
+            
             # Repeat the class distribution for each test instance
             pred = np.tile(class_probs, (len(test_x), 1))
             print(f"Using fallback uniform probability distribution for {len(test_x)} test instances with {num_classes} classes")
