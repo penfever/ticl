@@ -459,6 +459,7 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
                 # Update categorical features indices if needed
                 if categorical_feats:
                     # No need to update indices as we're adding to the end
+                    pass
                 
             # Apply feature permutation if needed
             if len(feature_perm) > 1:  # Only permute if we have a meaningful permutation
