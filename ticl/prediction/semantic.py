@@ -551,11 +551,19 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
                 
                 # Get model predictions with error handling
                 try:
-                    outputs = self.model(
-                        (X_processed, y_ensemble.float()), 
-                        single_eval_pos=eval_pos,
-                        semantic_batch_info=semantic_batch_info
-                    )
+                    # Check if model expects batch_info or semantic_batch_info
+                    if hasattr(self.model, 'process_semantic_features') and semantic_batch_info is not None:
+                        outputs = self.model(
+                            (X_processed, y_ensemble.float()), 
+                            single_eval_pos=eval_pos,
+                            batch_info=semantic_batch_info  # Use batch_info instead of semantic_batch_info
+                        )
+                    else:
+                        # Standard call without semantic features
+                        outputs = self.model(
+                            (X_processed, y_ensemble.float()), 
+                            single_eval_pos=eval_pos
+                        )
                 except ValueError as e:
                     if "No semantic tokens found" in str(e) and semantic_batch_info is not None:
                         # Try adding more detailed dummy semantic info
@@ -573,7 +581,7 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
                         outputs = self.model(
                             (X_processed, y_ensemble.float()), 
                             single_eval_pos=eval_pos,
-                            semantic_batch_info=semantic_batch_info
+                            batch_info=semantic_batch_info
                         )
                     elif "No semantic tokens found" in str(e):
                         # Final fallback - check if model has a base_model that we can use directly
@@ -1414,11 +1422,16 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
             
             # Get predictions with semantic information
             try:
+                # Create combined batch info
+                batch_info = semantic_batch_info
+                if class_tokens is not None and batch_info is not None:
+                    batch_info['class_tokens'] = class_tokens
+                
+                # Call model with batch_info
                 results = self.model(
                     (X_full, y_full.float()), 
                     single_eval_pos=eval_pos,
-                    semantic_batch_info=semantic_batch_info,
-                    class_tokens=class_tokens
+                    batch_info=batch_info
                 )
             except ValueError as e:
                 if "No semantic tokens found" in str(e) and semantic_batch_info is not None:
@@ -1434,11 +1447,13 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
                         })
                     
                     # Retry with enhanced semantic data
+                    if class_tokens is not None and semantic_batch_info is not None:
+                        semantic_batch_info['class_tokens'] = class_tokens
+                        
                     results = self.model(
                         (X_full, y_full.float()), 
                         single_eval_pos=eval_pos,
-                        semantic_batch_info=semantic_batch_info,
-                        class_tokens=class_tokens
+                        batch_info=semantic_batch_info
                     )
                 elif "No semantic tokens found" in str(e):
                     # Final fallback - check if model has a base_model that we can use directly
