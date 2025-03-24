@@ -58,14 +58,15 @@ def transformer_metric(x, y, test_x, test_y, cat_features, metric_used, max_time
     if classifier is None:
         classifier = TabPFNClassifier(device=device, N_ensemble_configurations=N_ensemble_configurations)
     
+    #TODO: consider passing these through unchanged
     # Handle NaN values before fitting
     if np.isnan(x).any() or np.isinf(x).any():
-        print(f"Warning: Training data contains {np.isnan(x).sum()} NaN and {np.isinf(x).sum()} Inf values. Replacing with zeros.")
+        # print(f"Warning: Training data contains {np.isnan(x).sum()} NaN and {np.isinf(x).sum()} Inf values. Replacing with zeros.")
         x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
     
     # Also check and fix test data
     if np.isnan(test_x).any() or np.isinf(test_x).any():
-        print(f"Warning: Test data contains {np.isnan(test_x).sum()} NaN and {np.isinf(test_x).sum()} Inf values. Replacing with zeros.")
+        # print(f"Warning: Test data contains {np.isnan(test_x).sum()} NaN and {np.isinf(test_x).sum()} Inf values. Replacing with zeros.")
         test_x = np.nan_to_num(test_x, nan=0.0, posinf=0.0, neginf=0.0)
     
     tick = time.time()
@@ -86,53 +87,53 @@ def transformer_metric(x, y, test_x, test_y, cat_features, metric_used, max_time
     
     # Predict with error handling
     tick = time.time()
-    try:
+    # try:
+    if is_classification(metric_used):
+        pred = classifier.predict_proba(test_x)
+    else:
+        pred = classifier.predict(test_x)
+        
+    # Validate predictions for NaN/Inf
+    if np.isnan(pred).any() or np.isinf(pred).any():
+        print(f"Warning: Predictions contain {np.isnan(pred).sum()} NaN and {np.isinf(pred).sum()} Inf values. Replacing with fallbacks.")
+        # For classification, replace with uniform probabilities; for regression, replace with mean
         if is_classification(metric_used):
-            pred = classifier.predict_proba(test_x)
+            if isinstance(pred, np.ndarray) and len(pred.shape) > 1:
+                num_classes = pred.shape[1]
+                # Replace NaN rows with uniform probabilities
+                nan_rows = np.isnan(pred).any(axis=1) | np.isinf(pred).any(axis=1)
+                pred[nan_rows] = np.ones((nan_rows.sum(), num_classes)) / num_classes
+                # Clean up any remaining issues
+                pred = np.nan_to_num(pred, nan=1.0/num_classes, posinf=1.0, neginf=0.0)
         else:
-            pred = classifier.predict(test_x)
+            # For regression, replace with mean of valid predictions or zero
+            valid_pred = pred[~(np.isnan(pred) | np.isinf(pred))]
+            replacement_value = np.mean(valid_pred) if len(valid_pred) > 0 else 0.0
+            pred = np.nan_to_num(pred, nan=replacement_value, posinf=replacement_value, neginf=replacement_value)
+    # except Exception as e:
+    #     print(f"Error during prediction: {e}")
+    #     # Create fallback predictions
+    #     if is_classification(metric_used):
+    #         # Create random probability predictions based on class distribution
+    #         classes = np.unique(y)
+    #         num_classes = len(classes)
             
-        # Validate predictions for NaN/Inf
-        if np.isnan(pred).any() or np.isinf(pred).any():
-            print(f"Warning: Predictions contain {np.isnan(pred).sum()} NaN and {np.isinf(pred).sum()} Inf values. Replacing with fallbacks.")
-            # For classification, replace with uniform probabilities; for regression, replace with mean
-            if is_classification(metric_used):
-                if isinstance(pred, np.ndarray) and len(pred.shape) > 1:
-                    num_classes = pred.shape[1]
-                    # Replace NaN rows with uniform probabilities
-                    nan_rows = np.isnan(pred).any(axis=1) | np.isinf(pred).any(axis=1)
-                    pred[nan_rows] = np.ones((nan_rows.sum(), num_classes)) / num_classes
-                    # Clean up any remaining issues
-                    pred = np.nan_to_num(pred, nan=1.0/num_classes, posinf=1.0, neginf=0.0)
-            else:
-                # For regression, replace with mean of valid predictions or zero
-                valid_pred = pred[~(np.isnan(pred) | np.isinf(pred))]
-                replacement_value = np.mean(valid_pred) if len(valid_pred) > 0 else 0.0
-                pred = np.nan_to_num(pred, nan=replacement_value, posinf=replacement_value, neginf=replacement_value)
-    except Exception as e:
-        print(f"Error during prediction: {e}")
-        # Create fallback predictions
-        if is_classification(metric_used):
-            # Create random probability predictions based on class distribution
-            classes = np.unique(y)
-            num_classes = len(classes)
-            
-            # Handle tensor inputs by converting to numpy array
-            if torch.is_tensor(y):
-                y_np = y.cpu().numpy()
-            else:
-                y_np = np.asarray(y)
+    #         # Handle tensor inputs by converting to numpy array
+    #         if torch.is_tensor(y):
+    #             y_np = y.cpu().numpy()
+    #         else:
+    #             y_np = np.asarray(y)
                 
-            # Create class probability distribution
-            class_probs = np.bincount(y_np.astype(int)) / len(y_np)
+    #         # Create class probability distribution
+    #         class_probs = np.bincount(y_np.astype(int)) / len(y_np)
             
-            # Repeat the class distribution for each test instance
-            pred = np.tile(class_probs, (len(test_x), 1))
-            print(f"Using fallback uniform probability distribution for {len(test_x)} test instances with {num_classes} classes")
-        else:
-            # For regression, predict the mean of training targets
-            pred = np.full(len(test_x), np.mean(y))
-            print(f"Using fallback mean value prediction for {len(test_x)} test instances")
+    #         # Repeat the class distribution for each test instance
+    #         pred = np.tile(class_probs, (len(test_x), 1))
+    #         print(f"Using fallback uniform probability distribution for {len(test_x)} test instances with {num_classes} classes")
+    #     else:
+    #         # For regression, predict the mean of training targets
+    #         pred = np.full(len(test_x), np.mean(y))
+    #         print(f"Using fallback mean value prediction for {len(test_x)} test instances")
     
     inference_time = time.time() - tick
     times = {'fit_time': fit_time, 'inference_time': inference_time}

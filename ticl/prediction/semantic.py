@@ -131,9 +131,18 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
         if self.verbose:
             print(f"Initialized SemanticAwareClassifierWrapper with device={device}")
             print(f"Model type: {self.model.__class__.__name__}")
-            print(f"Max features: {self.max_num_features}, Max classes: {self.max_num_classes}")
+            print(f"Max features: {self.max_num_features}, Max features with semantic: {self.max_num_features_with_semantic}")
+            print(f"Max classes: {self.max_num_classes}")
             print(f"Using {N_ensemble_configurations} ensemble configurations")
             print(f"Semantic feature probability: {self.semantic_feature_p}")
+            
+            # Log the expected output dimension of the model for debugging
+            try:
+                if hasattr(self.model, 'base_model') and hasattr(self.model.base_model, 'encoder'):
+                    encoder_shape = self.model.base_model.encoder.weight.shape
+                    print(f"Model encoder shape: {encoder_shape}")
+            except Exception as e:
+                print(f"Could not determine model encoder shape: {e}")
         
     def fit(self, X, y, semantic_column_indices=None, X_semantic_text=None, overwrite_warning=False):
         """
@@ -447,10 +456,13 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
                 eval_xs_transformed[preprocess_type] = X_processed
                 
             # Check if we need to extend features to match model expectations
-            if X_processed.shape[2] < self.max_num_features:
+            expected_features = self.max_num_features_with_semantic if hasattr(self, 'max_num_features_with_semantic') else self.max_num_features
+            if X_processed.shape[2] < expected_features:
+                if self.verbose:
+                    print(f"Padding features from {X_processed.shape[2]} to {expected_features}")
                 # Extend with zeros to expected feature count
                 padding = torch.zeros(
-                    (X_processed.shape[0], X_processed.shape[1], self.max_num_features - X_processed.shape[2]),
+                    (X_processed.shape[0], X_processed.shape[1], expected_features - X_processed.shape[2]),
                     device=X_processed.device,
                     dtype=X_processed.dtype
                 )
@@ -1277,10 +1289,13 @@ class SemanticAwareClassifierWrapper(BaseEstimator, ClassifierMixin):
         X_full = torch.cat([self.X_, X_test], dim=0).unsqueeze(1)
         
         # Ensure we're using the right number of features
-        if X_full.shape[2] < self.max_num_features:
+        expected_features = self.max_num_features_with_semantic if hasattr(self, 'max_num_features_with_semantic') else self.max_num_features
+        if X_full.shape[2] < expected_features:
+            if self.verbose:
+                print(f"Padding features in semantic prediction from {X_full.shape[2]} to {expected_features}")
             # Pad to the model's expected feature count
             padding = torch.zeros(
-                (X_full.shape[0], X_full.shape[1], self.max_num_features - X_full.shape[2]),
+                (X_full.shape[0], X_full.shape[1], expected_features - X_full.shape[2]),
                 device=X_full.device,
                 dtype=X_full.dtype
             )
