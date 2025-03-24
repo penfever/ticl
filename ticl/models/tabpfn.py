@@ -74,7 +74,26 @@ class TabPFN(nn.Module):
                     nn.init.zeros_(attn.out_proj.weight)
                     nn.init.zeros_(attn.out_proj.bias)
 
-    def forward(self, src, single_eval_pos=None):
+    def forward(self, src, single_eval_pos=None, class_texts=None, batch_info=None):
+        """
+        Forward pass of the TabPFN model.
+        
+        Parameters:
+        -----------
+        src : tuple
+            Input data in the form of (x, y) or (style, x, y)
+        single_eval_pos : int
+            Position where training samples end and evaluation samples begin
+        class_texts : list, optional
+            Not used in TabPFN but included for compatibility with semantic models
+        batch_info : dict, optional
+            Not used in TabPFN but included for compatibility with semantic models
+            
+        Returns:
+        --------
+        torch.Tensor
+            Model predictions for evaluation samples
+        """
         assert isinstance(src, tuple), 'inputs (src) have to be given as (x,y) or (style,x,y) tuple'
         if single_eval_pos is None: raise ValueError('single_eval_pos has to be given, instead of None.')
 

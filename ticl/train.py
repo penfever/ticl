@@ -324,11 +324,23 @@ def train_epoch(
                 continue
                 
             with autocast_context:
-                # Pass class_texts and batch_info to the model's forward method if available
-                # Keep the original single_eval_pos for base models that require it
-                # We've already handled slicing the targets above, but the model still needs the position
-                output = model(device_data, single_eval_pos=single_eval_pos, 
-                               class_texts=class_texts, batch_info=batch_info)
+                # Check if the model supports the semantic arguments (class_texts and batch_info)
+                # The TabPFN model doesn't support these arguments, so we need to check dynamically
+                # to prevent errors when passing unsupported arguments
+                model_class_name = model.__class__.__name__
+                if hasattr(model, 'module'):  # Handle DistributedDataParallel case
+                    model_class_name = model.module.__class__.__name__
+                
+                # Only pass semantic arguments to models that support them
+                supports_semantic = model_class_name not in ['TabPFN']
+                
+                if supports_semantic:
+                    # Model supports semantic arguments
+                    output = model(device_data, single_eval_pos=single_eval_pos,
+                                   class_texts=class_texts, batch_info=batch_info)
+                else:
+                    # Basic model without semantic support - only pass required arguments
+                    output = model(device_data, single_eval_pos=single_eval_pos)
 
                 # Calculate loss
                 loss, nan_share = eval_criterion(
