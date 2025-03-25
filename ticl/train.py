@@ -521,11 +521,14 @@ def train(dl, model, criterion, optimizer_state=None, scheduler=None,
     lang_transformer_warmup_ratio = None
     lang_transformer_peak_ratio = None
     
+    # Get the model type from the model class name
+    model_cls_name = model_module.__class__.__name__.lower()
+    
     # Check if we're using a semantic model with semantic features enabled
     semantic_feature_p = 0.0
-    if 'linear_attention' in model_type:
+    if 'tabflex' in model_cls_name or 'ssm' in model_cls_name:
         semantic_feature_p = getattr(model_module, 'semantic_feature_p', 0.0)
-    elif 'transformer' in model_type:
+    elif 'tabpfn' in model_cls_name or 'transformer' in model_cls_name:
         semantic_feature_p = getattr(model_module, 'semantic_feature_p', 0.0)
     
     # Look for language transformer parameters in config
