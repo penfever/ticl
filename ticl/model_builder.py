@@ -409,8 +409,21 @@ def get_model(
             device=device,
             model = model_attr,
         )
+        # Get batch monitoring parameters from prior.classification
+        batch_monitoring_params = {}
+        if 'prior' in config and 'classification' in config['prior']:
+            classification_config = config['prior']['classification']
+            if 'semantic_batch_monitoring' in classification_config:
+                batch_monitoring_params['semantic_batch_monitoring'] = classification_config['semantic_batch_monitoring']
+            if 'skip_bad_semantic_batches' in classification_config:
+                batch_monitoring_params['skip_bad_semantic_batches'] = classification_config['skip_bad_semantic_batches']
+            if 'semantic_batch_log_frequency' in classification_config:
+                batch_monitoring_params['semantic_batch_log_frequency'] = classification_config['semantic_batch_log_frequency']
+        
         model = train(dl, model, criterion=criterion, optimizer_state=optimizer_state, scheduler=scheduler,
-                      epoch_callback=epoch_callback, verbose=verbose_train, device=device, progress_bar=config['orchestration']['progress_bar'], **config['optimizer'])
+                      epoch_callback=epoch_callback, verbose=verbose_train, device=device, 
+                      progress_bar=config['orchestration']['progress_bar'], 
+                      **batch_monitoring_params, **config['optimizer'])
     else:
         model = None, model, None, None
 

@@ -14,6 +14,10 @@ import pkg_resources
 import psutil
 import gc
 import logging
+import json
+import uuid
+import hashlib
+from collections import defaultdict, deque
 
 # Configure memory profiling logging
 memory_logger = logging.getLogger("memory_profiling")

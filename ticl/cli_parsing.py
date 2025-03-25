@@ -216,6 +216,11 @@ def argparser_from_config(parser, description="Train Mothernet"):
     classification_prior.add_argument('--language-transformer-weight-decay', help="Weight decay for the language transformer component in semantic models.", type=float, default=0.1)
     classification_prior.add_argument('--language-transformer-warmup-ratio', help="Ratio of total epochs to warm up the language transformer (0-1).", type=float, default=0.1)
     classification_prior.add_argument('--language-transformer-peak-ratio', help="Ratio of total epochs at which language transformer LR peaks (0-1).", type=float, default=0.7)
+    
+    # Add batch quality monitoring parameters
+    classification_prior.add_argument('--semantic-batch-monitoring', help="Whether to enable detailed batch monitoring for semantic features", type=str2bool, default=True)
+    classification_prior.add_argument('--skip-bad-semantic-batches', help="Whether to skip batches with problematic semantic data", type=str2bool, default=False)
+    classification_prior.add_argument('--semantic-batch-log-frequency', help="How often to log batch statistics (every N batches)", type=int, default=10)
     classification_prior.set_defaults(**config['prior']['classification'])
 
     mlp_prior = parser.add_argument_group('prior.mlp')

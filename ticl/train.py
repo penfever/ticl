@@ -10,6 +10,7 @@ import logging
 
 import ticl.utils as utils
 from ticl.utils import ExponentialLR, ReduceLROnSpike, init_dist, get_autocast_context, IGNORE_INDEX, memory_logger
+from ticl.batch_monitoring import SemanticBatchMonitor
 
 import pdb
 
@@ -130,7 +131,11 @@ def train_epoch(
     optimizer, 
     criterion, 
     n_out, 
-    progress_bar=False
+    progress_bar=False,
+    batch_monitor=None,
+    semantic_batch_monitoring=True,
+    skip_bad_semantic_batches=False,
+    semantic_batch_log_frequency=10
 ):
     model.train()  # Turn on the train mode
     total_loss = torch.tensor(0., device = device)
@@ -142,6 +147,14 @@ def train_epoch(
     is_cuda = device.startswith('cuda')
     is_mps = device == 'mps'
     is_cpu = device == 'cpu'
+    
+    # Initialize batch monitor if needed
+    if batch_monitor is None and semantic_batch_monitoring:
+        batch_monitor = SemanticBatchMonitor(
+            enable_monitoring=semantic_batch_monitoring,
+            skip_bad_batches=skip_bad_semantic_batches,
+            log_frequency=semantic_batch_log_frequency
+        )
     
     # Initialize progress bar with more informative metrics
     if progress_bar:
@@ -246,6 +259,37 @@ def train_epoch(
             # Let's skip batch if all labels are empty
             if isinstance(device_data, tuple) and len(device_data) == 2:
                 if torch.all(device_data[1][single_eval_pos:] == -100):
+                    continue
+                    
+            # Batch monitoring - analyze and potentially skip problematic batches
+            if batch_monitor is not None:
+                # Extract semantic tokens and targets for analysis
+                semantic_tokens = None
+                semantic_targets = None
+                
+                # Try to get semantic tokens from batch info
+                if batch_info is not None:
+                    if 'semantic_targets' in batch_info:
+                        semantic_targets = batch_info['semantic_targets']
+                    
+                    if 'semantic_tokens' in batch_info:
+                        semantic_tokens = batch_info['semantic_tokens']
+                
+                # Analyze batch quality
+                batch_stats, fingerprint, is_bad_batch = batch_monitor.analyze_batch(
+                    batch_info, semantic_tokens, semantic_targets
+                )
+                
+                # Log to wandb periodically
+                if batch_monitor.should_log_batch():
+                    batch_monitor.log_batch_stats_to_wandb(batch_stats, fingerprint)
+                
+                # Skip problematic batches if enabled
+                if batch_monitor.should_skip_batch(is_bad_batch):
+                    memory_logger.warning(f"Skipping bad batch {batch}/{steps_per_epoch} - {fingerprint['hash']}")
+                    # If using wandb, log the skip event
+                    if wandb.run is not None:
+                        wandb.log({"semantic_batch/skipped": 1})
                     continue
 
             # Check if we have semantic information to pass to the model
@@ -420,6 +464,7 @@ def train(dl, model, criterion, optimizer_state=None, scheduler=None,
           aggregate_k_gradients=1, verbose=True, epoch_callback=None, train_mixed_precision=False, adaptive_batch_size=False,
           learning_rate_schedule='cosine', lr_decay=0.99, adam_beta1=0.9, reduce_lr_on_spike=False,
           spike_tolerance=4, progress_bar=False,
+          semantic_batch_monitoring=True, skip_bad_semantic_batches=False, semantic_batch_log_frequency=10,
           ):
     """
     Training function that supports various hardware backends (CUDA, MPS, ROCm, CPU).
@@ -448,6 +493,9 @@ def train(dl, model, criterion, optimizer_state=None, scheduler=None,
         reduce_lr_on_spike: Whether to reduce learning rate on loss spikes
         spike_tolerance: Tolerance for loss spikes
         progress_bar: Whether to show progress bar during training
+        semantic_batch_monitoring: Whether to enable detailed monitoring of semantic batches
+        skip_bad_semantic_batches: Whether to skip batches with problematic semantic data
+        semantic_batch_log_frequency: How often to log batch statistics (every N batches)
         
     Returns:
         total_loss: Final loss value
@@ -846,6 +894,13 @@ def train(dl, model, criterion, optimizer_state=None, scheduler=None,
             if is_cuda:
                 gpu_start_time.record()
             
+            # Initialize a shared batch monitor for all epochs
+            batch_monitor = SemanticBatchMonitor(
+                enable_monitoring=semantic_batch_monitoring,
+                skip_bad_batches=skip_bad_semantic_batches,
+                log_frequency=semantic_batch_log_frequency
+            )
+            
             # Train for one epoch
             new_loss, nan_share, ignore_share = train_epoch(
                 model, 
@@ -858,7 +913,20 @@ def train(dl, model, criterion, optimizer_state=None, scheduler=None,
                 criterion, 
                 n_out,
                 progress_bar=progress_bar,
+                batch_monitor=batch_monitor,
+                semantic_batch_monitoring=semantic_batch_monitoring,
+                skip_bad_semantic_batches=skip_bad_semantic_batches,
+                semantic_batch_log_frequency=semantic_batch_log_frequency
             )
+            
+            # Log batch monitoring summary to wandb
+            if semantic_batch_monitoring and wandb.run:
+                summary = batch_monitor.get_batch_history_summary()
+                wandb.log({
+                    "semantic_batch/summary/total_batches": summary["total_batches"],
+                    "semantic_batch/summary/bad_batches": summary["bad_batches"],
+                    "semantic_batch/summary/bad_ratio": summary["bad_ratio"]
+                })
 
             # Update loss
             total_loss = new_loss

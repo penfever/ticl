@@ -146,6 +146,11 @@ def get_prior_config(max_features=100, n_samples=1024+128):
         'language_transformer_weight_decay': 0.1,
         'language_transformer_warmup_ratio': 0.1,
         'language_transformer_peak_ratio': 0.7,
+        
+        # Batch quality monitoring parameters
+        'semantic_batch_monitoring': True,
+        'skip_bad_semantic_batches': False,
+        'semantic_batch_log_frequency': 10,
     }
     prior['classification'] = classsification_prior
 
