@@ -263,9 +263,10 @@ def train_epoch(
                     
             # Batch monitoring - analyze and potentially skip problematic batches
             if batch_monitor is not None:
-                # Extract semantic tokens and targets for analysis
+                # Extract semantic tokens, targets and embeddings for analysis
                 semantic_tokens = None
                 semantic_targets = None
+                semantic_embeddings = None
                 
                 # Try to get semantic tokens from batch info
                 if batch_info is not None:
@@ -274,10 +275,14 @@ def train_epoch(
                     
                     if 'semantic_tokens' in batch_info:
                         semantic_tokens = batch_info['semantic_tokens']
+                    
+                    # Extract semantic embeddings if already computed
+                    if 'semantic_embeddings' in batch_info:
+                        semantic_embeddings = batch_info['semantic_embeddings']
                 
                 # Analyze batch quality
                 batch_stats, fingerprint, is_bad_batch = batch_monitor.analyze_batch(
-                    batch_info, semantic_tokens, semantic_targets
+                    batch_info, semantic_tokens, semantic_targets, semantic_embeddings
                 )
                 
                 # Log to wandb periodically
@@ -289,7 +294,22 @@ def train_epoch(
                     memory_logger.warning(f"Skipping bad batch {batch}/{steps_per_epoch} - {fingerprint['hash']}")
                     # If using wandb, log the skip event
                     if wandb.run is not None:
-                        wandb.log({"semantic_batch/skipped": 1})
+                        wandb.log({
+                            "semantic_batch/skipped": 1,
+                            "semantic_batch/skipped_hash": fingerprint['hash'],
+                            "semantic_batch/skipped_reason": "; ".join(batch_stats.get('bad_batch_reasons', ['Unknown']))
+                        })
+                    
+                    # Log detailed info about the skipped batch
+                    memory_logger.info(f"=== Skipped Batch Details ===")
+                    memory_logger.info(f"Fingerprint: {fingerprint['hash']}")
+                    memory_logger.info(f"Reasons: {batch_stats.get('bad_batch_reasons', ['Unknown'])}")
+                    
+                    # Log key statistics to help diagnose the issue
+                    key_stats = {k: v for k, v in batch_stats.items() 
+                               if isinstance(v, (int, float)) and not isinstance(v, bool)}
+                    memory_logger.info(f"Key statistics: {key_stats}")
+                    
                     continue
 
             # Check if we have semantic information to pass to the model

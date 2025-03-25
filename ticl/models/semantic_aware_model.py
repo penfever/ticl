@@ -130,9 +130,25 @@ class SemanticAwareClassifier(nn.Module):
         # Use that to determine whether to track gradients
         with torch.set_grad_enabled(requires_grad):
             outputs = self.clip_text_model(**token_dict)
+            
+        # Check for NaN/Inf values in embeddings
+        if torch.isnan(outputs.pooler_output).any() or torch.isinf(outputs.pooler_output).any():
+            memory_logger.warning("NaN or Inf detected in CLIP embeddings")
+            # Attempt to sanitize output for stability (will affect training quality but prevent crashes)
+            pooler_output = torch.nan_to_num(
+                outputs.pooler_output, 
+                nan=0.0, 
+                posinf=1.0, 
+                neginf=-1.0
+            )
+            # Output diagnostic info
+            norm = torch.norm(outputs.pooler_output, dim=1)
+            memory_logger.warning(f"Original embedding norms: min={norm.min().item()}, max={norm.max().item()}")
+        else:
+            pooler_output = outputs.pooler_output
         
         # Return pooled embeddings
-        return outputs.pooler_output
+        return pooler_output
     
     def forward(self, x, single_eval_pos=None, class_texts=None, batch_info=None):
         """
@@ -417,6 +433,11 @@ class SemanticAwareClassifier(nn.Module):
             'text_features': class_embeddings_tensor,
             'token_texts': all_token_texts
         }
+        
+        # Store embeddings in batch_info for batch monitoring if it exists
+        if batch_info is not None:
+            # Add the embeddings for later monitoring
+            batch_info['semantic_embeddings'] = pattern_embeddings_tensor
         
         return result
     

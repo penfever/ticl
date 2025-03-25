@@ -55,11 +55,14 @@ class SemanticBatchMonitor:
         # Define thresholds for problematic batches
         self.thresholds = {
             'min_valid_semantic_ratio': 0.1,      # Minimum ratio of valid semantic targets
-            'max_token_length': 150,              # Maximum reasonable token length
             'max_semantic_class': 10,             # Maximum expected semantic class ID
             'max_nan_ratio': 0.5,                 # Maximum ratio of NaN values allowed
             'min_class_token_patterns': 1,        # Minimum number of class token patterns
-            'min_valid_targets': 5                # Minimum number of valid targets
+            'min_valid_targets': 5,               # Minimum number of valid targets
+            'max_token_id': 49500,                # Maximum valid CLIP token ID (vocab size ~49408)
+            'max_embedding_norm': 100.0,          # Maximum L2 norm for embeddings
+            'min_embedding_norm': 0.01,           # Minimum L2 norm for embeddings
+            'max_embedding_std': 10.0,            # Maximum standard deviation within embeddings
         }
         
         memory_logger.info(f"Semantic batch monitoring initialized: monitoring={enable_monitoring}, skip_bad={skip_bad_batches}")
@@ -144,7 +147,7 @@ class SemanticBatchMonitor:
             # Fallback to a random UUID if JSON serialization fails
             return {'hash': str(uuid.uuid4()), 'data': {'error': str(e)}}
     
-    def analyze_batch(self, batch_info, semantic_tokens=None, semantic_targets=None):
+    def analyze_batch(self, batch_info, semantic_tokens=None, semantic_targets=None, embeddings=None):
         """
         Analyze a batch for potential issues and generate statistics.
         
@@ -156,6 +159,8 @@ class SemanticBatchMonitor:
             Tensor of semantic tokens
         semantic_targets : torch.Tensor, optional
             Tensor of semantic class targets
+        embeddings : torch.Tensor, optional
+            CLIP text embeddings if available
             
         Returns:
         --------
@@ -207,10 +212,35 @@ class SemanticBatchMonitor:
                     stats['semantic_tokens_min'] = semantic_tokens.min().item()
                     stats['semantic_tokens_max'] = semantic_tokens.max().item()
                     
-                    # Check for extreme token lengths
-                    if stats['semantic_tokens_max'] > self.thresholds['max_token_length']:
+                    # Check for token IDs outside the CLIP vocabulary
+                    if stats['semantic_tokens_max'] > self.thresholds['max_token_id']:
                         is_bad_batch = True
-                        reasons.append(f"Token value too large: {stats['semantic_tokens_max']}")
+                        reasons.append(f"Token ID exceeds vocabulary size: {stats['semantic_tokens_max']}")
+                        
+                # Analyze token value distribution
+                if hasattr(semantic_tokens, 'float') and hasattr(semantic_tokens, 'std'):
+                    try:
+                        # Get distribution statistics for non-padding tokens
+                        # CLIP typically uses 0 or 49407 as padding token IDs
+                        valid_tokens = semantic_tokens[semantic_tokens > 0]
+                        valid_tokens = valid_tokens[valid_tokens < 49407]
+                        
+                        if valid_tokens.numel() > 0:
+                            # Get standard deviation and entropy of token distribution
+                            tokens_std = valid_tokens.float().std().item()
+                            stats['semantic_tokens_std'] = tokens_std
+                            
+                            # Compute histogram for token distribution analysis
+                            if hasattr(valid_tokens, 'histc'):
+                                bins = 10
+                                hist = valid_tokens.float().histc(bins=bins, min=0, max=49407)
+                                # Convert to probabilities
+                                hist = hist / hist.sum()
+                                # Compute entropy of distribution
+                                entropy = -(hist * torch.log(hist + 1e-10)).sum().item()
+                                stats['semantic_tokens_entropy'] = entropy
+                    except Exception as e:
+                        memory_logger.warning(f"Failed to analyze token distribution: {str(e)}")
                 
             except Exception as e:
                 memory_logger.warning(f"Failed to analyze semantic tokens: {str(e)}")
@@ -313,6 +343,113 @@ class SemanticBatchMonitor:
             except Exception as e:
                 memory_logger.warning(f"Failed to analyze class token patterns: {str(e)}")
                 stats['class_token_patterns_error'] = str(e)
+                
+        # === Check CLIP embeddings if available ===
+        if embeddings is not None:
+            try:
+                if hasattr(embeddings, 'shape'):
+                    stats['embeddings_shape'] = list(embeddings.shape)
+                    
+                if hasattr(embeddings, 'dtype'):
+                    stats['embeddings_dtype'] = str(embeddings.dtype)
+                    
+                # Check for NaN or Inf values in embeddings
+                if hasattr(embeddings, 'isnan') and hasattr(embeddings, 'isinf'):
+                    nan_count = embeddings.isnan().sum().item()
+                    inf_count = embeddings.isinf().sum().item()
+                    total_count = embeddings.numel()
+                    
+                    nan_ratio = nan_count / total_count if total_count > 0 else 0
+                    inf_ratio = inf_count / total_count if total_count > 0 else 0
+                    
+                    stats['embeddings_nan_count'] = nan_count
+                    stats['embeddings_inf_count'] = inf_count
+                    stats['embeddings_nan_ratio'] = nan_ratio
+                    stats['embeddings_inf_ratio'] = inf_ratio
+                    
+                    if nan_ratio > 0 or inf_ratio > 0:
+                        is_bad_batch = True
+                        reasons.append(f"NaN/Inf in embeddings: {nan_count + inf_count} values")
+                
+                # Compute embedding norms
+                if hasattr(embeddings, 'norm'):
+                    try:
+                        # Compute L2 norm of each embedding
+                        if len(embeddings.shape) >= 2:
+                            # For batched embeddings [batch_size, emb_dim]
+                            emb_norms = embeddings.norm(dim=1)
+                            
+                            stats['embeddings_norm_min'] = emb_norms.min().item()
+                            stats['embeddings_norm_max'] = emb_norms.max().item()
+                            stats['embeddings_norm_mean'] = emb_norms.mean().item()
+                            stats['embeddings_norm_std'] = emb_norms.std().item()
+                            
+                            # Check for abnormal embedding norms
+                            if stats['embeddings_norm_max'] > self.thresholds['max_embedding_norm']:
+                                is_bad_batch = True
+                                reasons.append(f"Embedding norm too large: {stats['embeddings_norm_max']:.4f}")
+                                
+                            if stats['embeddings_norm_min'] < self.thresholds['min_embedding_norm']:
+                                is_bad_batch = True
+                                reasons.append(f"Embedding norm too small: {stats['embeddings_norm_min']:.4f}")
+                        
+                        # Compute the standard deviation within each embedding
+                        if len(embeddings.shape) >= 2:
+                            # Standard deviation across embedding dimensions
+                            emb_std = embeddings.std(dim=1)
+                            
+                            stats['embeddings_internal_std_min'] = emb_std.min().item()
+                            stats['embeddings_internal_std_max'] = emb_std.max().item()
+                            stats['embeddings_internal_std_mean'] = emb_std.mean().item()
+                            
+                            if stats['embeddings_internal_std_max'] > self.thresholds['max_embedding_std']:
+                                is_bad_batch = True
+                                reasons.append(f"High embedding internal variance: {stats['embeddings_internal_std_max']:.4f}")
+                            
+                        # Check for unusually sparse or dense embeddings 
+                        if len(embeddings.shape) >= 2:
+                            # Count non-zero elements
+                            active_ratio = (embeddings != 0).float().mean(dim=1)
+                            stats['embeddings_active_ratio_min'] = active_ratio.min().item()
+                            stats['embeddings_active_ratio_max'] = active_ratio.max().item()
+                            stats['embeddings_active_ratio_mean'] = active_ratio.mean().item()
+                            
+                            # Very sparse or very dense embeddings can indicate issues
+                            if stats['embeddings_active_ratio_min'] < 0.01:
+                                memory_logger.warning(f"Very sparse embedding detected: {stats['embeddings_active_ratio_min']:.4f} active ratio")
+                    except Exception as e:
+                        memory_logger.warning(f"Failed to compute embedding norms: {str(e)}")
+                        
+                # Compute cosine similarity between embeddings in batch
+                if len(embeddings.shape) >= 2 and embeddings.shape[0] > 1:
+                    try:
+                        import torch.nn.functional as F
+                        
+                        # Normalize embeddings
+                        embeddings_norm = F.normalize(embeddings, p=2, dim=1)
+                        
+                        # Compute pairwise similarities
+                        similarities = torch.matmul(embeddings_norm, embeddings_norm.t())
+                        
+                        # Remove self-similarities (diagonal)
+                        mask = torch.ones_like(similarities) - torch.eye(similarities.shape[0], device=similarities.device)
+                        masked_similarities = similarities * mask
+                        
+                        # Get statistics
+                        stats['embeddings_similarity_min'] = masked_similarities.min().item()
+                        stats['embeddings_similarity_max'] = masked_similarities.max().item()
+                        stats['embeddings_similarity_mean'] = masked_similarities.sum().item() / (mask.sum().item() + 1e-8)
+                        
+                        # Check for unusually high similarity between different embeddings
+                        if stats['embeddings_similarity_max'] > 0.99:
+                            is_bad_batch = True
+                            reasons.append(f"Near-duplicate embeddings detected: {stats['embeddings_similarity_max']:.4f} similarity")
+                    except Exception as e:
+                        memory_logger.warning(f"Failed to compute embedding similarities: {str(e)}")
+                        
+            except Exception as e:
+                memory_logger.warning(f"Failed to analyze embeddings: {str(e)}")
+                stats['embeddings_error'] = str(e)
         
         # Finalize bad batch detection
         if is_bad_batch:
