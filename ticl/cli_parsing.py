@@ -78,7 +78,10 @@ def argparser_from_config(parser, description="Train Mothernet"):
     general.add_argument('-g', '--gpu-id', type=int, help='GPU id')
     general.add_argument('-C', '--use-cpu', help='whether to use cpu', action='store_true')
     general.add_argument('--log-level', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], 
-                       default='INFO', help='Set the logging level for console output')
+                       help='Set the logging level for console output')
+    # Set default values from config if available
+    if 'orchestration' in config and 'log_level' in config['orchestration']:
+        general.set_defaults(log_level=config['orchestration']['log_level'])
 
     optimizer = parser.add_argument_group('optimizer')
     optimizer.add_argument('-E', '--epochs', type=int, help='number of epochs')
@@ -247,5 +250,7 @@ def argparser_from_config(parser, description="Train Mothernet"):
     orchestration.add_argument('--progress-bar', help='Whether to show a progress bar.', action='store_true')
     orchestration.add_argument('--wandb-overwrite', help='Whether to overwrite wandb runs.', action='store_true', default=False)
 
-    # orchestration options are not part of the default config
+    # Apply defaults from config if available
+    if 'orchestration' in config:
+        orchestration.set_defaults(**config['orchestration'])
     return parser

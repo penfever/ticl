@@ -141,6 +141,11 @@ def get_prior_config(max_features=100, n_samples=1024+128):
         'num_features_sampler': 'uniform',
         'pad_zeros': True,
         'feature_curriculum': False,
+        # Language transformer optimization parameters
+        'language_transformer_lr': 4e-6,
+        'language_transformer_weight_decay': 0.1,
+        'language_transformer_warmup_ratio': 0.1,
+        'language_transformer_peak_ratio': 0.7,
     }
     prior['classification'] = classsification_prior
 
@@ -163,7 +168,13 @@ def get_prior_config(max_features=100, n_samples=1024+128):
         'p_uninformative': 0.5
     }
 
-    return {'prior': prior, 'dataloader': dataloader, 'openmlloader': openmlloader}
+    # Add orchestration defaults
+    orchestration = {
+        'progress_bar': False,
+        'log_level': 'INFO'
+    }
+    
+    return {'prior': prior, 'dataloader': dataloader, 'openmlloader': openmlloader, 'orchestration': orchestration}
 
 
 def get_mothernet_config():
