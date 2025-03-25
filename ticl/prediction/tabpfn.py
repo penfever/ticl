@@ -575,7 +575,7 @@ def transformer_predict(
                                           True,  model, eval_position, num_classes, inference_mode, no_grad, use_reentrant=False)
 
             else:
-                with torch.cuda.amp.autocast(enabled=fp16_inference):
+                with torch.amp.autocast('cuda', enabled=fp16_inference):
                     output_batch = checkpoint(predict, batch_input, batch_label, softmax_temperature,
                                               True, model, eval_position, num_classes, inference_mode, no_grad, use_reentrant=False)
         outputs += [output_batch]

@@ -713,7 +713,7 @@ def get_semantic_class_count():
         return 3
 
 
-def create_semantic_aware_model(base_model, num_semantic_classes=None, freeze_clip=False):
+def create_semantic_aware_model(base_model, num_semantic_classes=None, freeze_clip=False, semantic_column_metadata=None):
     """
     Factory function to create a semantic-aware model.
     
@@ -725,6 +725,8 @@ def create_semantic_aware_model(base_model, num_semantic_classes=None, freeze_cl
         Number of semantic classes to predict
     freeze_clip : bool
         Whether to freeze the CLIP text encoder parameters (default: False)
+    semantic_column_metadata : dict, optional
+        Optional metadata about semantic columns
         
     Returns:
     --------
@@ -737,6 +739,14 @@ def create_semantic_aware_model(base_model, num_semantic_classes=None, freeze_cl
     
     # Create model
     model = SemanticAwareClassifier(base_model, num_semantic_classes)
+    
+    # Store the configuration for use by the optimizer
+    if hasattr(base_model, '_config'):
+        model._config = base_model._config
+    
+    # Get semantic feature probability from base model if available
+    if hasattr(base_model, 'semantic_feature_p'):
+        model.semantic_feature_p = base_model.semantic_feature_p
     
     # Configure CLIP encoder freezing
     if freeze_clip:

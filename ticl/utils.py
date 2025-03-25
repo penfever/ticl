@@ -347,6 +347,94 @@ class ExponentialLR(LRScheduler):
                 for base_lr in self.base_lrs]
 
 
+class LanguageTransformerScheduler(LRScheduler):
+    """
+    Custom scheduler for language transformer with:
+    1. Initial near-zero LR for warmup_ratio portion of training
+    2. Gradual ramp-up to peak learning rate at peak_ratio
+    3. Smooth falloff after peak
+    
+    The schedule follows a modified sigmoid function to ensure smooth transitions.
+    """
+    def __init__(self, optimizer, warmup_ratio, peak_ratio, max_epochs, 
+                 min_lr=1e-8, last_epoch=-1, verbose=False):
+        """
+        Parameters:
+        -----------
+        optimizer : torch.optim.Optimizer
+            The optimizer to adjust learning rate for
+        warmup_ratio : float
+            Ratio of total epochs for warmup phase (0-1)
+        peak_ratio : float
+            Ratio of total epochs at which learning rate peaks (0-1)
+        max_epochs : int
+            Total number of epochs for training
+        min_lr : float
+            Minimum learning rate during warmup phase
+        last_epoch : int
+            Last epoch index
+        verbose : bool
+            Whether to print learning rate updates
+        """
+        self.warmup_ratio = warmup_ratio
+        self.peak_ratio = peak_ratio
+        self.max_epochs = max_epochs
+        self.min_lr = min_lr
+        super().__init__(optimizer, last_epoch, verbose)
+
+    def get_lr(self):
+        """
+        Calculate learning rates using a modified sigmoid function:
+        - Near zero during initial warmup phase
+        - Smooth ramp-up to peak
+        - Gradual falloff after peak
+        """
+        if not self._get_lr_called_within_step:
+            warnings.warn("To get the last learning rate computed by the scheduler, "
+                          "please use `get_last_lr()`.", UserWarning)
+                          
+        # Convert current epoch to a position in 0-1 range
+        position = float(self.last_epoch) / self.max_epochs
+        
+        # Calculate learning rates for each parameter group
+        lrs = []
+        for base_lr in self.base_lrs:
+            # Before warmup period, use minimal learning rate
+            if position < self.warmup_ratio:
+                # Small linear ramp from min_lr to 0.05*base_lr during warmup
+                warmup_progress = position / self.warmup_ratio
+                lr = self.min_lr + warmup_progress * (0.05 * base_lr - self.min_lr)
+            else:
+                # After warmup, use a modified sigmoid curve centered on peak_position
+                # Map position (warmup to 1.0) to a value that gives max LR at peak_ratio
+                # Rescale position to 0-1 range after warmup
+                rescaled_pos = (position - self.warmup_ratio) / (1.0 - self.warmup_ratio)
+                
+                # Center sigmoid at peak_ratio (post-warmup scale)
+                peak_pos_rescaled = (self.peak_ratio - self.warmup_ratio) / (1.0 - self.warmup_ratio)
+                
+                # Scale factor for sigmoid steepness
+                sigmoid_scale = 10.0
+                
+                # Calculate sigmoid input - will be 0 at peak position for sigmoid(0) = 0.5
+                sigmoid_input = sigmoid_scale * (rescaled_pos - peak_pos_rescaled)
+                
+                # Apply sigmoid function: output is between 0 and 1
+                # When rescaled_pos = peak_pos_rescaled, sigmoid_val = 0.5
+                sigmoid_val = 1.0 / (1.0 + np.exp(sigmoid_input))
+                
+                # Scale sigmoid to make peak value = 1.0 (since sigmoid(0) = 0.5)
+                # We multiply by 2.0 so the peak value is 1.0, giving us base_lr at peak
+                scaled_val = sigmoid_val * 2.0
+                
+                # Apply scaling to base_lr and ensure we never go below min_lr
+                lr = max(base_lr * scaled_val, self.min_lr)
+            
+            lrs.append(lr)
+        
+        return lrs
+
+
 class ReduceLROnSpike:
     """Reduce learning rate when a metric has bounced up.
 

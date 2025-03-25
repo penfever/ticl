@@ -12,13 +12,18 @@ class TabPFN(nn.Module):
                  decoder=None, input_normalization=False, init_method=None, pre_norm=False,
                  activation='gelu', recompute_attn=False, classification_task=True,
                  all_layers_same_init=False, efficient_eval_masking=True, y_encoder=None, tabpfn_zero_weights=False,
-                 semantic_feature_p=None):
+                 semantic_feature_p=None, config=None):
         super().__init__()
         self.classification_task = classification_task
         self.y_encoder = y_encoder_layer
         nhid = emsize * nhid_factor
         
-        # Store semantic feature probability if provided
+        # Store the configuration for later reference by the training process
+        if config is not None:
+            self._config = config
+        
+        # Store semantic feature probability 
+        self.semantic_feature_p = 0.0
         if semantic_feature_p is not None:
             self.semantic_feature_p = semantic_feature_p
 

@@ -503,36 +503,284 @@ def train(dl, model, criterion, optimizer_state=None, scheduler=None,
     # Set up model reference in dataloader
     dl.model = model
     
-    # Initialize optimizer
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay, betas=(adam_beta1, 0.999))
-    if optimizer_state is not None:
-        optimizer.load_state_dict(optimizer_state)
+    # Check if this is a semantic model with CLIP language transformer
+    # Look for the CLIP text model in the model or its module
+    has_clip_language_model = False
+    clip_text_model = None
+    model_module = model.module if hasattr(model, 'module') else model
     
-    # Initialize schedulers
-    spike_scheduler = None
-    if scheduler is None:
-        # Ensure the cosine annealing period is at least 1 epoch to avoid division by zero
-        cosine_period = max(1, epochs - warmup_epochs)
+    if hasattr(model_module, 'clip_text_model'):
+        has_clip_language_model = True
+        clip_text_model = model_module.clip_text_model
+        if verbose:
+            print("Detected CLIP language transformer in model")
+    
+    # Get config settings for the language transformer
+    lang_transformer_lr = None
+    lang_transformer_weight_decay = None
+    lang_transformer_warmup_ratio = None
+    lang_transformer_peak_ratio = None
+    
+    # Check if we're using a semantic model with semantic features enabled
+    semantic_feature_p = 0.0
+    if 'linear_attention' in model_type:
+        semantic_feature_p = getattr(model_module, 'semantic_feature_p', 0.0)
+    elif 'transformer' in model_type:
+        semantic_feature_p = getattr(model_module, 'semantic_feature_p', 0.0)
+    
+    # Look for language transformer parameters in config
+    if has_clip_language_model and semantic_feature_p > 0.0:
+        # Look in prior.classification section for the parameters
+        if hasattr(model_module, '_config') and 'prior' in model_module._config:
+            config = model_module._config
+            if 'classification' in config['prior']:
+                classification_config = config['prior']['classification']
+                lang_transformer_lr = classification_config.get('language_transformer_lr', 4e-6)
+                lang_transformer_weight_decay = classification_config.get('language_transformer_weight_decay', 0.1)
+                lang_transformer_warmup_ratio = classification_config.get('language_transformer_warmup_ratio', 0.1)
+                lang_transformer_peak_ratio = classification_config.get('language_transformer_peak_ratio', 0.7)
         
-        if learning_rate_schedule == 'cosine':
-            base_scheduler = CosineAnnealingLR(optimizer, T_max=cosine_period, eta_min=min_lr)
-        elif learning_rate_schedule == 'exponential':
-            base_scheduler = ExponentialLR(optimizer, gamma=lr_decay, min_lr=min_lr)
-        elif learning_rate_schedule == 'constant':
-            base_scheduler = ExponentialLR(optimizer, gamma=1, min_lr=min_lr)
+        # If not found in model config, use default values
+        if lang_transformer_lr is None:
+            lang_transformer_lr = 4e-6
+            lang_transformer_weight_decay = 0.1
+            lang_transformer_warmup_ratio = 0.1
+            lang_transformer_peak_ratio = 0.7
+        
+        if verbose:
+            print(f"Using separate optimizer for language transformer with lr={lang_transformer_lr},"
+                  f" weight_decay={lang_transformer_weight_decay}")
+            print(f"Language transformer LR schedule: warmup_ratio={lang_transformer_warmup_ratio},"
+                  f" peak_ratio={lang_transformer_peak_ratio}")
+    
+    # Create separate optimizers for model and language transformer if needed
+    if has_clip_language_model and semantic_feature_p > 0.0:
+        # Separate the parameters into two groups
+        language_params = []
+        model_params = []
+        
+        # Get all language transformer parameters
+        for name, param in clip_text_model.named_parameters():
+            if param.requires_grad:
+                language_params.append(param)
+        
+        # Get all other model parameters
+        for name, param in model.named_parameters():
+            if param.requires_grad and not any(p is param for p in language_params):
+                model_params.append(param)
+        
+        # Create separate optimizers
+        model_optimizer = torch.optim.AdamW(
+            model_params, 
+            lr=learning_rate, 
+            weight_decay=weight_decay, 
+            betas=(adam_beta1, 0.999)
+        )
+        
+        language_optimizer = torch.optim.AdamW(
+            language_params, 
+            lr=lang_transformer_lr, 
+            weight_decay=lang_transformer_weight_decay, 
+            betas=(0.9, 0.999)  # Standard betas for language models
+        )
+        
+        # Create a combined optimizer that updates both parameter groups
+        # For compatibility with existing code
+        from torch.optim import Optimizer
+        
+        class CombinedOptimizer(Optimizer):
+            def __init__(self, model_optimizer, language_optimizer):
+                self.model_optimizer = model_optimizer
+                self.language_optimizer = language_optimizer
+                # For compatibility with torch.optim.Optimizer
+                self.param_groups = model_optimizer.param_groups + language_optimizer.param_groups
+                self.state = {}  # Not used directly
+                
+            def step(self, closure=None):
+                loss = None
+                if closure is not None:
+                    loss = closure()
+                self.model_optimizer.step()
+                self.language_optimizer.step()
+                return loss
+                
+            def zero_grad(self):
+                self.model_optimizer.zero_grad()
+                self.language_optimizer.zero_grad()
+                
+            def state_dict(self):
+                return {
+                    'model_optimizer': self.model_optimizer.state_dict(),
+                    'language_optimizer': self.language_optimizer.state_dict()
+                }
+                
+            def load_state_dict(self, state_dict):
+                self.model_optimizer.load_state_dict(state_dict['model_optimizer'])
+                self.language_optimizer.load_state_dict(state_dict['language_optimizer'])
+        
+        # Create the combined optimizer
+        optimizer = CombinedOptimizer(model_optimizer, language_optimizer)
+        
+        # Store both optimizers in the model for reference
+        model.model_optimizer = model_optimizer
+        model.language_optimizer = language_optimizer
+        
+        if optimizer_state is not None:
+            if isinstance(optimizer_state, dict) and 'model_optimizer' in optimizer_state:
+                # New format state dict
+                optimizer.load_state_dict(optimizer_state)
+            else:
+                # Old format - just load into model optimizer
+                model_optimizer.load_state_dict(optimizer_state)
+        
+        # Initialize schedulers
+        spike_scheduler = None
+        language_scheduler = None
+        
+        if scheduler is None:
+            # Ensure the cosine annealing period is at least 1 epoch to avoid division by zero
+            cosine_period = max(1, epochs - warmup_epochs)
+            
+            # Create scheduler for model parameters
+            if learning_rate_schedule == 'cosine':
+                base_scheduler = CosineAnnealingLR(model_optimizer, T_max=cosine_period, eta_min=min_lr)
+            elif learning_rate_schedule == 'exponential':
+                base_scheduler = ExponentialLR(model_optimizer, gamma=lr_decay, min_lr=min_lr)
+            elif learning_rate_schedule == 'constant':
+                base_scheduler = ExponentialLR(model_optimizer, gamma=1, min_lr=min_lr)
+            else:
+                raise ValueError(f"Invalid learning rate schedule: {learning_rate_schedule}")
+            
+            # Add linear warmup to scheduler
+            model_scheduler = SequentialLR(
+                model_optimizer, 
+                [LinearLR(model_optimizer, start_factor=1e-10, end_factor=1, total_iters=warmup_epochs),
+                base_scheduler], 
+                milestones=[warmup_epochs]
+            )
+            
+            # Create custom scheduler for language transformer parameters
+            from ticl.utils import LanguageTransformerScheduler
+            language_scheduler = LanguageTransformerScheduler(
+                language_optimizer,
+                warmup_ratio=lang_transformer_warmup_ratio,
+                peak_ratio=lang_transformer_peak_ratio,
+                max_epochs=epochs,
+                min_lr=1e-8,
+                verbose=True
+            )
+            
+            # Create scheduler wrapper that updates both schedulers
+            class CombinedScheduler:
+                def __init__(self, model_scheduler, language_scheduler):
+                    self.model_scheduler = model_scheduler
+                    self.language_scheduler = language_scheduler
+                    self.last_epoch = model_scheduler.last_epoch
+                    
+                def step(self):
+                    self.model_scheduler.step()
+                    self.language_scheduler.step()
+                    self.last_epoch = self.model_scheduler.last_epoch
+                    
+                def state_dict(self):
+                    return {
+                        'model_scheduler': self.model_scheduler.state_dict(),
+                        'language_scheduler': self.language_scheduler.state_dict()
+                    }
+                    
+                def load_state_dict(self, state_dict):
+                    self.model_scheduler.load_state_dict(state_dict['model_scheduler'])
+                    self.language_scheduler.load_state_dict(state_dict['language_scheduler'])
+                    self.last_epoch = self.model_scheduler.last_epoch
+                    
+                def get_last_lr(self):
+                    return self.model_scheduler.get_last_lr() + self.language_scheduler.get_last_lr()
+            
+            scheduler = CombinedScheduler(model_scheduler, language_scheduler)
+            start_epoch = 1
         else:
-            raise ValueError(f"Invalid learning rate schedule: {learning_rate_schedule}")
+            # If loading from existing scheduler state
+            if hasattr(scheduler, 'model_scheduler') and hasattr(scheduler, 'language_scheduler'):
+                # Already a combined scheduler
+                start_epoch = scheduler.last_epoch + 1
+            else:
+                # Convert to combined scheduler
+                from ticl.utils import LanguageTransformerScheduler
+                language_scheduler = LanguageTransformerScheduler(
+                    language_optimizer,
+                    warmup_ratio=lang_transformer_warmup_ratio,
+                    peak_ratio=lang_transformer_peak_ratio,
+                    max_epochs=epochs,
+                    min_lr=1e-8,
+                    last_epoch=scheduler.last_epoch,
+                    verbose=True
+                )
+                
+                # Create combined scheduler
+                class CombinedScheduler:
+                    def __init__(self, model_scheduler, language_scheduler):
+                        self.model_scheduler = model_scheduler
+                        self.language_scheduler = language_scheduler
+                        self.last_epoch = model_scheduler.last_epoch
+                        
+                    def step(self):
+                        self.model_scheduler.step()
+                        self.language_scheduler.step()
+                        self.last_epoch = self.model_scheduler.last_epoch
+                        
+                    def state_dict(self):
+                        return {
+                            'model_scheduler': self.model_scheduler.state_dict(),
+                            'language_scheduler': self.language_scheduler.state_dict()
+                        }
+                        
+                    def load_state_dict(self, state_dict):
+                        self.model_scheduler.load_state_dict(state_dict['model_scheduler'])
+                        self.language_scheduler.load_state_dict(state_dict['language_scheduler'])
+                        self.last_epoch = self.model_scheduler.last_epoch
+                        
+                    def get_last_lr(self):
+                        return self.model_scheduler.get_last_lr() + self.language_scheduler.get_last_lr()
+                
+                # Create the combined scheduler
+                scheduler = CombinedScheduler(scheduler, language_scheduler)
+                start_epoch = scheduler.last_epoch + 1
         
-        # Add linear warmup to scheduler
-        scheduler = SequentialLR(optimizer, [LinearLR(optimizer, start_factor=1e-10, end_factor=1, total_iters=warmup_epochs),
-                                             base_scheduler], milestones=[warmup_epochs])
-        start_epoch = 1
+        # Set up optional spike-based learning rate reduction for main model
+        if reduce_lr_on_spike:
+            spike_scheduler = ReduceLROnSpike(model_optimizer, smoothing=10, factor=0.5, min_lr=min_lr, tolerance=spike_tolerance, verbose=True)
+    
     else:
-        start_epoch = scheduler.last_epoch + 1
+        # Standard single optimizer approach for all other models
+        optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay, betas=(adam_beta1, 0.999))
+        if optimizer_state is not None:
+            optimizer.load_state_dict(optimizer_state)
+        
+        # Initialize schedulers
+        spike_scheduler = None
+        if scheduler is None:
+            # Ensure the cosine annealing period is at least 1 epoch to avoid division by zero
+            cosine_period = max(1, epochs - warmup_epochs)
+            
+            if learning_rate_schedule == 'cosine':
+                base_scheduler = CosineAnnealingLR(optimizer, T_max=cosine_period, eta_min=min_lr)
+            elif learning_rate_schedule == 'exponential':
+                base_scheduler = ExponentialLR(optimizer, gamma=lr_decay, min_lr=min_lr)
+            elif learning_rate_schedule == 'constant':
+                base_scheduler = ExponentialLR(optimizer, gamma=1, min_lr=min_lr)
+            else:
+                raise ValueError(f"Invalid learning rate schedule: {learning_rate_schedule}")
+            
+            # Add linear warmup to scheduler
+            scheduler = SequentialLR(optimizer, [LinearLR(optimizer, start_factor=1e-10, end_factor=1, total_iters=warmup_epochs),
+                                               base_scheduler], milestones=[warmup_epochs])
+            start_epoch = 1
+        else:
+            start_epoch = scheduler.last_epoch + 1
 
-    # Set up optional spike-based learning rate reduction
-    if reduce_lr_on_spike:
-        spike_scheduler = ReduceLROnSpike(optimizer, smoothing=10, factor=0.5, min_lr=min_lr, tolerance=spike_tolerance, verbose=True)
+        # Set up optional spike-based learning rate reduction
+        if reduce_lr_on_spike:
+            spike_scheduler = ReduceLROnSpike(optimizer, smoothing=10, factor=0.5, min_lr=min_lr, tolerance=spike_tolerance, verbose=True)
     
     # Initialize mixed precision training if applicable
     # Different backend types have different mixed precision capabilities

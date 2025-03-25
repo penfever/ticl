@@ -404,6 +404,27 @@ This will:
 
 The `semantic-feature-p` parameter controls the probability of semantic features being used (0.0-1.0).
 
+#### Language Transformer Optimization Parameters
+
+When training with semantic features (`--semantic-feature-p > 0`), you can fine-tune the CLIP language transformer using these additional parameters:
+
+- `--language-transformer-lr`: Learning rate specifically for the language transformer component (default: 4e-6)
+- `--language-transformer-weight-decay`: Weight decay for the language transformer optimizer (default: 0.1)
+- `--language-transformer-warmup-ratio`: Ratio of total epochs to warm up the language transformer (default: 0.1)
+- `--language-transformer-peak-ratio`: Ratio of total epochs at which language transformer LR peaks (default: 0.7)
+
+These parameters enable a specialized training approach where the language transformer:
+1. Starts with a near-zero learning rate during the initial training phase
+2. Gradually increases its learning rate, reaching peak value around 70% through training
+3. Smoothly decreases afterwards
+
+Example usage:
+```bash
+python -m ticl.fit_model tabpfn --semantic-feature-p 0.3 --language-transformer-lr 5e-6 --language-transformer-peak-ratio 0.75
+```
+
+This approach improves model performance by letting base model components learn first, then fine-tuning the language components.
+
 ### Text-Based Classification
 
 Once a model has been trained with semantic features, you can use it for text-based classification. This means you can:

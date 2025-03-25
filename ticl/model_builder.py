@@ -309,6 +309,7 @@ def get_model(
             n_features=total_features,  # Include semantic features
             y_encoder_layer=y_encoder, 
             semantic_feature_p=semantic_feature_p,
+            config=config,  # Pass full config to the model for optimizer configuration
             **config['transformer']
         )
     elif model_type == "batabpfn":
@@ -340,6 +341,7 @@ def get_model(
             n_features=total_features,  # Use the adjusted feature count
             y_encoder_layer=y_encoder,
             semantic_feature_p=semantic_feature_p,  # Pass the semantic feature probability
+            config=config,  # Pass full config to the model for optimizer configuration
             **config['linear_attention']
         )
         

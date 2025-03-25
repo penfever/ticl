@@ -35,6 +35,7 @@ class TabFlex(nn.Module):
         feature_map = 'identity',
         linear_attention_cfg=None,
         semantic_feature_p=None,
+        config=None,
     ):
         super().__init__()
         self.classification_task = classification_task
@@ -42,7 +43,12 @@ class TabFlex(nn.Module):
         nhid = emsize * nhid_factor
         self.model = model
         
+        # Store configuration for access by optimizer
+        if config is not None:
+            self._config = config
+        
         # Store semantic feature probability if provided
+        self.semantic_feature_p = 0.0
         if semantic_feature_p is not None:
             self.semantic_feature_p = semantic_feature_p
             print(f"TabFlex configured with semantic_feature_p={semantic_feature_p}")
