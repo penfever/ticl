@@ -272,9 +272,25 @@ def train_epoch(
                 if batch_info is not None:
                     if 'semantic_targets' in batch_info:
                         semantic_targets = batch_info['semantic_targets']
+                        
+                        # Sanity check - log warning if there are no -100 values in targets
+                        if semantic_targets is not None and semantic_targets.numel() > 100:
+                            has_ignore_indices = (semantic_targets == -100).any().item()
+                            if not has_ignore_indices:
+                                memory_logger.warning(f"Batch {batch}: No ignore indices (-100) found in semantic targets - suspicious")
                     
                     if 'semantic_tokens' in batch_info:
                         semantic_tokens = batch_info['semantic_tokens']
+                        
+                        # Verify consistency between tokens and targets
+                        if semantic_targets is not None and semantic_tokens is not None:
+                            token_ignore_ratio = (semantic_tokens == -100).float().mean().item()
+                            target_ignore_ratio = (semantic_targets == -100).float().mean().item()
+                            
+                            # Large discrepancy indicates a potential issue
+                            if abs(token_ignore_ratio - target_ignore_ratio) > 0.5:
+                                memory_logger.warning(f"Batch {batch}: Token/target ignore ratio mismatch: "
+                                                     f"tokens {token_ignore_ratio:.4f}, targets {target_ignore_ratio:.4f}")
                     
                     # Extract semantic embeddings if already computed
                     if 'semantic_embeddings' in batch_info:
@@ -366,11 +382,54 @@ def train_epoch(
                 targets = targets[single_eval_pos:]
                 
                 if batch_info is not None and 'semantic_targets' in batch_info and batch_info['semantic_targets'] is not None:
+                    # Store original shape for logging
+                    original_shape = batch_info['semantic_targets'].shape
+                    
+                    # Verify that semantic tokens and targets are aligned before slicing
+                    if 'semantic_tokens' in batch_info and batch_info['semantic_tokens'] is not None:
+                        token_shape = batch_info['semantic_tokens'].shape
+                        target_shape = batch_info['semantic_targets'].shape
+                        
+                        # Log warning if shape mismatch before slicing
+                        if len(target_shape) > 0 and len(token_shape) > 0 and target_shape[0] != token_shape[0]:
+                            memory_logger.warning(f"Semantic token/target shape mismatch before slicing: tokens {token_shape}, targets {target_shape}")
+                    
+                    # Slice semantic targets for evaluation
                     batch_info['semantic_targets'] = batch_info['semantic_targets'][single_eval_pos:]
+                    
+                    # Also slice semantic tokens if present
+                    if 'semantic_tokens' in batch_info and batch_info['semantic_tokens'] is not None:
+                        # Make sure to maintain the -100 values when slicing
+                        batch_info['semantic_tokens'] = batch_info['semantic_tokens'][single_eval_pos:]
                     
                     # Ensure semantic targets are long tensor type (for bincount and loss functions)
                     if batch_info['semantic_targets'].dtype != torch.long:
                         batch_info['semantic_targets'] = batch_info['semantic_targets'].long()
+                        
+                    # Verify we still have -100 values after slicing if we originally had them
+                    new_shape = batch_info['semantic_targets'].shape
+                    
+                    # Check ignore indices before and after slicing
+                    original_has_ignore = torch.tensor(False, device=batch_info['semantic_targets'].device)
+                    if 'semantic_targets_original' in batch_info:
+                        original_has_ignore = (batch_info['semantic_targets_original'] == -100).any()
+                    
+                    current_has_ignore = (batch_info['semantic_targets'] == -100).any()
+                    has_ignore_indices = current_has_ignore.item()
+                    
+                    # If we lost all -100 values during slicing, this is suspicious
+                    if original_has_ignore and not current_has_ignore:
+                        memory_logger.warning(f"Lost all ignore indices (-100) after slicing semantic targets: "
+                                             f"{original_shape} → {new_shape}")
+                        
+                        # Store the issue in batch_info for the batch monitor to detect
+                        batch_info['lost_ignore_indices'] = True
+                    
+                    memory_logger.debug(f"Semantic targets shape: {original_shape} → {new_shape}, has ignore indices: {has_ignore_indices}")
+                    
+                    # Store the original semantic targets for analysis
+                    if 'semantic_targets_original' not in batch_info:
+                        batch_info['semantic_targets_original'] = batch_info['semantic_targets'].clone()
                     
                     # Print diagnostic info to verify we have valid targets
                     if batch % 50 == 0:  # Only print occasionally to avoid spam

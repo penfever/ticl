@@ -63,6 +63,8 @@ class SemanticBatchMonitor:
             'max_embedding_norm': 100.0,          # Maximum L2 norm for embeddings
             'min_embedding_norm': 0.01,           # Minimum L2 norm for embeddings
             'max_embedding_std': 10.0,            # Maximum standard deviation within embeddings
+            'max_valid_targets': 50000,           # Maximum reasonable number of valid targets
+            'token_target_ratio_tolerance': 0.2,  # Maximum allowed difference between token and target valid ratios
         }
         
         memory_logger.info(f"Semantic batch monitoring initialized: monitoring={enable_monitoring}, skip_bad={skip_bad_batches}")
@@ -178,6 +180,12 @@ class SemanticBatchMonitor:
         is_bad_batch = False
         reasons = []
         
+        # Check if batch_info indicates we lost ignore indices during slicing
+        if batch_info is not None and batch_info.get('lost_ignore_indices', False):
+            is_bad_batch = True
+            reasons.append("Lost all ignore indices (-100) during data slicing")
+            stats['lost_ignore_indices'] = True
+        
         # Track count
         self.batch_count += 1
         stats['batch_index'] = self.batch_count
@@ -267,6 +275,22 @@ class SemanticBatchMonitor:
                     stats['semantic_targets_valid_count'] = valid_count
                     stats['semantic_targets_valid_ratio'] = valid_ratio
                     
+                    # Check for potentially invalid target distributions
+                    if valid_ratio == 1.0 and total_targets > 100:
+                        # This is suspicious - we would expect some -100 values
+                        memory_logger.warning(f"Suspicious semantic targets with 100% valid ratio and {total_targets} total values")
+                        # Check if we also have semantic tokens to compare
+                        if semantic_tokens is not None and hasattr(semantic_tokens, 'numel'):
+                            token_count = semantic_tokens.numel()
+                            token_valid_mask = semantic_tokens != -100
+                            token_valid_ratio = token_valid_mask.sum().item() / token_count if token_count > 0 else 0
+                            
+                            # If tokens have -100 values but targets don't, this is inconsistent
+                            if token_valid_ratio < 1.0 and valid_ratio == 1.0:
+                                is_bad_batch = True
+                                reasons.append(f"Inconsistent token/target masking: token valid ratio {token_valid_ratio:.4f} but target valid ratio {valid_ratio:.4f}")
+                                stats['semantic_token_target_inconsistent'] = True
+                    
                     # Check if we have enough valid targets
                     if valid_count < self.thresholds['min_valid_targets']:
                         is_bad_batch = True
@@ -274,6 +298,10 @@ class SemanticBatchMonitor:
                     elif valid_ratio < self.thresholds['min_valid_semantic_ratio']:
                         is_bad_batch = True
                         reasons.append(f"Valid semantic target ratio too low: {valid_ratio:.4f}")
+                    elif valid_ratio == 1.0 and valid_count > 10000:
+                        # High number of targets with no -100 values is suspicious
+                        is_bad_batch = True
+                        reasons.append(f"Suspiciously high number of valid targets with no ignore values: {valid_count}")
                 
                 # Check target distribution
                 if hasattr(semantic_targets, 'min') and hasattr(semantic_targets, 'max'):

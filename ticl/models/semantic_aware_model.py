@@ -98,7 +98,20 @@ class SemanticAwareClassifier(nn.Module):
             semantic_tokens = semantic_tokens[..., :max_length]
             
         # Format tokens for CLIP
+        # Check if there are any -100 values in the tokens and log information
+        has_ignore_indices = (semantic_tokens == -100).any().item()
+        ignore_count = (semantic_tokens == -100).sum().item() if has_ignore_indices else 0
+        total_tokens = semantic_tokens.numel()
+        
+        if has_ignore_indices:
+            memory_logger.debug(f"Found {ignore_count}/{total_tokens} ignore indices (-100) in semantic tokens")
+        elif total_tokens > 100:
+            memory_logger.warning(f"No ignore indices (-100) found in {total_tokens} semantic tokens - this may indicate data issues")
+        
+        # Create attention mask (0 for masked positions, 1 for valid positions)
         attention_mask = (semantic_tokens != -100).long()
+        
+        # Replace -100 values with pad token IDs for the CLIP model
         input_ids = torch.where(semantic_tokens == -100, 
                                 torch.tensor(self.tokenizer.pad_token_id, device=device), 
                                 semantic_tokens)
