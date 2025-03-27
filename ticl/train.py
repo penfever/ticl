@@ -443,8 +443,11 @@ def train_epoch(
                     memory_logger.debug(f"batch_info contains: {list(batch_info.keys())}")
                     if 'semantic_feature_p' in batch_info:
                         memory_logger.debug(f"semantic_feature_p = {batch_info['semantic_feature_p']}")
-                    if 'semantic_targets' in batch_info:
-                        memory_logger.debug(f"semantic_targets shape: {batch_info['semantic_targets'].shape}")
+                    if 'semantic_targets' in batch_info and batch_info['semantic_targets'] is not None:
+                        if isinstance(batch_info['semantic_targets'], torch.Tensor):
+                            memory_logger.debug(f"semantic_targets shape: {batch_info['semantic_targets'].shape}")
+                        else:
+                            memory_logger.debug(f"semantic_targets is not a tensor: {type(batch_info['semantic_targets'])}")
                 else:
                     memory_logger.debug("batch_info is None")
                 
