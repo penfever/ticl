@@ -148,7 +148,8 @@ def train_epoch(
     batch_monitor=None,
     semantic_batch_monitoring=True,
     skip_bad_semantic_batches=False,
-    semantic_batch_log_frequency=10
+    semantic_batch_log_frequency=10,
+    train_mixed_precision=False
 ):
     model.train()  # Turn on the train mode
     total_loss = torch.tensor(0., device = device)
@@ -1021,7 +1022,8 @@ def train(dl, model, criterion, optimizer_state=None, scheduler=None,
                 batch_monitor=batch_monitor,
                 semantic_batch_monitoring=semantic_batch_monitoring,
                 skip_bad_semantic_batches=skip_bad_semantic_batches,
-                semantic_batch_log_frequency=semantic_batch_log_frequency
+                semantic_batch_log_frequency=semantic_batch_log_frequency,
+                train_mixed_precision=train_mixed_precision
             )
             
             # Log batch monitoring summary to wandb
