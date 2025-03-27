@@ -448,9 +448,12 @@ class SemanticAwareClassifier(nn.Module):
         }
         
         # Store embeddings in batch_info for batch monitoring if it exists
-        if batch_info is not None:
-            # Add the embeddings for later monitoring
-            batch_info['semantic_embeddings'] = pattern_embeddings_tensor
+        # IMPORTANT: Only store a reference to embeddings for debugging, not for production
+        # Setting semantic_feature_p > 0 with this enabled can cause memory leaks
+        # Disabled to prevent memory issues
+        # if batch_info is not None:
+        #     # Add the embeddings for later monitoring
+        #     batch_info['semantic_embeddings'] = pattern_embeddings_tensor
         
         return result
     

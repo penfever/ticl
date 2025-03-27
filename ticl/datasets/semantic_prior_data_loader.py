@@ -17,6 +17,7 @@ from transformers import CLIPTokenizerFast
 logger = logging.getLogger(__name__)
 
 # Global cache for loaded data to avoid repeated JSON loading
+# IMPORTANT: We limit the cache size to prevent memory leaks
 _SEMANTIC_DATA_CACHE = {
     "column_name_tokens": None,
     "column_value_tokens": None,
@@ -24,7 +25,11 @@ _SEMANTIC_DATA_CACHE = {
     "log_file_path": None,
     "max_columns": None,
     "unwanted_token_ids": None,
-    "tokenizer": None
+    "tokenizer": None,
+    # Track cache size in bytes for memory management 
+    "cache_size_bytes": 0,
+    # Limit cache size to prevent OOM issues - 500MB should be enough for training
+    "max_cache_size_bytes": 500 * 1024 * 1024  # 500MB
 }
 
 def is_float(value: str) -> bool:
@@ -484,8 +489,25 @@ def get_random_semantic_data(
                 
                 # Cache the tensor for future use with this configuration
                 if use_cache:
+                    # Check tensor size before adding to cache
+                    tensor_size_bytes = semantic_tensor.element_size() * semantic_tensor.nelement()
+                    
+                    # Check if adding this tensor would exceed cache size limit
+                    if _SEMANTIC_DATA_CACHE["cache_size_bytes"] + tensor_size_bytes > _SEMANTIC_DATA_CACHE["max_cache_size_bytes"]:
+                        # If cache is getting too big, clear it to prevent OOM
+                        logger.warning(f"Semantic data cache limit reached ({_SEMANTIC_DATA_CACHE['cache_size_bytes']/1024/1024:.1f}MB), clearing cache")
+                        # Clear all cached tensors except essential ones
+                        keys_to_keep = ["is_loaded", "log_file_path", "max_columns", "unwanted_token_ids", "tokenizer", 
+                                       "cache_size_bytes", "max_cache_size_bytes"]
+                        keys_to_clear = [k for k in _SEMANTIC_DATA_CACHE.keys() if k not in keys_to_keep]
+                        for k in keys_to_clear:
+                            _SEMANTIC_DATA_CACHE[k] = None
+                        _SEMANTIC_DATA_CACHE["cache_size_bytes"] = 0
+                    
+                    # Add to cache and update size tracking
                     _SEMANTIC_DATA_CACHE[cached_tensor_key] = semantic_tensor
                     _SEMANTIC_DATA_CACHE[cached_columns_key] = selected_columns
+                    _SEMANTIC_DATA_CACHE["cache_size_bytes"] += tensor_size_bytes
                 
                 # Return both the tensor and column names
                 if return_column_names:
@@ -569,8 +591,25 @@ def get_random_semantic_data(
     
     # Cache synthetic data if using a seed
     if seed is not None and use_cache:
+        # Check tensor size before adding to cache
+        tensor_size_bytes = random_tensor.element_size() * random_tensor.nelement()
+        
+        # Check if adding this tensor would exceed cache size limit
+        if _SEMANTIC_DATA_CACHE["cache_size_bytes"] + tensor_size_bytes > _SEMANTIC_DATA_CACHE["max_cache_size_bytes"]:
+            # If cache is getting too big, clear it to prevent OOM
+            logger.warning(f"Synthetic data cache limit reached ({_SEMANTIC_DATA_CACHE['cache_size_bytes']/1024/1024:.1f}MB), clearing cache")
+            # Clear all cached tensors except essential ones
+            keys_to_keep = ["is_loaded", "log_file_path", "max_columns", "unwanted_token_ids", "tokenizer", 
+                           "cache_size_bytes", "max_cache_size_bytes"]
+            keys_to_clear = [k for k in _SEMANTIC_DATA_CACHE.keys() if k not in keys_to_keep]
+            for k in keys_to_clear:
+                _SEMANTIC_DATA_CACHE[k] = None
+            _SEMANTIC_DATA_CACHE["cache_size_bytes"] = 0
+        
+        # Add to cache and update size tracking
         _SEMANTIC_DATA_CACHE[synthetic_key] = random_tensor
         _SEMANTIC_DATA_CACHE[f"{synthetic_key}_columns"] = synthetic_columns
+        _SEMANTIC_DATA_CACHE["cache_size_bytes"] += tensor_size_bytes
     
     # Return both the tensor and column names if requested
     if return_column_names:

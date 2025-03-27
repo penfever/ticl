@@ -347,45 +347,19 @@ def train_epoch(
                 # Extract class texts from token patterns
                 class_token_patterns = batch_info['class_token_patterns']
                 
-                # Try to import CLIP tokenizer for token decoding
-                try:
-                    from transformers import CLIPTokenizerFast
-                    tokenizer = CLIPTokenizerFast.from_pretrained("openai/clip-vit-base-patch32")
-                    has_tokenizer = True
-                except (ImportError, Exception):
-                    has_tokenizer = False
-                
-                # Generate meaningful descriptions for each class
+                # Simplified class text generation to reduce memory usage
                 class_texts = []
                 for class_idx in sorted(class_token_patterns.keys()):
                     pattern = class_token_patterns[class_idx]
                     semantic_class = pattern.get('semantic_class', 0)
                     
-                    # First try to use the actual column_name from semantic data if available
+                    # Just use simple descriptions to avoid tokenizer memory usage
                     if 'column_name' in pattern and pattern['column_name'] is not None:
-                        # Format it more nicely by removing underscores and adding spaces
-                        col_name = pattern['column_name'].replace('_', ' ').title()
-                        text = f"Data with {col_name}"
-                    # Fall back to class_name if available
+                        text = f"Data with {pattern['column_name']}"
                     elif 'class_name' in pattern:
                         text = pattern['class_name']
-                    # Otherwise, try to create a more descriptive text if we have token information and tokenizer
-                    elif 'tokens' in pattern and has_tokenizer and len(pattern['tokens']) > 0:
-                        try:
-                            # Get the tokens and try to decode them
-                            tokens = pattern['tokens'].cpu().tolist()
-                            token_texts = tokenizer.decode(tokens[:5])  # Use first few tokens
-                            # Clean up the token text
-                            token_texts = token_texts.replace("<|startoftext|>", "").replace("<|endoftext|>", "").strip()
-                            if token_texts:
-                                text = f"Data class {class_idx}: {token_texts}"
-                            else:
-                                text = f"Data class {class_idx} from semantic class {semantic_class}"
-                        except Exception:
-                            text = f"Data class {class_idx} from semantic class {semantic_class}"
                     else:
-                        # Fallback to simple description
-                        text = f"Data class {class_idx} from semantic class {semantic_class}"
+                        text = f"Data class {class_idx}"
                         
                     class_texts.append(text)
             
@@ -433,13 +407,6 @@ def train_epoch(
                     # Store the original semantic targets for analysis
                     if 'semantic_targets_original' not in batch_info:
                         batch_info['semantic_targets_original'] = batch_info['semantic_targets'].clone()
-                    
-                    # Print diagnostic info to verify we have valid targets
-                    if batch % 50 == 0:  # Only print occasionally to avoid spam
-                        unique_vals = torch.unique(batch_info['semantic_targets']).tolist()
-                        print(f"Semantic targets unique values: {unique_vals}")
-                        valid_semantic = (batch_info['semantic_targets'] != -100).sum().item()
-                        print(f"Valid semantic targets: {valid_semantic}/{batch_info['semantic_targets'].numel()}")
             
             # breakpoint()
             # Check for valid labels
