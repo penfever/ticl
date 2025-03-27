@@ -61,7 +61,7 @@ def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
     
     # Log batch_info if present
     if batch_info is not None:
-        if 'semantic_targets' in batch_info:
+        if 'semantic_targets' in batch_info and batch_info['semantic_targets'] is not None:
             sem_targets = batch_info['semantic_targets']
     
     # Check if this is a semantic model with dictionary output
@@ -77,7 +77,7 @@ def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
             # Check if batch contains semantic targets
             has_semantic_features = False
             if batch_info is not None:
-                if 'semantic_targets' in batch_info:
+                if 'semantic_targets' in batch_info and batch_info['semantic_targets'] is not None:
                     semantic_targets = batch_info['semantic_targets'].to(device)
                     has_semantic_features = True
                 
@@ -231,7 +231,7 @@ def train_epoch(
         memory_logger.debug(f"single_eval_pos: {single_eval_pos}")
         
         # Log semantic targets if present
-        if batch_info is not None and 'semantic_targets' in batch_info:
+        if batch_info is not None and 'semantic_targets' in batch_info and batch_info['semantic_targets'] is not None:
             sem_targets = batch_info['semantic_targets']
             
         
@@ -383,11 +383,13 @@ def train_epoch(
                     memory_logger.debug(f"Filtered targets with single_eval_pos={single_eval_pos}, new shape: {targets.shape}")
                     
                     # Also adjust semantic targets if present
-                    if batch_info is not None and 'semantic_targets' in batch_info:
+                    if batch_info is not None and 'semantic_targets' in batch_info and batch_info['semantic_targets'] is not None:
+                        # First check if semantic_targets is not None before trying to index it
                         batch_info['semantic_targets'] = batch_info['semantic_targets'][single_eval_pos:]
                         
                         # Ensure semantic targets are long tensor type (for bincount and loss functions)
-                        if batch_info['semantic_targets'].dtype != torch.long:
+                        # Check again for None just to be sure
+                        if batch_info['semantic_targets'] is not None and batch_info['semantic_targets'].dtype != torch.long:
                             batch_info['semantic_targets'] = batch_info['semantic_targets'].long()
 
                 # Check for valid labels
