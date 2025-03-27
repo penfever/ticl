@@ -9,7 +9,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 import logging
 
 import ticl.utils as utils
-from ticl.utils import ExponentialLR, ReduceLROnSpike, init_dist, get_autocast_context, IGNORE_INDEX, memory_logger
+from ticl.utils import ExponentialLR, ReduceLROnSpike, init_dist, get_autocast_context, IGNORE_INDEX
 
 import pdb
 
@@ -38,21 +38,6 @@ def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
     tuple
         (Loss, NaN share)
     """
-    # Debug logging for input data
-    memory_logger.debug(f"Loss inputs - targets shape: {targets.shape}, dtype: {targets.dtype}")
-    memory_logger.debug(f"Target values: min={targets.min().item()}, max={targets.max().item()}")
-    
-    # Try to get class distribution if targets are integers
-    try:
-        if torch.is_floating_point(targets):
-            # For float targets, bincount won't work directly
-            memory_logger.debug("Targets are float type - likely regression task")
-        else:
-            # For integer targets, we can use bincount
-            valid_targets = targets[targets>=0].long()  # Ensure long type for bincount
-            memory_logger.debug(f"Target classes distribution: {torch.bincount(valid_targets)}")
-    except Exception as e:
-        memory_logger.debug(f"Could not compute target distribution: {e}")
     
     # Log output structure
     if isinstance(output, dict):
@@ -75,12 +60,8 @@ def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
     
     # Log batch_info if present
     if batch_info is not None:
-        memory_logger.debug(f"batch_info keys: {list(batch_info.keys())}")
         if 'semantic_targets' in batch_info:
             sem_targets = batch_info['semantic_targets']
-            memory_logger.debug(f"Semantic targets: shape={sem_targets.shape}, dtype={sem_targets.dtype}")
-            if sem_targets.numel() > 0:
-                memory_logger.debug(f"Semantic target values: min={sem_targets.min().item()}, max={sem_targets.max().item()}")
     
     # Check if this is a semantic model with dictionary output
     is_semantic_model = isinstance(output, dict) and 'class_logits' in output and 'semantic_logits' in output
@@ -97,16 +78,7 @@ def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
             if batch_info is not None:
                 if 'semantic_targets' in batch_info:
                     semantic_targets = batch_info['semantic_targets'].to(device)
-                    memory_logger.debug(f"Semantic targets moved to device: {device}")
                     has_semantic_features = True
-                elif 'semantic_feature_p' in batch_info:
-                    # This batch was generated with semantic features disabled 
-                    # (determined by semantic_feature_p probability)
-                    memory_logger.debug(f"This batch has no semantic targets (semantic_feature_p: {batch_info.get('semantic_feature_p', 0.0)})")
-                    
-            # Log semantic feature presence
-            if not has_semantic_features:
-                memory_logger.debug("No semantic targets in this batch - normal with probability (1-semantic_feature_p)")
                 
             # Create target dictionary
             target_dict = {
