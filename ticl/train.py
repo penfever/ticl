@@ -299,16 +299,6 @@ def train_epoch(
                 # Check if we have semantic information to pass to the model
                 class_texts = None
                 
-                # Debug the batch_info contents
-                if batch_info is not None:
-                    memory_logger.debug(f"batch_info contains: {list(batch_info.keys())}")
-                    if 'semantic_feature_p' in batch_info:
-                        memory_logger.debug(f"semantic_feature_p = {batch_info['semantic_feature_p']}")
-                    if 'semantic_targets' in batch_info:
-                        memory_logger.debug(f"semantic_targets shape: {batch_info['semantic_targets'].shape}")
-                else:
-                    memory_logger.debug("batch_info is None")
-                
                 if batch_info is not None and 'class_token_patterns' in batch_info:
                     # Extract class texts from token patterns
                     class_token_patterns = batch_info['class_token_patterns']
