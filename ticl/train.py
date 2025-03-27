@@ -7,6 +7,7 @@ from tqdm import tqdm
 from torch.cuda.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 import logging
+memory_logger = logging.getLogger("ticl")
 
 import ticl.utils as utils
 from ticl.utils import ExponentialLR, ReduceLROnSpike, init_dist, get_autocast_context, IGNORE_INDEX
