@@ -142,11 +142,14 @@ def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
     # Log batch_info if present
     if batch_info is not None:
         memory_logger.debug(f"batch_info keys: {list(batch_info.keys())}")
-        if 'semantic_targets' in batch_info:
+        if 'semantic_targets' in batch_info and batch_info['semantic_targets'] is not None:
             sem_targets = batch_info['semantic_targets']
-            memory_logger.debug(f"Semantic targets: shape={sem_targets.shape}, dtype={sem_targets.dtype}")
-            if sem_targets.numel() > 0:
-                memory_logger.debug(f"Semantic target values: min={sem_targets.min().item()}, max={sem_targets.max().item()}")
+            if isinstance(sem_targets, torch.Tensor):  # Make sure it's a tensor
+                memory_logger.debug(f"Semantic targets: shape={sem_targets.shape}, dtype={sem_targets.dtype}")
+                if sem_targets.numel() > 0:
+                    memory_logger.debug(f"Semantic target values: min={sem_targets.min().item()}, max={sem_targets.max().item()}")
+            else:
+                memory_logger.debug(f"Semantic targets is not a tensor: {type(sem_targets)}")
     
     # Check if this is a semantic model with dictionary output
     is_semantic_model = isinstance(output, dict) and 'class_logits' in output and 'semantic_logits' in output
@@ -161,10 +164,18 @@ def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
             # Check if batch contains semantic targets
             has_semantic_features = False
             if batch_info is not None:
-                if 'semantic_targets' in batch_info:
-                    semantic_targets = batch_info['semantic_targets'].to(device)
-                    memory_logger.debug(f"Semantic targets moved to device: {device}")
-                    has_semantic_features = True
+                try:
+                    if 'semantic_targets' in batch_info and batch_info['semantic_targets'] is not None:
+                        # Check that it's a tensor before using to() method
+                        if isinstance(batch_info['semantic_targets'], torch.Tensor):
+                            semantic_targets = batch_info['semantic_targets'].to(device)
+                            memory_logger.debug(f"Semantic targets moved to device: {device}")
+                            has_semantic_features = True
+                        else:
+                            memory_logger.debug(f"Semantic targets not a tensor: {type(batch_info['semantic_targets'])}")
+                except Exception as e:
+                    memory_logger.debug(f"Error processing semantic targets: {e}")
+                    # Keep semantic_targets as None
                 elif 'semantic_feature_p' in batch_info:
                     # This batch was generated with semantic features disabled 
                     # (determined by semantic_feature_p probability)
@@ -182,7 +193,7 @@ def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
             
             # Log targets dictionary
             memory_logger.debug(f"Target dict - class_targets: {target_dict['class_targets'].shape}")
-            if semantic_targets is not None:
+            if semantic_targets is not None and isinstance(semantic_targets, torch.Tensor):
                 memory_logger.debug(f"Target dict - semantic_targets: {target_dict['semantic_targets'].shape}")
                 
                 # Check for valid semantic targets
@@ -342,15 +353,16 @@ def train_epoch(
         memory_logger.debug(f"single_eval_pos: {single_eval_pos}")
         
         # Log semantic targets if present
-        if batch_info is not None and 'semantic_targets' in batch_info:
+        if batch_info is not None and 'semantic_targets' in batch_info and batch_info['semantic_targets'] is not None:
             sem_targets = batch_info['semantic_targets']
-            memory_logger.debug(f"Semantic targets: shape={sem_targets.shape}, dtype={sem_targets.dtype}")
-            if sem_targets.numel() > 0:
-                try:
-                    memory_logger.debug(f"Semantic target values: min={sem_targets.min().item()}, max={sem_targets.max().item()}")
-                    
-                    # Only try to compute distribution if integer type
-                    if not torch.is_floating_point(sem_targets):
+            if isinstance(sem_targets, torch.Tensor):
+                memory_logger.debug(f"Semantic targets: shape={sem_targets.shape}, dtype={sem_targets.dtype}")
+                if sem_targets.numel() > 0:
+                    try:
+                        memory_logger.debug(f"Semantic target values: min={sem_targets.min().item()}, max={sem_targets.max().item()}")
+                        
+                        # Only try to compute distribution if integer type
+                        if not torch.is_floating_point(sem_targets):
                         valid_sem_targets = sem_targets[sem_targets>=0].long()
                         if valid_sem_targets.numel() > 0:  # Check if we have any valid targets
                             try:
@@ -520,15 +532,27 @@ def train_epoch(
                     memory_logger.debug(f"Filtered targets with single_eval_pos={single_eval_pos}, new shape: {targets.shape}")
                     
                     # Also adjust semantic targets if present
-                    if batch_info is not None and 'semantic_targets' in batch_info:
-                        orig_shape = batch_info['semantic_targets'].shape
-                        batch_info['semantic_targets'] = batch_info['semantic_targets'][single_eval_pos:]
-                        memory_logger.debug(f"Filtered semantic targets from {orig_shape} to {batch_info['semantic_targets'].shape}")
-                        
-                        # Ensure semantic targets are long tensor type (for bincount and loss functions)
-                        if batch_info['semantic_targets'].dtype != torch.long:
-                            memory_logger.debug(f"Converting semantic targets from {batch_info['semantic_targets'].dtype} to torch.long")
-                            batch_info['semantic_targets'] = batch_info['semantic_targets'].long()
+                    try:
+                        if batch_info is not None and 'semantic_targets' in batch_info and batch_info['semantic_targets'] is not None:
+                            # Make sure it's a tensor before trying to slice it
+                            if isinstance(batch_info['semantic_targets'], torch.Tensor):
+                                orig_shape = batch_info['semantic_targets'].shape
+                                batch_info['semantic_targets'] = batch_info['semantic_targets'][single_eval_pos:]
+                                memory_logger.debug(f"Filtered semantic targets from {orig_shape} to {batch_info['semantic_targets'].shape}")
+                                
+                                # Ensure semantic targets are long tensor type (for bincount and loss functions)
+                                if batch_info['semantic_targets'] is not None and batch_info['semantic_targets'].dtype != torch.long:
+                                    memory_logger.debug(f"Converting semantic targets from {batch_info['semantic_targets'].dtype} to torch.long")
+                                    batch_info['semantic_targets'] = batch_info['semantic_targets'].long()
+                            else:
+                                # If it's not a tensor, set it to None to avoid further issues
+                                memory_logger.debug(f"semantic_targets is not a tensor, found type: {type(batch_info['semantic_targets'])}")
+                                batch_info['semantic_targets'] = None
+                    except Exception as e:
+                        memory_logger.debug(f"Error processing semantic targets: {e}")
+                        # Set to None to prevent further issues
+                        if batch_info is not None and 'semantic_targets' in batch_info:
+                            batch_info['semantic_targets'] = None
 
                 # Check for valid labels
                 valid_labels = targets != -100
