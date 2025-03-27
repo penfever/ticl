@@ -82,7 +82,7 @@ def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
     # Log batch_info if present
     if batch_info is not None:
         memory_logger.debug(f"batch_info keys: {list(batch_info.keys())}")
-        if 'semantic_targets' in batch_info:
+        if 'semantic_targets' in batch_info and batch_info['semantic_targets'] is not None:
             sem_targets = batch_info['semantic_targets']
             memory_logger.debug(f"Semantic targets: shape={sem_targets.shape}, dtype={sem_targets.dtype}")
             if sem_targets.numel() > 0:
@@ -101,7 +101,7 @@ def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
             # Check if batch contains semantic targets
             has_semantic_features = False
             if batch_info is not None:
-                if 'semantic_targets' in batch_info:
+                if 'semantic_targets' in batch_info and batch_info['semantic_targets'] is not None:
                     semantic_targets = batch_info['semantic_targets'].to(device)
                     memory_logger.debug(f"Semantic targets moved to device: {device}")
                     has_semantic_features = True
@@ -264,7 +264,7 @@ def train_epoch(
         memory_logger.debug(f"single_eval_pos: {single_eval_pos}")
         
         # Log semantic targets if present
-        if batch_info is not None and 'semantic_targets' in batch_info:
+        if batch_info is not None and 'semantic_targets' in batch_info and batch_info['semantic_targets'] is not None:
             sem_targets = batch_info['semantic_targets']
             memory_logger.debug(f"Semantic targets: shape={sem_targets.shape}, dtype={sem_targets.dtype}")
             if sem_targets.numel() > 0:
@@ -353,7 +353,7 @@ def train_epoch(
                     memory_logger.debug(f"batch_info contains: {list(batch_info.keys())}")
                     if 'semantic_feature_p' in batch_info:
                         memory_logger.debug(f"semantic_feature_p = {batch_info['semantic_feature_p']}")
-                    if 'semantic_targets' in batch_info:
+                    if 'semantic_targets' in batch_info and batch_info['semantic_targets'] is not None:
                         memory_logger.debug(f"semantic_targets shape: {batch_info['semantic_targets'].shape}")
                 else:
                     memory_logger.debug("batch_info is None")
@@ -442,13 +442,13 @@ def train_epoch(
                     memory_logger.debug(f"Filtered targets with single_eval_pos={single_eval_pos}, new shape: {targets.shape}")
                     
                     # Also adjust semantic targets if present
-                    if batch_info is not None and 'semantic_targets' in batch_info:
+                    if batch_info is not None and 'semantic_targets' in batch_info and batch_info['semantic_targets'] is not None:
                         orig_shape = batch_info['semantic_targets'].shape
                         batch_info['semantic_targets'] = batch_info['semantic_targets'][single_eval_pos:]
                         memory_logger.debug(f"Filtered semantic targets from {orig_shape} to {batch_info['semantic_targets'].shape}")
                         
                         # Ensure semantic targets are long tensor type (for bincount and loss functions)
-                        if batch_info['semantic_targets'].dtype != torch.long:
+                        if batch_info['semantic_targets'] is not None and batch_info['semantic_targets'].dtype != torch.long:
                             memory_logger.debug(f"Converting semantic targets from {batch_info['semantic_targets'].dtype} to torch.long")
                             batch_info['semantic_targets'] = batch_info['semantic_targets'].long()
 
