@@ -7,7 +7,6 @@ from ticl.utils import (get_nan_value, normalize_by_used_features_f, normalize_d
                              remove_outliers)
 
 from ticl.distributions import sample_distributions, uniform_int_sampler_f, parse_distributions, safe_randint
-from ticl.priors.boundaries import *
 from ticl.datasets.semantic_prior_data_loader import get_random_semantic_data
 from ticl.datasets.labeled_numeric_prior_data_loader import labeled_numeric_data, get_random_value, column_metadata
 from .utils import CategoricalActivation, randomize_classes
@@ -67,89 +66,24 @@ class MulticlassSteps:
 
 
 class MulticlassRank:
-    """
-    Creates multiclass classification targets with various non-monotonic boundary types.
-    
-    Parameters
-    ----------
-    num_classes : int
-        Number of classes to create
-    boundary_type : str
-        Type of boundaries to use: 'monotonic', 'polynomial', 'periodic', 
-        'clustered', 'threshold_exceptions', or 'information_theoretic'
-    """
-    def __init__(self, num_classes, boundary_type='monotonic', **kwargs):
-        self.num_classes = num_classes
-        self.boundary_type = boundary_type
-        
-        # Initialize the appropriate boundary generator
-        if boundary_type == 'monotonic':
-            self.ordered_p = kwargs.get('ordered_p', 0.5)
-            self.boundary_generator = None  # Will use original logic
-        elif boundary_type == 'polynomial':
-            self.boundary_generator = PolynomialBoundaries(
-                num_classes,
-                degree=kwargs.get('degree', 2)
-            )
-        elif boundary_type == 'periodic':
-            self.boundary_generator = PeriodicBoundaries(
-                num_classes,
-                frequencies=kwargs.get('frequencies', 3)
-            )
-        elif boundary_type == 'clustered':
-            self.boundary_generator = ClusteredBoundaries(
-                num_classes,
-                num_centers=kwargs.get('num_centers', 5)
-            )
-        elif boundary_type == 'threshold_exceptions':
-            self.boundary_generator = ThresholdWithExceptions(
-                num_classes,
-                exception_p=kwargs.get('exception_p', 0.2)
-            )
-        elif boundary_type == 'information_theoretic':
-            self.boundary_generator = InformationTheoreticBoundaries(
-                num_classes,
-                window_size=kwargs.get('window_size', 5)
-            )
-        else:
-            raise ValueError(f"Unknown boundary type: {boundary_type}")
+    def __init__(self, num_classes, ordered_p=0.5):
+        self.num_classes = class_sampler_f(2, num_classes)()
+        self.ordered_p = ordered_p
 
     def __call__(self, x):
-        # If using original monotonic logic
-        if self.boundary_type == 'monotonic':
-            # Use the original MulticlassRank logic
-            class_boundaries = torch.randint(0, x.shape[0], (self.num_classes - 1,))
-            class_boundaries = x[class_boundaries].unsqueeze(1)
+        # x has shape (T,B,H)
 
-            # Count how many boundaries each value exceeds
-            d = (x > class_boundaries).sum(axis=0)
+        # CAUTION: This samples the same idx in sequence for each class boundary in a batch
+        class_boundaries = torch.randint(0, x.shape[0], (self.num_classes - 1,))
+        class_boundaries = x[class_boundaries].unsqueeze(1)
 
-            # Randomly shuffle class assignments based on ordered_p
-            randomized_classes = torch.rand((d.shape[1], )) > self.ordered_p
-            d[:, randomized_classes] = self._randomize_classes(d[:, randomized_classes])
-            
-            # Randomly reverse class direction for ~half the samples
-            reverse_classes = torch.rand((d.shape[1],)) > 0.5
-            d[:, reverse_classes] = self.num_classes - 1 - d[:, reverse_classes]
-            
-            return d
-        else:
-            # Use the appropriate boundary generator
-            return self.boundary_generator(x)
-    
-    def _randomize_classes(self, d):
-        """Helper method to randomize class assignments"""
-        if d.numel() == 0:
-            return d
-            
-        randomized = torch.zeros_like(d)
-        for b in range(d.shape[1]):
-            # Create random mapping for each batch
-            perm = torch.randperm(self.num_classes)
-            for c in range(self.num_classes):
-                randomized[:, b][d[:, b] == c] = perm[c]
-                
-        return randomized
+        d = (x > class_boundaries).sum(axis=0)
+
+        randomized_classes = torch.rand((d.shape[1], )) > self.ordered_p
+        d[:, randomized_classes] = randomize_classes(d[:, randomized_classes], self.num_classes)
+        reverse_classes = torch.rand((d.shape[1],)) > 0.5
+        d[:, reverse_classes] = self.num_classes - 1 - d[:, reverse_classes]
+        return d
 
 
 class ClassificationAdapter:
@@ -671,26 +605,8 @@ class ClassificationAdapter:
         if random.random() < self.h['categorical_feature_p']:
             p = random.random()
             for col in range(x.shape[2]):
-                #never less than two, high prob. of 10, low prob. of 100+
                 num_unique_features = max(round(random.gammavariate(1, 10)), 2)
-                #Randomly select feature relationship to targets
-                q = random.random()
-                if q < 0.5:
-                    boundary_type = 'monotonic'
-                else:
-                    options = [
-                        'polynomial',
-                        'periodic', 
-                        'clustered', 
-                        'information_theoretic',
-                    ]
-                    boundary_type = options[random.randint(0, len(options)-1)]  
-                m = MulticlassRank(
-                    num_unique_features,
-                    boundary_type,
-                    ordered_p=0.3
-                )
-                #around 50% of the features become categorical in categorical datasets
+                m = MulticlassRank(num_unique_features, ordered_p=0.3)
                 if random.random() < p:
                     categorical_features.append(col)
                     x[:, :, col] = m(x[:, :, col])
