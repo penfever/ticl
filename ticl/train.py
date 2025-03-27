@@ -108,20 +108,14 @@ def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
     elif isinstance(criterion, (nn.MSELoss, nn.BCEWithLogitsLoss)):
         losses = criterion(output.flatten(), targets.to(device).flatten())
     elif isinstance(criterion, nn.CrossEntropyLoss):
-        # Ensure targets are valid and avoid out of bounds issues
-        valid_targets = targets.to(device).clamp(min=0).long().flatten()
-        max_target = valid_targets.max().item()
-        
-        # Check for valid target values and fix if needed
-        if max_target >= n_out:
-            valid_targets = valid_targets.clamp(max=n_out-1)
-            max_target = n_out - 1
-        
+        memory_logger.debug(f"Using CrossEntropyLoss")
         # Debug reshape dimensions
-        reshaped_output = output.reshape(-1, n_out)
+        reshaped_output = output.reshape(-1, n_out)[:, :int(targets.max()) + 1]
+        flattened_targets = targets.to(device).long().flatten()
+        memory_logger.debug(f"Reshaped output for CE loss: {reshaped_output.shape}")
+        memory_logger.debug(f"Flattened targets for CE loss: {flattened_targets.shape}")
         
-        # Original handling - don't handle NaN values here to match main branch
-        losses = criterion(reshaped_output, valid_targets)
+        losses = criterion(reshaped_output, flattened_targets)
     else:
         losses = criterion(output, targets)
     
@@ -519,8 +513,20 @@ def train_epoch(
 
             # Update weights after accumulating gradients
             if batch % aggregate_k_gradients == aggregate_k_gradients - 1:
-                # Gradient clipping with standard threshold
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                # Gradient clipping with backend-specific handling
+                # 'foreach=True' is not supported on MPS (Apple Silicon) in some PyTorch versions
+                if device == 'mps':
+                    try:
+                        # Try first with foreach (newer PyTorch versions may support it)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), 1., foreach=True)
+                    except (RuntimeError, TypeError):
+                        # Fallback to standard gradient clipping without foreach
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), 1., foreach=False)
+                        if batch == 0:  # Only print warning once
+                            print("Note: Using slower gradient clipping method for MPS device")
+                else:
+                    # For CUDA, CPU, ROCm, use the faster foreach version
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1., foreach=True)
                 
                 # Use mixed precision optimizer step if enabled
                 if scaler is not None and (is_cuda or is_mps):
