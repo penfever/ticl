@@ -550,13 +550,25 @@ class EnhancedColumnSemanticTokenizer(ColumnSemanticTokenizer):
         # Generate the appropriate prompt based on the curation strategy
         # Use a try-except block to catch KeyError issues with string formatting
         try:
-            prompt = self.prompt_template.format(column_name=column_name)
+            # Skip the value_ranges part if it's the statistical_causal_relationships template
+            if self.curation_strategy == 'statistical_causal_relationships':
+                # For this strategy, we need to include value_ranges
+                value_ranges_text = "\n".join([f"- low {column_name}", f"- medium {column_name}", f"- high {column_name}"])
+                prompt = self.prompt_template.format(column_name=column_name, value_ranges=value_ranges_text)
+            else:
+                prompt = self.prompt_template.format(column_name=column_name)
         except KeyError as e:
             # Handle the case where the format string contains keys that aren't provided
             # This happens when the column name contains special characters that look like format keys
             # Create a safer version by escaping curly braces in the column name
             safe_column_name = column_name.replace("{", "{{").replace("}", "}}")
-            prompt = PROMPT_TEMPLATES[self.curation_strategy].format(column_name=safe_column_name)
+            
+            # Try again with the safer column name
+            if self.curation_strategy == 'statistical_causal_relationships':
+                value_ranges_text = "\n".join([f"- low {safe_column_name}", f"- medium {safe_column_name}", f"- high {safe_column_name}"])
+                prompt = PROMPT_TEMPLATES[self.curation_strategy].format(column_name=safe_column_name, value_ranges=value_ranges_text)
+            else:
+                prompt = PROMPT_TEMPLATES[self.curation_strategy].format(column_name=safe_column_name)
         
         # Generate text using the selected client
         try:
@@ -845,12 +857,23 @@ if __name__ == "__main__":
                     col_name_clean = col_name.replace("_", " ").replace("-", " ")
                     # Use the tokenizer's prompt template based on curation strategy
                     try:
-                        prompt = tokenizer.prompt_template.format(column_name=col_name_clean)
+                        if tokenizer.curation_strategy == 'statistical_causal_relationships':
+                            # For this strategy, we need to include value_ranges
+                            value_ranges_text = "\n".join([f"- low {col_name_clean}", f"- medium {col_name_clean}", f"- high {col_name_clean}"])
+                            prompt = tokenizer.prompt_template.format(column_name=col_name_clean, value_ranges=value_ranges_text)
+                        else:
+                            prompt = tokenizer.prompt_template.format(column_name=col_name_clean)
                     except KeyError as e:
                         # Handle the case where the format string contains keys that aren't provided
                         # This happens when the column name contains special characters that look like format keys
                         safe_col_name = col_name_clean.replace("{", "{{").replace("}", "}}")
-                        prompt = PROMPT_TEMPLATES[tokenizer.curation_strategy].format(column_name=safe_col_name)
+                        
+                        # Try again with the safer column name
+                        if tokenizer.curation_strategy == 'statistical_causal_relationships':
+                            value_ranges_text = "\n".join([f"- low {safe_col_name}", f"- medium {safe_col_name}", f"- high {safe_col_name}"])
+                            prompt = PROMPT_TEMPLATES[tokenizer.curation_strategy].format(column_name=safe_col_name, value_ranges=value_ranges_text)
+                        else:
+                            prompt = PROMPT_TEMPLATES[tokenizer.curation_strategy].format(column_name=safe_col_name)
                     prompts.append(prompt)
                 
                 # Process the batch in parallel
