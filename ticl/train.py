@@ -384,13 +384,10 @@ def train_epoch(
                     
                     # Also adjust semantic targets if present
                     if batch_info is not None and 'semantic_targets' in batch_info:
-                        orig_shape = batch_info['semantic_targets'].shape
                         batch_info['semantic_targets'] = batch_info['semantic_targets'][single_eval_pos:]
-                        memory_logger.debug(f"Filtered semantic targets from {orig_shape} to {batch_info['semantic_targets'].shape}")
                         
                         # Ensure semantic targets are long tensor type (for bincount and loss functions)
                         if batch_info['semantic_targets'].dtype != torch.long:
-                            memory_logger.debug(f"Converting semantic targets from {batch_info['semantic_targets'].dtype} to torch.long")
                             batch_info['semantic_targets'] = batch_info['semantic_targets'].long()
 
                 # Check for valid labels
