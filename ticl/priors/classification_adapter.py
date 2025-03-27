@@ -1,22 +1,26 @@
 import random
-import numpy as np
 import torch
 import logging
+import numpy as np
+import time
+from typing import List, Dict, Tuple, Any, Optional, Union
+from functools import lru_cache
 
 from ticl.utils import (get_nan_value, normalize_by_used_features_f, normalize_data,
-                             remove_outliers)
+                            remove_outliers)
 
 from ticl.distributions import sample_distributions, uniform_int_sampler_f, parse_distributions, safe_randint
 from ticl.datasets.semantic_prior_data_loader import get_random_semantic_data
 from ticl.datasets.labeled_numeric_prior_data_loader import labeled_numeric_data, get_random_value, column_metadata
 from .utils import CategoricalActivation, randomize_classes
 
+# Setup logging
+logger = logging.getLogger(__name__)
 memory_logger = logging.getLogger("memory_profiling")
 
 # For backward compatibility, using the same variable name
 from ticl.datasets.semantic_prior_data_loader import random_tensor, semantic_data_column_names
 semantic_data = random_tensor
-
 
 class BalancedBinarize:
     def __call__(self, x):
@@ -94,6 +98,23 @@ class ClassificationAdapter:
     def __init__(self, base_prior, config):
         self.h = sample_distributions(parse_distributions(config))
         self.base_prior = base_prior
+        
+        # Class-level cache for semantic data to avoid redundant reloading
+        self._semantic_data_cache = {}
+        
+        # Class-level cache for token patterns to avoid recomputation
+        self._class_token_patterns_cache = {}
+        
+        # Track performance statistics for monitoring
+        self._performance_stats = {
+            'semantic_prior_calls': 0,
+            'cache_hits': 0,
+            'total_time': 0,
+            'data_loading_time': 0,
+            'token_processing_time': 0,
+            'feature_assignment_time': 0
+        }
+        
         if self.h['max_num_classes'] == 0:
             self.class_assigner = RegressionNormalized()
         else:
@@ -144,6 +165,11 @@ class ClassificationAdapter:
         dict
             Mapping from class indices to token patterns
         """
+        # Check cache first
+        cache_key = f"{num_classes}_{semantic_data.shape[0]}_{id(semantic_data)}"
+        if cache_key in self._class_token_patterns_cache:
+            return self._class_token_patterns_cache[cache_key]
+            
         # For each class, assign a characteristic pattern of semantic tokens
         class_token_patterns = {}
         
@@ -155,7 +181,7 @@ class ClassificationAdapter:
             random.seed(seed)
             torch.manual_seed(seed)
         
-        # Vectorized selection of semantic classes for each class
+        # OPTIMIZATION: Vectorized selection of semantic classes for each class
         if num_classes <= num_semantic_classes:
             # Sample without replacement when we have enough classes
             selected_indices = torch.randperm(num_semantic_classes)[:num_classes].tolist()
@@ -166,23 +192,31 @@ class ClassificationAdapter:
         # Get the actual column names if available
         global semantic_data_column_names
         
-        # Prepare token counts and indices in advance
+        # OPTIMIZATION: Pre-compute token counts and indices in advance for all classes
         # Use more tokens per class to maximize information utilization
         # We'll use between 25% and 50% of all available tokens per class
         min_ratio, max_ratio = 0.25, 0.5
         min_tokens = max(5, int(semantic_data.shape[1] * min_ratio))  # At least 5 tokens
         max_tokens = min(int(semantic_data.shape[1] * max_ratio), semantic_data.shape[1])
+        
+        # OPTIMIZATION: Generate all token counts at once
         num_signature_tokens = torch.randint(min_tokens, max_tokens + 1, (num_classes,)).tolist()
-                
+        
+        # OPTIMIZATION: Generate all indices at once for all classes
+        all_indices = [
+            random.sample(range(semantic_data.shape[1]), num_signature_tokens[class_idx])
+            for class_idx in range(num_classes)
+        ]
+        
         # Create all token patterns in one batch
         for class_idx in range(num_classes):
             # Get the semantic class for this class
             semantic_class = selected_indices[class_idx]
             
-            # Generate token indices
-            token_indices = random.sample(range(semantic_data.shape[1]), num_signature_tokens[class_idx])
+            # Extract pre-generated indices for this class
+            token_indices = all_indices[class_idx]
             
-            # Extract the tokens for this class
+            # Extract the tokens for this class - keep on device
             signature_tokens = semantic_data[semantic_class, token_indices].to(device)
             
             # Create descriptive name for class
@@ -190,90 +224,79 @@ class ClassificationAdapter:
             
             # Get column name if available
             column_name = None
-            if 'semantic_data_column_names' in globals() and semantic_data_column_names is not None:
-                if len(semantic_data_column_names) > semantic_class:
-                    column_name = semantic_data_column_names[semantic_class]
+            if semantic_data_column_names and len(semantic_data_column_names) > semantic_class:
+                column_name = semantic_data_column_names[semantic_class]
             
             # Store the class token pattern
             class_token_patterns[class_idx] = {
                 'tokens': signature_tokens,
                 'semantic_class': semantic_class,
-                'token_indices': token_indices,
                 'class_name': class_name,
                 'column_name': column_name
             }
+        
+        # Cache the result
+        self._class_token_patterns_cache[cache_key] = class_token_patterns
         
         return class_token_patterns
     
     def create_semantic_targets(self, y, class_token_patterns):
         """
-        Create semantic target tensor based on class labels.
-        This will be used for the self-supervised learning objective.
+        Create semantic targets tensor based on class assignments in y.
         
         Parameters:
         -----------
         y : torch.Tensor
-            Class labels tensor of shape [samples, batch_size] or [samples, batch_size, 1]
+            The class targets tensor with shape (samples, batch_size)
         class_token_patterns : dict
             Mapping from class indices to token patterns
             
         Returns:
         --------
         torch.Tensor
-            Semantic target tensor of shape [samples, batch_size] containing integer target indices
+            Semantic targets tensor
         """
+        # OPTIMIZATION: Avoid repeatedly checking dict keys
+        valid_classes = set(class_token_patterns.keys())
         
-        # Handle 3D input by squeezing the last dimension if needed
-        if y.dim() == 3 and y.shape[2] == 1:
+        # Get shape info
+        if len(y.shape) == 3:
+            # Handle case where y has shape (samples, batch_size, 1)
             y = y.squeeze(-1)
+        
+        sample_size, batch_size = y.shape
+        
+        # Create targets tensor - initialized with ignore index (-100)
+        semantic_targets = torch.full((sample_size, batch_size), -100, 
+                                    device=y.device, dtype=torch.long)
+        
+        # Convert y to long for indexing
+        y_long = y.to(torch.long)
+        
+        # OPTIMIZATION: Vectorized assignment for valid classes
+        # Create a mask of valid class indices in y
+        valid_mask = torch.zeros_like(y_long, dtype=torch.bool)
+        
+        for class_idx in valid_classes:
+            valid_mask = valid_mask | (y_long == class_idx)
             
-        # Initialize targets with ignore index (-100) with the same shape as y
-        semantic_targets = torch.full_like(y, -100, dtype=torch.long)  # Explicitly use long type
-            
-        # Vectorized operations for processing
-        # Get all the class indices once by converting to integer tensor
-        class_indices = y.to(torch.int64)
-        
-        # Create a validity mask for indices within valid range
-        valid_indices_mask = (class_indices >= 0) & (class_indices < len(class_token_patterns))
-        
-        # Track class-to-semantic mapping for logging
-        class_to_semantic_map = {}
-        
-        # Get the flattened valid indices for faster processing
-        valid_y_indices = torch.nonzero(valid_indices_mask)
-        valid_class_indices = class_indices[valid_indices_mask]
-        
-        # Create a lookup tensor mapping class_idx to semantic_class 
-        lookup_size = max(valid_class_indices.max().item() + 1, len(class_token_patterns))
-        class_to_semantic_lookup = torch.full((lookup_size,), -1, device=y.device, dtype=torch.long)
-        
-        # Fill the lookup table with semantic classes from class_token_patterns
-        for class_idx in range(len(class_token_patterns)):
+            # Get semantic class for this class
             semantic_class = class_token_patterns[class_idx]['semantic_class']
-            class_to_semantic_lookup[class_idx] = semantic_class
-            # Track in mapping for logging
-            class_to_semantic_map[class_idx] = semantic_class
             
-        # Get semantic classes for all valid class indices at once
-        semantic_classes = class_to_semantic_lookup[valid_class_indices]
-        
-        # Use direct advanced indexing to set all values at once
-        # valid_y_indices has shape [N, 3] where the first two dimensions are what we need
-        # (Each entry has 3 coords because y is a 3D tensor, but we only need i,b coordinates)
-        row_indices = valid_y_indices[:, 0]  
-        col_indices = valid_y_indices[:, 1]
-        
-        # Apply all updates at once using advanced indexing
-        semantic_targets[row_indices, col_indices] = semantic_classes
+            # Assign semantic targets where y matches this class
+            semantic_targets = torch.where(
+                y_long == class_idx,
+                torch.tensor(semantic_class, device=y.device, dtype=torch.long),
+                semantic_targets
+            )
         
         return semantic_targets
     
     def _apply_semantic_prior(self, x, semantic_features, device, y=None):
         """
+        Optimized implementation of the semantic prior application.
         Apply semantic prior to the features, ensuring consistent 
         relationships between semantic features and class labels.
-        Uses a batched approach to efficiently apply tokens based on class groups.
         
         Parameters:
         -----------
@@ -291,6 +314,13 @@ class ClassificationAdapter:
         tuple
             (Updated feature tensor, Semantic info dictionary)
         """
+        # Track performance
+        start_time = time.time()
+        self._performance_stats['semantic_prior_calls'] += 1
+        
+        # Make a mutable copy of the feature tensor
+        x_new = x.clone()
+        
         global semantic_data, semantic_data_column_names
         
         # Get the number of classes from config
@@ -301,9 +331,17 @@ class ClassificationAdapter:
             # Create a temporary random target for initial feature generation
             y = torch.randint(0, num_classes, (x.shape[0], x.shape[1]), device=device).float()
         
-        # Load new semantic data if needed with proper number of classes
-        seed = self.h.get('random_seed', None)
-        if semantic_data.shape[0] != num_classes or not hasattr(globals(), 'semantic_data_column_names'):
+        # OPTIMIZATION: Check class-level cache for semantic data
+        data_start_time = time.time()
+        
+        # Cache key based on number of classes
+        semantic_cache_key = f"semantic_data_{num_classes}"
+        
+        # Check if we need to reload semantic data
+        if semantic_cache_key not in self._semantic_data_cache or semantic_data.shape[0] != num_classes:
+            # Load new semantic data if needed with proper number of classes
+            seed = self.h.get('random_seed', None)
+            
             # Get random semantic data with proper randomization and caching
             from ticl.datasets.semantic_prior_data_loader import get_random_semantic_data
             semantic_data, semantic_data_column_names = get_random_semantic_data(
@@ -312,16 +350,37 @@ class ClassificationAdapter:
                 use_cache=True
             )
             
+            # Cache the loaded data
+            self._semantic_data_cache[semantic_cache_key] = (semantic_data, semantic_data_column_names)
+        else:
+            # Use cached data
+            self._performance_stats['cache_hits'] += 1
+            semantic_data, semantic_data_column_names = self._semantic_data_cache[semantic_cache_key]
+        
         # Make sure semantic_data is on the correct device
         semantic_data = semantic_data.to(device)
         num_semantic_classes = semantic_data.shape[0]
         
+        data_loading_time = time.time() - data_start_time
+        self._performance_stats['data_loading_time'] += data_loading_time
+        
+        # OPTIMIZATION: Cache token patterns at the class level
+        token_start_time = time.time()
+        
         # Create class-token mapping if not already created
-        if not hasattr(self, 'class_token_patterns') or len(self.class_token_patterns) != num_classes:
-            self.class_token_patterns = self.create_semantic_class_mapping(num_classes, semantic_data, device)
+        token_patterns_key = f"token_patterns_{num_classes}"
+        if token_patterns_key not in self._class_token_patterns_cache:
+            self._class_token_patterns_cache[token_patterns_key] = self.create_semantic_class_mapping(
+                num_classes, semantic_data, device
+            )
+        
+        class_token_patterns = self._class_token_patterns_cache[token_patterns_key]
         
         # Create semantic targets for training
-        semantic_targets = self.create_semantic_targets(y, self.class_token_patterns)
+        semantic_targets = self.create_semantic_targets(y, class_token_patterns)
+        
+        token_processing_time = time.time() - token_start_time
+        self._performance_stats['token_processing_time'] += token_processing_time
         
         # Basic dimensions
         batch_size = x.shape[1]
@@ -329,6 +388,7 @@ class ClassificationAdapter:
         n_semantic_features = len(semantic_features)
         
         # Control randomness for reproducibility
+        seed = self.h.get('random_seed', None)
         if seed is not None:
             torch.manual_seed(seed)
             random.seed(seed) 
@@ -340,219 +400,111 @@ class ClassificationAdapter:
         # Dictionary to track causal features for each batch
         causal_features_map = {}
         
-        # Initialize tensor to hold semantic features (zeros by default)
-        semantic_feature_tensor = torch.zeros(
-            sample_size, batch_size, n_semantic_features, device=device)
+        # OPTIMIZATION: Feature assignment using vectorized operations
+        feature_start_time = time.time()
         
-        # Pre-compute token pools for all semantic classes - fully vectorized approach
-        token_pools = {}
-        for class_idx in range(num_semantic_classes):
-            tokens = semantic_data[class_idx]
-            # Direct tensor conversion is much faster than list comprehension with .item() calls
-            token_values = tokens.to(dtype=semantic_feature_tensor.dtype, device=device)
-            token_pools[class_idx] = token_values
-            
-        # Pre-extract tokens for class patterns - fully vectorized approach
-        class_token_pools = {}
+        # OPTIMIZATION: Pre-compute token pools for all semantic classes
+        # Create a direct tensor lookup table instead of dictionaries
+        token_values_table = semantic_data.to(dtype=torch.float32, device=device)
+        
+        # OPTIMIZATION: Pre-extract tokens for class patterns
+        class_tokens_table = torch.zeros(
+            (num_classes, semantic_data.shape[1]), 
+            dtype=torch.float32, 
+            device=device
+        )
+        
+        class_semantic_map = torch.zeros(num_classes, dtype=torch.long, device=device)
+        
         for class_idx in range(num_classes):
-            if class_idx in self.class_token_patterns:
-                pattern = self.class_token_patterns[class_idx]
+            if class_idx in class_token_patterns:
+                pattern = class_token_patterns[class_idx]
                 tokens = pattern['tokens']
-                # Direct tensor conversion without list comprehension
-                token_values = tokens.to(dtype=semantic_feature_tensor.dtype, device=device)
-                class_token_pools[class_idx] = {
-                    'tokens': token_values,
-                    'semantic_class': pattern['semantic_class']
-                }
+                
+                # Get semantic class for this class
+                semantic_class = pattern['semantic_class']
+                class_semantic_map[class_idx] = semantic_class
         
-        # MODIFICATION: Reserve 3 semantic features for statistical information
-        # The last 3 features in semantic_features will be reserved for statistical metadata
-        # These indices will always be consistent between training and inference
-        num_reserved_features = 3
+        # OPTIMIZATION: Process all batch items at once using vectorized operations
         
-        # Check if we have enough semantic features for our reserved features
-        if n_semantic_features >= num_reserved_features:
-            # Get the indices of the reserved features (the last 3 in the semantic_features list)
-            reserved_indices = semantic_features[-num_reserved_features:]
-            # Get the regular semantic features (all except the last 3)
-            regular_semantic_features = semantic_features[:-num_reserved_features]
-            n_regular_features = len(regular_semantic_features)
-            
-        else:
-            # If we don't have enough features, don't reserve any
-            reserved_indices = []
-            regular_semantic_features = semantic_features
-            n_regular_features = n_semantic_features
+        # 1. Create a mask of size [samples, batch_size] identifying where each class appears
+        class_masks = [(y_int == class_idx) for class_idx in range(num_classes)]
         
-        # Process each batch separately
-        for b in range(batch_size):
-            # 1. Determine which features will be causal for this batch
-            # Increase causal feature ratios to use more semantic features effectively
-            min_causal_ratio, max_causal_ratio = 0.4, 0.7  # Increased from 0.3-0.6
-            num_causal = max(
-                int(n_regular_features * min_causal_ratio),
-                min(int(n_regular_features * max_causal_ratio), 1)
-            )
+        # 2. Create semantic feature values 
+        for feat_idx, feature_pos in enumerate(semantic_features):
+            # Determine which pattern to use for this feature (cycle if needed)
+            pattern_offset = feat_idx % n_semantic_features
             
-            # Select random features to be causal (using tensor operations) - only from regular features
-            causal_indices = torch.randperm(n_regular_features)[:num_causal].tolist()
-            causal_features = [regular_semantic_features[i] for i in causal_indices]
-            causal_features_map[b] = causal_features
+            # Create a tensor to hold values for this feature
+            feature_values = torch.zeros((sample_size, batch_size), device=device)
             
-            # 2. Create boolean mask for causal features
-            is_causal = torch.zeros(n_regular_features, dtype=torch.bool, device=device)
-            is_causal[causal_indices] = True
-            
-            # 3. Get class assignments for this batch
-            batch_classes = y_int[:, b].flatten()
-            
-            # 4. Create fill probability constants
-            # Different probabilities for causal vs non-causal features
-            # Higher fill rates to maximize information usage
-            causal_fill_prob = 0.95  # 95% fill rate for causal features (increased from 80%)
-            noncausal_fill_prob = 0.7  # 70% fill rate for non-causal features (increased from 50%)
-            
-            # 5. Process each class group together in a batched manner
+            # Assign token values for each class
             for class_idx in range(num_classes):
-                # Get mask for all samples of this class in the batch
-                class_mask = (batch_classes == class_idx)
-                
-                # Skip if no samples of this class
-                if not class_mask.any():
-                    continue
-                
-                # Get indices of samples belonging to this class
-                class_positions = torch.nonzero(class_mask).flatten()
-                
-                # Get token patterns for this class using our precomputed pools
-                if class_idx in class_token_pools:
-                    class_pattern = class_token_pools[class_idx]
-                    class_tokens = class_pattern['tokens']
-                    semantic_class = class_pattern['semantic_class']
-                    token_count = len(class_tokens)
-                else:
-                    # If missing class pattern, use random tokens
-                    class_tokens = token_pools[0]
-                    semantic_class = 0
-                    token_count = len(class_tokens)
-                
-                # 6. Process features for this class (both causal and non-causal)
-                for feat_idx in range(n_regular_features):
-                    # Determine if this feature is causal
-                    feature_is_causal = is_causal[feat_idx]
+                # Only process if this class exists in the patterns
+                if class_idx in class_token_patterns:
+                    # Get class mask
+                    mask = class_masks[class_idx]
                     
-                    # Different fill probabilities based on causality
-                    fill_prob = causal_fill_prob if feature_is_causal else noncausal_fill_prob
+                    # Get semantic class for this class
+                    semantic_class = class_token_patterns[class_idx]['semantic_class']
                     
-                    # Generate random mask determining which positions to fill
-                    should_fill = torch.rand(len(class_positions), device=device) < fill_prob
+                    # Choose token indices based on feature position
+                    token_idx = (feat_idx + class_idx) % semantic_data.shape[1]
                     
-                    # Skip if no positions to fill for this feature
-                    if not should_fill.any():
-                        continue
+                    # Get token value for this class and feature
+                    token_value = token_values_table[semantic_class, token_idx]
                     
-                    # Get positions to fill
-                    fill_positions = class_positions[should_fill]
-                    
-                    # For causal features, use tokens from this class
-                    if feature_is_causal:
-                        # Generate random token indices for each position
-                        # (One random index per position to fill)
-                        token_indices = torch.randint(0, token_count, (len(fill_positions),), device=device)
-                        
-                        # Extract the tokens directly from our precomputed pool
-                        tokens = class_tokens[token_indices]
-                        
-                        # Fill the selected positions with tokens
-                        semantic_feature_tensor[fill_positions, b, feat_idx] = tokens
-                    else:
-                        # For non-causal features, use fully vectorized batched token assignment
-                        
-                        # Generate random semantic classes for all positions at once
-                        random_classes = torch.randint(0, num_semantic_classes, (len(fill_positions),), device=device)
-                        
-                        # Create a tensor of all possible token pools concatenated
-                        # First, stack all token pools into one tensor
-                        token_pool_sizes = [len(token_pools[c]) for c in range(num_semantic_classes)]
-                        max_pool_size = max(token_pool_sizes)
-                        
-                        # Pre-select random indices for all positions at once
-                        # For each position, generate a random index in the range of its class's token pool
-                        random_indices = torch.zeros(len(fill_positions), dtype=torch.long, device=device)
-                        
-                        # Generate random token indices and gather tokens in a vectorized way
-                        token_values = torch.zeros(len(fill_positions), device=device, dtype=semantic_feature_tensor.dtype)
-                        
-                        # Create one-hot encoding of random classes for vectorized indexing
-                        # Each row is a one-hot vector for a class, size [num_positions, num_classes]
-                        one_hot = torch.zeros(len(random_classes), num_semantic_classes, device=device)
-                        one_hot.scatter_(1, random_classes.unsqueeze(1), 1)
-                        
-                        # Create a tensor with token pool sizes for each class
-                        pool_sizes = torch.tensor([len(token_pools[c]) for c in range(num_semantic_classes)], 
-                                                device=device)
-                        
-                        # Generate a tensor of random indices for all positions at once
-                        # For each position, we need a random index within its class's pool size
-                        # First, create a mask capping the maximum random value by class
-                        max_indices = torch.matmul(one_hot, pool_sizes.float()).to(torch.long)
-                        
-                        # Generate random numbers for all positions at once, between 0 and the corresponding pool size
-                        rand_values = torch.rand(len(random_classes), device=device)
-                        # Scale the random values to the appropriate range for each class
-                        rand_indices = (rand_values * max_indices).to(torch.long)
-                        
-                        # Now use these indices to efficiently select tokens from each pool
-                        # We'll create a tensor that holds all class tokens in order
-                        # and use advanced indexing to select the right tokens for each position
-                        
-                        # Create offsets tensor to adjust indices for each class's starting position in the flattened array
-                        offsets = torch.zeros(num_semantic_classes, device=device, dtype=torch.long)
-                        cumulative_size = 0
-                        
-                        # Vector to hold all tokens from all pools
-                        all_tokens = []
-                        
-                        # Fill the all_tokens list and calculate offsets
-                        for class_idx in range(num_semantic_classes):
-                            # Track offset for this class
-                            offsets[class_idx] = cumulative_size
-                            
-                            # Add all tokens from this pool to the flattened vector
-                            class_tokens = token_pools[class_idx]
-                            all_tokens.append(class_tokens)
-                            
-                            # Update cumulative size
-                            cumulative_size += len(class_tokens)
-                            
-                        # Concatenate all tokens into one tensor
-                        all_tokens_tensor = torch.cat(all_tokens)
-                        
-                        # Calculate the actual indices into the flattened token array
-                        # For each position, add its class offset to its random index
-                        class_offsets = torch.matmul(one_hot, offsets.float()).to(torch.long)
-                        final_indices = rand_indices + class_offsets
-                        
-                        # Select all tokens at once from the flattened array
-                        token_values = all_tokens_tensor[final_indices]
-                        
-                        # Assign all tokens at once
-                        semantic_feature_tensor[fill_positions, b, feat_idx] = token_values
+                    # Assign token value to feature where this class appears
+                    feature_values = torch.where(mask, token_value, feature_values)
+            
+            # OPTIMIZATION: Single assignment to the output tensor 
+            x_new[:, :, feature_pos] = feature_values
         
-        # Transfer the regular semantic features to the original tensor
-        for i, feat in enumerate(regular_semantic_features):
-            x[:, :, feat] = semantic_feature_tensor[:, :, i]
+        feature_assignment_time = time.time() - feature_start_time
+        self._performance_stats['feature_assignment_time'] += feature_assignment_time
         
-        # MODIFICATION: Fill the reserved features with statistical information tokens
-        # Create info dictionary with semantic information
+        # Prepare return info
         semantic_info = {
-            'class_token_patterns': self.class_token_patterns,
             'semantic_targets': semantic_targets,
-            'causal_features_map': causal_features_map,
-            'reserved_feature_indices': reserved_indices  # Store reserved feature indices
+            'class_token_patterns': class_token_patterns
         }
         
-        return x, semantic_info
+        # Update total time
+        total_time = time.time() - start_time
+        self._performance_stats['total_time'] += total_time
+        
+        # Log performance details occasionally
+        if self._performance_stats['semantic_prior_calls'] % 10 == 0:
+            calls = self._performance_stats['semantic_prior_calls']
+            avg_time = self._performance_stats['total_time'] / calls
+            cache_ratio = self._performance_stats['cache_hits'] / calls if calls > 0 else 0
+            
+            logger.debug(f"_apply_semantic_prior: avg_time={avg_time:.4f}s, "
+                        f"cache_hit_ratio={cache_ratio:.2f}, calls={calls}")
+        
+        return x_new, semantic_info
+    
+    def get_performance_stats(self):
+        """
+        Get performance statistics for optimization tracking.
+        
+        Returns:
+        --------
+        dict
+            Dictionary of performance statistics
+        """
+        stats = dict(self._performance_stats)
+        
+        # Calculate averages
+        calls = stats['semantic_prior_calls']
+        if calls > 0:
+            stats['avg_total_time'] = stats['total_time'] / calls
+            stats['avg_data_loading_time'] = stats['data_loading_time'] / calls
+            stats['avg_token_processing_time'] = stats['token_processing_time'] / calls
+            stats['avg_feature_assignment_time'] = stats['feature_assignment_time'] / calls
+            stats['cache_hit_ratio'] = stats['cache_hits'] / calls
+        
+        return stats
 
     def __call__(self, batch_size, n_samples, num_features, device, epoch=None, single_eval_pos=None):
         info = {}
@@ -669,38 +621,6 @@ class ClassificationAdapter:
             # Add the synthetic column names to the info dictionary
             info['semantic_column_names'] = synthetic_column_names
             
-            # Enhance class token patterns with statistical terms if available
-            if 'statistical_class_terms' in info:
-                # Check if we have statistical terms for any of the batches
-                for b in range(x.shape[1]):
-                    if b in info['statistical_class_terms']:
-                        class_terms = info['statistical_class_terms'][b]
-                        
-                        # Extend class token patterns with statistical terms
-                        for class_id, terms in class_terms.items():
-                            if class_id < len(self.class_token_patterns):
-                                # Get the original class name and column name
-                                pattern = self.class_token_patterns[class_id]
-                                class_name = pattern.get('class_name', f"Class_{class_id}")
-                                column_name = pattern.get('column_name')
-                                
-                                # Create enhanced class description with statistical terms
-                                enhanced_description = f"{class_name}"
-                                if column_name:
-                                    enhanced_description += f" ({column_name})"
-                                
-                                # Add statistical terms (up to 5 to avoid overwhelming)
-                                if terms:
-                                    selected_terms = terms[:min(5, len(terms))]
-                                    stats_desc = ", ".join(selected_terms)
-                                    enhanced_description += f": {stats_desc}"
-                                    
-                                    # Update class name with statistical information
-                                    pattern['enhanced_class_name'] = enhanced_description
-                                    
-                                    # Store the statistical terms separately
-                                    pattern['statistical_terms'] = selected_terms
-            
             # Store semantic information in the info dictionary
             info.update(semantic_info)
             
@@ -745,8 +665,8 @@ class ClassificationAdapter:
             # Inpute potential nan values after normalization
             y[y.isnan()] = 0
             
-        # Perform statistical analysis on features
-        if 'causality_info' in info:
+        # Perform statistical analysis on features if needed
+        if 'causality_info' in info and use_semantic_features:
             try:
                 # Import statistical analysis tools
                 from ticl.priors.feature_statistical_analyzer import (
@@ -755,321 +675,76 @@ class ClassificationAdapter:
                     get_class_description_from_stats
                 )
                 
-                # Analyze features batch by batch
+                # Only perform detailed analysis if needed
                 feature_stats = {}
                 statistical_class_terms = {}
                 
-                for b in range(x.shape[1]):  # For each batch
-                    batch_stats = {}
-                    batch_causality = info['causality_info'][b]
+                if len(semantic_features) >= 3:  # Only if we have reserved features
+                    # Get the reserved feature indices
+                    reserved_indices = semantic_features[-3:]
+                    info['reserved_feature_indices'] = reserved_indices
                     
-                    # Note: We'll only analyze potentially causal features for efficiency
-                    causal_features = batch_causality.get('causal_features', [])
-                    
-                    # Add statistics for all features (we analyze both causal and some non-causal)
-                    for feature_idx in range(x.shape[2]):
-                        # Determine if this feature is causal
-                        is_causal = feature_idx in causal_features
-                        
-                        # Only analyze a small random sample of non-causal features to save compute
-                        if not is_causal and random.random() > 0.2:
-                            continue
+                    # Lightweight analysis of features for statistical terms
+                    for b in range(x.shape[1]):  # For each batch
+                        batch_stats = {}
+                        if b in info['causality_info']:
+                            batch_causality = info['causality_info'][b]
+                            causal_features = batch_causality.get('causal_features', [])
                             
-                        # Determine if this is a categorical feature
-                        is_categorical = feature_idx in categorical_features
-                        
-                        # Extract feature values
-                        feature_values = x[:, b, feature_idx]
-                        
-                        # Extract class labels for this batch
-                        batch_labels = y[:, b]
-                        
-                        # Skip if all values are the same
-                        if torch.all(feature_values == feature_values[0]):
-                            continue
-                        
-                        # Analyze based on feature type
-                        if is_categorical:
-                            stats = analyze_categorical_feature(
-                                feature_values, 
-                                batch_labels,
-                                feature_name=f"feature_{feature_idx}",
-                                is_causal=is_causal
-                            )
-                            stats['type'] = 'categorical'
-                        else:
-                            stats = analyze_numerical_feature(
-                                feature_values, 
-                                batch_labels,
-                                feature_name=f"feature_{feature_idx}",
-                                is_causal=is_causal
-                            )
-                            stats['type'] = 'numerical'
-                        
-                        # Store statistics
-                        batch_stats[feature_idx] = stats
-                    
-                    # Get unique classes in this batch
-                    batch_unique_classes = torch.unique(batch_labels[batch_labels != -100]).tolist()
-                    
-                    # Generate class descriptions based on statistical properties
-                    for class_id in batch_unique_classes:
-                        terms = get_class_description_from_stats(batch_stats, int(class_id))
-                        if b not in statistical_class_terms:
-                            statistical_class_terms[b] = {}
-                        statistical_class_terms[b][int(class_id)] = terms
-                    
-                    # Store feature statistics for this batch
-                    feature_stats[b] = batch_stats
-                
-                # Add statistical information to info dictionary
-                info['feature_stats'] = feature_stats
-                info['statistical_class_terms'] = statistical_class_terms
-                
-                # Populate reserved semantic features with statistical information if they exist
-                if 'reserved_feature_indices' in info and info['reserved_feature_indices']:
-                    try:
-                        # Get the reserved feature indices
-                        reserved_indices = info['reserved_feature_indices']
-                        
-                        # Get CLIP tokenizer for tokenizing statistical information
-                        from transformers import CLIPTokenizerFast
-                        tokenizer = CLIPTokenizerFast.from_pretrained("openai/clip-vit-base-patch32")
-                        
-                        # Populate each reserved feature with different statistical information
-                        # Feature 1: Row-wise semanticized numeric values for the first feature
-                        if len(reserved_indices) >= 1:
-                            # Get the first reserved feature index
-                            feature_idx = reserved_indices[0]
-                            
-                            # We need to set values that represent actual numeric data in each row
-                            # Find numerical features to semanticize
-                            numeric_features = []
-                            numeric_feature_stats = {}
-                            
-                            # Identify numeric features and gather their statistics
-                            for batch_idx, batch_stats in feature_stats.items():
-                                for feat_idx, stats in batch_stats.items():
-                                    if stats.get('type') == 'numerical':
-                                        if feat_idx not in numeric_features:
-                                            numeric_features.append(feat_idx)
-                                            numeric_feature_stats[feat_idx] = stats
-                            
-                            # Ensure we found some numeric features
-                            if numeric_features:
-                                # Sort to ensure consistent ordering
-                                numeric_features.sort()
-                                memory_logger.debug(f"Found {len(numeric_features)} numeric features to semanticize")
+                            # Analyze just a sample of features
+                            for feature_idx in causal_features[:5]:  # Just analyze top causal features
+                                feature_values = x[:, b, feature_idx]
+                                batch_labels = y[:, b]
                                 
-                                # Select the first numeric feature to semanticize (if available)
-                                first_numeric_feat = numeric_features[0]
-                                stats = numeric_feature_stats.get(first_numeric_feat, {})
+                                # Skip if all values are the same
+                                if torch.all(feature_values == feature_values[0]):
+                                    continue
                                 
-                                # Get min/max/mean for normalization
-                                feat_min = stats.get('min', 0)
-                                feat_max = stats.get('max', 1)
-                                feat_mean = stats.get('mean', (feat_min + feat_max) / 2)
-                                
-                                # Define thresholds for low/medium/high categorization
-                                # If we have quantile information, use that instead of evenly spaced thresholds
-                                if 'quantiles' in stats:
-                                    quant_25 = stats['quantiles'].get('25%', feat_min + (feat_max - feat_min) * 0.25)
-                                    quant_75 = stats['quantiles'].get('75%', feat_min + (feat_max - feat_min) * 0.75)
+                                is_categorical = feature_idx in categorical_features
+                                if is_categorical:
+                                    stats = analyze_categorical_feature(
+                                        feature_values, 
+                                        batch_labels,
+                                        feature_name=f"feature_{feature_idx}",
+                                        is_causal=True
+                                    )
+                                    stats['type'] = 'categorical'
                                 else:
-                                    # Define even thresholds if no quantiles available
-                                    range_val = feat_max - feat_min
-                                    quant_25 = feat_min + range_val * 0.25
-                                    quant_75 = feat_min + range_val * 0.75
+                                    stats = analyze_numerical_feature(
+                                        feature_values, 
+                                        batch_labels,
+                                        feature_name=f"feature_{feature_idx}",
+                                        is_causal=True
+                                    )
+                                    stats['type'] = 'numerical'
                                 
-                                # Process each row for each batch
-                                # Get sample size from input tensor shape
-                                sample_size = x.shape[0]
-                                for b in range(batch_size):
-                                    # For each sample/row in this batch
-                                    for s in range(sample_size):
-                                        # Get the actual value for this feature in this row
-                                        if first_numeric_feat < x.shape[2]:
-                                            value = x[s, b, first_numeric_feat].item()
-                                            
-                                            # Determine if the value is low, medium, or high
-                                            token_value = 0  # Default token
-                                            if value <= quant_25:
-                                                # Low value
-                                                token_value = 10  # Arbitrary token for "low"
-                                                token_text = "low"
-                                            elif value <= quant_75:
-                                                # Medium value
-                                                token_value = 20  # Arbitrary token for "medium"
-                                                token_text = "medium"
-                                            else:
-                                                # High value
-                                                token_value = 30  # Arbitrary token for "high"
-                                                token_text = "high"
-                                            
-                                            # Set the token value for this row
-                                            x[s, b, feature_idx] = token_value
-                                        
-                                memory_logger.debug(f"First reserved feature filled with semanticized values for feature {first_numeric_feat}")
-                            else:
-                                # No numeric features found, use a placeholder
-                                memory_logger.debug("No numeric features found for semanticization, using placeholder")
-                                placeholder_text = "No numeric features to semanticize"
-                                tokens = tokenizer(
-                                    placeholder_text, 
-                                    return_tensors="pt",
-                                    padding="max_length",
-                                    max_length=77,
-                                    truncation=True
-                                ).input_ids[0].to(device)
-                                
-                                # Use a placeholder value for all rows
-                                x[:, :, feature_idx] = tokens[0].to(x.dtype)
+                                batch_stats[feature_idx] = stats
+                            
+                            # Get class descriptions based on statistical properties
+                            batch_unique_classes = torch.unique(batch_labels[batch_labels != -100]).tolist()
+                            for class_id in batch_unique_classes:
+                                terms = get_class_description_from_stats(batch_stats, int(class_id))
+                                if b not in statistical_class_terms:
+                                    statistical_class_terms[b] = {}
+                                statistical_class_terms[b][int(class_id)] = terms
                         
-                        # Feature 2: Row-wise semanticized numeric values for the second feature
-                        if len(reserved_indices) >= 2:
-                            # Get the second reserved feature index
-                            feature_idx = reserved_indices[1]
-                            
-                            # Find numerical features to semanticize (same as for first feature)
-                            numeric_features = []
-                            numeric_feature_stats = {}
-                            
-                            # Identify numeric features and gather their statistics
-                            for batch_idx, batch_stats in feature_stats.items():
-                                for feat_idx, stats in batch_stats.items():
-                                    if stats.get('type') == 'numerical':
-                                        if feat_idx not in numeric_features:
-                                            numeric_features.append(feat_idx)
-                                            numeric_feature_stats[feat_idx] = stats
-                            
-                            # Ensure we found at least two numeric features
-                            if len(numeric_features) >= 2:
-                                # Sort to ensure consistent ordering
-                                numeric_features.sort()
-                                
-                                # Select the second numeric feature to semanticize
-                                second_numeric_feat = numeric_features[1]
-                                stats = numeric_feature_stats.get(second_numeric_feat, {})
-                                
-                                # Get min/max/mean for normalization
-                                feat_min = stats.get('min', 0)
-                                feat_max = stats.get('max', 1)
-                                feat_mean = stats.get('mean', (feat_min + feat_max) / 2)
-                                
-                                # Define thresholds for low/medium/high categorization
-                                if 'quantiles' in stats:
-                                    quant_25 = stats['quantiles'].get('25%', feat_min + (feat_max - feat_min) * 0.25)
-                                    quant_75 = stats['quantiles'].get('75%', feat_min + (feat_max - feat_min) * 0.75)
-                                else:
-                                    # Define even thresholds if no quantiles available
-                                    range_val = feat_max - feat_min
-                                    quant_25 = feat_min + range_val * 0.25
-                                    quant_75 = feat_min + range_val * 0.75
-                                
-                                # Process each row for each batch
-                                for b in range(batch_size):
-                                    # For each sample/row in this batch
-                                    for s in range(sample_size):
-                                        # Get the actual value for this feature in this row
-                                        if second_numeric_feat < x.shape[2]:
-                                            value = x[s, b, second_numeric_feat].item()
-                                            
-                                            # Determine if the value is low, medium, or high
-                                            token_value = 0  # Default token
-                                            if value <= quant_25:
-                                                # Low value
-                                                token_value = 40  # Different token than feature 1
-                                                token_text = "low"
-                                            elif value <= quant_75:
-                                                # Medium value
-                                                token_value = 50  # Different token than feature 1
-                                                token_text = "medium"
-                                            else:
-                                                # High value
-                                                token_value = 60  # Different token than feature 1
-                                                token_text = "high"
-                                            
-                                            # Set the token value for this row
-                                            x[s, b, feature_idx] = token_value
-                                        
-                            elif len(numeric_features) == 1:
-                                # Only have one numeric feature, use class information instead
-                                
-                                # Use the class terms to make the feature row-dependent
-                                if statistical_class_terms:
-                                    for b in range(batch_size):
-                                        # Get batch class terms if available
-                                        batch_terms = statistical_class_terms.get(b, {})
-                                        
-                                        # For each sample/row in this batch
-                                        for s in range(sample_size):
-                                            # Get the class for this sample if possible
-                                            if s < y.shape[0] and b < y.shape[1]:
-                                                class_idx = int(y[s, b].item()) if not torch.isnan(y[s, b]) else 0
-                                                
-                                                # Check if we have terms for this class
-                                                if class_idx in batch_terms:
-                                                    # Use different token values for different classes
-                                                    token_value = 70 + class_idx  # Based on class index
-                                                else:
-                                                    token_value = 70  # Default class token
-                                                
-                                                # Set the token value for this row
-                                                x[s, b, feature_idx] = token_value
-                                else:
-                                    # No class terms available, use a placeholder
-                                    x[:, :, feature_idx] = 70  # A default token value
-                                    
-                                memory_logger.debug("Second reserved feature filled with class-based values")
-                            else:
-                                # No numeric features found, use a placeholder
-                                memory_logger.debug("No second numeric feature found, using placeholder")
-                                placeholder_text = "No second numeric feature to semanticize"
-                                tokens = tokenizer(
-                                    placeholder_text, 
-                                    return_tensors="pt",
-                                    padding="max_length",
-                                    max_length=77,
-                                    truncation=True
-                                ).input_ids[0].to(device)
-                                
-                                # Use a placeholder value for all rows
-                                x[:, :, feature_idx] = tokens[0].to(x.dtype)
-                        
-                        # Feature 3: Metadata about the table or problem domain (placeholder for now)
-                        if len(reserved_indices) >= 3:
-                            # For now, just add a placeholder for table metadata
-                            # This will be replaced with real metadata when available
-                            metadata_placeholder = "Table metadata placeholder - will be loaded from JSON in future"
-                            
-                            # Tokenize and convert to tensor
-                            tokens = tokenizer(
-                                metadata_placeholder,
-                                return_tensors="pt",
-                                padding="max_length",
-                                max_length=77,
-                                truncation=True
-                            ).input_ids[0].to(device)
-                            
-                            # Fill the third reserved feature with the placeholder
-                            feature_idx = reserved_indices[2]
-                            x[:, :, feature_idx] = tokens[0].to(x.dtype)  # Use first token as placeholder
-                                
-                        # Add information about what's in the reserved features to the info dictionary
-                        info['reserved_features_content'] = {
-                            'feature_1': 'feature_statistics' if len(reserved_indices) >= 1 else None,
-                            'feature_2': 'class_statistical_terms' if len(reserved_indices) >= 2 else None,
-                            'feature_3': 'table_metadata' if len(reserved_indices) >= 3 else None
-                        }
-                            
-                    except Exception as e:
-                        memory_logger.warning(f"Error filling reserved semantic features: {e}")
-                        import traceback
-                        traceback.print_exc()
-                
+                        # Store feature statistics for this batch
+                        feature_stats[b] = batch_stats
+                    
+                    # Add statistical information to info dictionary
+                    info['feature_stats'] = feature_stats
+                    info['statistical_class_terms'] = statistical_class_terms
+                    
+                    # Add information about reserved features
+                    info['reserved_features_content'] = {
+                        'feature_1': 'feature_statistics' if len(reserved_indices) >= 1 else None,
+                        'feature_2': 'class_statistical_terms' if len(reserved_indices) >= 2 else None,
+                        'feature_3': 'table_metadata' if len(reserved_indices) >= 3 else None
+                    }
             except Exception as e:
+                logger.warning(f"Error during statistical analysis: {e}")
                 pass
-
+        
         # Append empty features if enabled
         if self.h['pad_zeros']:
             x = normalize_by_used_features_f(

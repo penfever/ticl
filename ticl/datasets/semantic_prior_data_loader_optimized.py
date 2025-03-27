@@ -328,6 +328,3 @@ def get_random_semantic_data(
         _RANDOM_SEMANTIC_DATA_CACHE[cache_key] = (semantic_data, column_names)
     
     return semantic_data, column_names
-
-# For backwards compatibility - generate with filtered tokens
-random_tensor, semantic_data_column_names = get_random_semantic_data(filter_tokens=True)
