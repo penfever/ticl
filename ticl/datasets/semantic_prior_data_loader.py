@@ -273,7 +273,8 @@ def get_random_semantic_data(
     max_token_value: int = 5000,
     num_tokens: int = 50,
     seed: Optional[int] = None,
-    use_cache: bool = True
+    use_cache: bool = True,
+    filter_tokens: bool = True
 ) -> Tuple[torch.Tensor, List[str]]:
     """
     Generate random semantic data for testing and training.
@@ -330,4 +331,4 @@ def get_random_semantic_data(
     return semantic_data, column_names
 
 # For backwards compatibility - generate with filtered tokens
-random_tensor, semantic_data_column_names = get_random_semantic_data(filter_tokens=True)
+random_tensor, semantic_data_column_names = get_random_semantic_data()
