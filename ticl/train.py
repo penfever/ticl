@@ -50,9 +50,17 @@ def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
             # Check if batch contains semantic targets
             has_semantic_features = False
             if batch_info is not None:
-                if 'semantic_targets' in batch_info:
-                    semantic_targets = batch_info['semantic_targets'].to(device)
-                    has_semantic_features = True
+                try:
+                    if 'semantic_targets' in batch_info and batch_info['semantic_targets'] is not None:
+                        # Check that it's a tensor before using to() method
+                        if isinstance(batch_info['semantic_targets'], torch.Tensor):
+                            semantic_targets = batch_info['semantic_targets'].to(device)
+                            has_semantic_features = True
+                        else:
+                            print(f"Semantic targets not a tensor: {type(batch_info['semantic_targets'])}")
+                except Exception as e:
+                    print(f"Error processing semantic targets: {e}")
+                    # Keep semantic_targets as None
             
             # FAIL WITH INFORMATIVE ERROR if we're using SemanticConsistencyLoss but no semantic features
             if not has_semantic_features:
@@ -296,19 +304,31 @@ def train_epoch(
             if single_eval_pos is not None:
                 targets = targets[single_eval_pos:]
                 
-                if batch_info is not None and 'semantic_targets' in batch_info:
-                    batch_info['semantic_targets'] = batch_info['semantic_targets'][single_eval_pos:]
-                    
-                    # Ensure semantic targets are long tensor type (for bincount and loss functions)
-                    if batch_info['semantic_targets'].dtype != torch.long:
-                        batch_info['semantic_targets'] = batch_info['semantic_targets'].long()
-                    
-                    # Print diagnostic info to verify we have valid targets
-                    if batch % 50 == 0:  # Only print occasionally to avoid spam
-                        unique_vals = torch.unique(batch_info['semantic_targets']).tolist()
-                        print(f"Semantic targets unique values: {unique_vals}")
-                        valid_semantic = (batch_info['semantic_targets'] != -100).sum().item()
-                        print(f"Valid semantic targets: {valid_semantic}/{batch_info['semantic_targets'].numel()}")
+                # Be extremely defensive about semantic targets
+                try:
+                    if batch_info is not None and 'semantic_targets' in batch_info and batch_info['semantic_targets'] is not None:
+                        # Make sure it's a tensor before trying to slice it
+                        if isinstance(batch_info['semantic_targets'], torch.Tensor):
+                            batch_info['semantic_targets'] = batch_info['semantic_targets'][single_eval_pos:]
+                            
+                            # Ensure semantic targets are long tensor type (for bincount and loss functions)
+                            if batch_info['semantic_targets'] is not None and batch_info['semantic_targets'].dtype != torch.long:
+                                batch_info['semantic_targets'] = batch_info['semantic_targets'].long()
+                            
+                            # Print diagnostic info to verify we have valid targets
+                            if batch % 50 == 0:  # Only print occasionally to avoid spam
+                                unique_vals = torch.unique(batch_info['semantic_targets']).tolist()
+                                print(f"Semantic targets unique values: {unique_vals}")
+                                valid_semantic = (batch_info['semantic_targets'] != -100).sum().item()
+                                print(f"Valid semantic targets: {valid_semantic}/{batch_info['semantic_targets'].numel()}")
+                        else:
+                            # If it's not a tensor, set it to None to avoid further issues
+                            print(f"semantic_targets is not a tensor, found type: {type(batch_info['semantic_targets'])}")
+                            batch_info['semantic_targets'] = None
+                except Exception as e:
+                    print(f"Error processing semantic targets: {e}")
+                    # Set to None to prevent further issues
+                    batch_info['semantic_targets'] = None
 
             # Check for valid labels
             valid_labels = targets != -100

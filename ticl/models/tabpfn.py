@@ -74,7 +74,7 @@ class TabPFN(nn.Module):
                     nn.init.zeros_(attn.out_proj.weight)
                     nn.init.zeros_(attn.out_proj.bias)
 
-    def forward(self, src, single_eval_pos=None):
+    def forward(self, src, single_eval_pos=None, class_texts=None, batch_info=None):
         assert isinstance(src, tuple), 'inputs (src) have to be given as (x,y) or (style,x,y) tuple'
         if single_eval_pos is None: raise ValueError('single_eval_pos has to be given, instead of None.')
 
@@ -85,7 +85,13 @@ class TabPFN(nn.Module):
         
         # x_src: (num_samples, batch_size, d_model)
         x_src = self.encoder(x_src)
-        y_src = self.y_encoder(y_src.unsqueeze(-1) if len(y_src.shape) < len(x_src.shape) else y_src)
+        
+        # Check if y_encoder exists before using it - handles case when semantic features are disabled
+        if self.y_encoder is not None:
+            y_src = self.y_encoder(y_src.unsqueeze(-1) if len(y_src.shape) < len(x_src.shape) else y_src)
+        else:
+            # Create a compatible tensor filled with zeros if y_encoder is None
+            y_src = torch.zeros_like(x_src)
 
         if self.efficient_eval_masking:
             src_mask = single_eval_pos
