@@ -120,10 +120,7 @@ def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
         # Debug reshape dimensions
         reshaped_output = output.reshape(-1, n_out)
         
-        # Check for NaN or Inf values in output logits
-        if torch.isnan(reshaped_output).any() or torch.isinf(reshaped_output).any():
-            reshaped_output = torch.nan_to_num(reshaped_output, nan=0.0, posinf=1e4, neginf=-1e4)
-        
+        # Original handling - don't handle NaN values here to match main branch
         losses = criterion(reshaped_output, valid_targets)
     else:
         losses = criterion(output, targets)
@@ -169,17 +166,9 @@ def train_epoch(
     is_mps = device == 'mps'
     is_cpu = device == 'cpu'
     
-    # Initialize batch monitor if needed
-    # CRITICAL FIX: Completely disable batch monitoring when semantic_feature_p is 0.0
-    if semantic_feature_p <= 0.0:
-        batch_monitor = None  # Force to None
-        semantic_batch_monitoring = False  # Ensure the flag is off
-    elif batch_monitor is None and semantic_batch_monitoring:
-        batch_monitor = SemanticBatchMonitor(
-            enable_monitoring=semantic_batch_monitoring,
-            skip_bad_batches=skip_bad_semantic_batches,
-            log_frequency=semantic_batch_log_frequency
-        )
+    # Always disable batch monitoring to match main branch behavior
+    batch_monitor = None  # Force to None
+    semantic_batch_monitoring = False  # Ensure the flag is off
     
     # Initialize progress bar with more informative metrics
     if progress_bar:
@@ -542,16 +531,15 @@ def train_epoch(
                     
                 optimizer.zero_grad()                
 
-            # Check for NaN loss (original implementation)
-            if torch.isnan(loss):
-                raise ValueError("NAN loss encountered")
-            else:
+            # Original behavior for NaN handling - simply check if not NaN
+            if not torch.isnan(loss):
                 total_loss += loss.mean().cpu().detach().item()
                 nan_steps += nan_share
                 
             ignore_steps += (targets == -100).float().mean()
             
-    return (total_loss / steps_per_epoch * aggregate_k_gradients,
+    # Original behavior - don't multiply by aggregate_k_gradients to match main branch
+    return (total_loss / steps_per_epoch,
             nan_steps.cpu().item() / steps_per_epoch,
             ignore_steps.cpu().item()/steps_per_epoch)
 
@@ -996,16 +984,10 @@ def train(dl, model, criterion, optimizer_state=None, scheduler=None,
             elif hasattr(model, 'module') and hasattr(model.module, 'semantic_feature_p'):
                 semantic_feature_p = model.module.semantic_feature_p
                 
-            if semantic_feature_p <= 0.0:
-                print("Completely disabling batch monitoring since semantic_feature_p is 0.0")
-                batch_monitor = None
-                semantic_batch_monitoring = False
-            else:
-                batch_monitor = SemanticBatchMonitor(
-                    enable_monitoring=semantic_batch_monitoring,
-                    skip_bad_batches=skip_bad_semantic_batches,
-                    log_frequency=semantic_batch_log_frequency
-                )
+            # ALWAYS disable batch monitoring for consistent behavior with main branch
+            print("Completely disabling batch monitoring for consistent behavior with main branch")
+            batch_monitor = None
+            semantic_batch_monitoring = False
             
             # Train for one epoch
             new_loss, nan_share, ignore_share = train_epoch(
