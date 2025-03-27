@@ -173,13 +173,13 @@ def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
                             has_semantic_features = True
                         else:
                             memory_logger.debug(f"Semantic targets not a tensor: {type(batch_info['semantic_targets'])}")
+                    elif 'semantic_feature_p' in batch_info:
+                        # This batch was generated with semantic features disabled 
+                        # (determined by semantic_feature_p probability)
+                        memory_logger.debug(f"This batch has no semantic targets (semantic_feature_p: {batch_info.get('semantic_feature_p', 0.0)})")
                 except Exception as e:
                     memory_logger.debug(f"Error processing semantic targets: {e}")
                     # Keep semantic_targets as None
-                elif 'semantic_feature_p' in batch_info:
-                    # This batch was generated with semantic features disabled 
-                    # (determined by semantic_feature_p probability)
-                    memory_logger.debug(f"This batch has no semantic targets (semantic_feature_p: {batch_info.get('semantic_feature_p', 0.0)})")
                     
             # Log semantic feature presence
             if not has_semantic_features:
@@ -363,14 +363,14 @@ def train_epoch(
                         
                         # Only try to compute distribution if integer type
                         if not torch.is_floating_point(sem_targets):
-                        valid_sem_targets = sem_targets[sem_targets>=0].long()
-                        if valid_sem_targets.numel() > 0:  # Check if we have any valid targets
-                            try:
-                                memory_logger.debug(f"Semantic target distribution: {torch.bincount(valid_sem_targets)}")
-                            except Exception as e:
-                                memory_logger.warning(f"Error during statistical analysis: {e}")
-                        else:
-                            memory_logger.debug("No valid semantic targets found for distribution analysis")
+                            valid_sem_targets = sem_targets[sem_targets>=0].long()
+                            if valid_sem_targets.numel() > 0:  # Check if we have any valid targets
+                                try:
+                                    memory_logger.debug(f"Semantic target distribution: {torch.bincount(valid_sem_targets)}")
+                                except Exception as e:
+                                    memory_logger.warning(f"Error during statistical analysis: {e}")
+                            else:
+                                memory_logger.debug("No valid semantic targets found for distribution analysis")
                 except Exception as e:
                     memory_logger.debug(f"Could not calculate semantic target stats: {e}")
         
