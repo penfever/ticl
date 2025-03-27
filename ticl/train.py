@@ -169,7 +169,11 @@ def train_epoch(
     is_cpu = device == 'cpu'
     
     # Initialize batch monitor if needed
-    if batch_monitor is None and semantic_batch_monitoring:
+    # CRITICAL FIX: Completely disable batch monitoring when semantic_feature_p is 0.0
+    if semantic_feature_p <= 0.0:
+        batch_monitor = None  # Force to None
+        semantic_batch_monitoring = False  # Ensure the flag is off
+    elif batch_monitor is None and semantic_batch_monitoring:
         batch_monitor = SemanticBatchMonitor(
             enable_monitoring=semantic_batch_monitoring,
             skip_bad_batches=skip_bad_semantic_batches,
@@ -1000,11 +1004,23 @@ def train(dl, model, criterion, optimizer_state=None, scheduler=None,
                 gpu_start_time.record()
             
             # Initialize a shared batch monitor for all epochs
-            batch_monitor = SemanticBatchMonitor(
-                enable_monitoring=semantic_batch_monitoring,
-                skip_bad_batches=skip_bad_semantic_batches,
-                log_frequency=semantic_batch_log_frequency
-            )
+            # CRITICAL FIX: Completely disable batch monitoring when semantic_feature_p is 0.0
+            semantic_feature_p = 0.0
+            if hasattr(model, 'semantic_feature_p'):
+                semantic_feature_p = model.semantic_feature_p
+            elif hasattr(model, 'module') and hasattr(model.module, 'semantic_feature_p'):
+                semantic_feature_p = model.module.semantic_feature_p
+                
+            if semantic_feature_p <= 0.0:
+                print("Completely disabling batch monitoring since semantic_feature_p is 0.0")
+                batch_monitor = None
+                semantic_batch_monitoring = False
+            else:
+                batch_monitor = SemanticBatchMonitor(
+                    enable_monitoring=semantic_batch_monitoring,
+                    skip_bad_batches=skip_bad_semantic_batches,
+                    log_frequency=semantic_batch_log_frequency
+                )
             
             # Train for one epoch
             new_loss, nan_share, ignore_share = train_epoch(

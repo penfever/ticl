@@ -199,8 +199,14 @@ class MLP(torch.nn.Module):
 
 
 class MLPPrior:
-    def __init__(self, config=None):
+    def __init__(self, config=None, semantic_feature_p=0.0):
+        """
+        Returns an MLP data simulator of hyperparameter distribution
+        :param config: dictionary with MLP hyperparameter distributions
+        :param semantic_feature_p: Probability of generating semantic features (0.0 to disable)
+        """
         self.config = parse_distributions(config or {})
+        self.semantic_feature_p = semantic_feature_p
 
     def get_batch(self, batch_size, n_samples, num_features, device=default_device, num_outputs=1, epoch=None, single_eval_pos=None):
         # Initialize list to track causal features for each batch sample
@@ -260,4 +266,13 @@ class MLPPrior:
         y = torch.cat(y, 1).detach().squeeze(2)
         x = torch.cat(x, 1).detach()
         
-        return x, y, y, {'causality_info': causality_info}
+        # CRITICAL FIX: Return original format when semantic features are disabled
+        # Check if semantic_feature_p is a parameter of the MLPPrior object
+        semantic_feature_p = getattr(self, 'semantic_feature_p', 0.0)
+        
+        # If it's explicitly set to 0, maintain the original return format
+        if semantic_feature_p <= 0.0:
+            return x, y, y
+        else:
+            # Return the expanded format with causality info when semantic features are enabled
+            return x, y, y, {'causality_info': causality_info}
