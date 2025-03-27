@@ -233,17 +233,7 @@ def train_epoch(
         # Log semantic targets if present
         if batch_info is not None and 'semantic_targets' in batch_info:
             sem_targets = batch_info['semantic_targets']
-            memory_logger.debug(f"Semantic targets: shape={sem_targets.shape}, dtype={sem_targets.dtype}")
-            if sem_targets.numel() > 0:
-                try:
-                    memory_logger.debug(f"Semantic target values: min={sem_targets.min().item()}, max={sem_targets.max().item()}")
-                    
-                    # Only try to compute distribution if integer type
-                    if not torch.is_floating_point(sem_targets):
-                        valid_sem_targets = sem_targets[sem_targets>=0].long()
-                        memory_logger.debug(f"Semantic target distribution: {torch.bincount(valid_sem_targets)}")
-                except Exception as e:
-                    memory_logger.debug(f"Could not calculate semantic target stats: {e}")
+            
         
         # Get GPU utilization if available
         if is_cuda:
