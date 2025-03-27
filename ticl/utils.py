@@ -17,6 +17,7 @@ import logging
 
 # Use standard Python logging instead of memory_logger
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+memory_logger = logging.getLogger("ticl")
 logger = logging.getLogger("ticl")
 
 # Function to set log level from command line
