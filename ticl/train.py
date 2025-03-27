@@ -371,8 +371,8 @@ def train_epoch(
                                     memory_logger.warning(f"Error during statistical analysis: {e}")
                             else:
                                 memory_logger.debug("No valid semantic targets found for distribution analysis")
-                except Exception as e:
-                    memory_logger.debug(f"Could not calculate semantic target stats: {e}")
+                    except Exception as e:
+                        memory_logger.debug(f"Could not calculate semantic target stats: {e}")
         
         # Get GPU utilization if available
         if is_cuda:
