@@ -1084,15 +1084,33 @@ def validate_model(model, config):
     
 def broadcast_for_normal(mean, std):
     """
-    Basic implementation of broadcasting for normal distribution sampling.
-    Revert to original implementation from main branch.
-    """
-    if len(mean.shape) > len(std.shape) and len(std.shape) == 1:
-        std = std.unsqueeze(0).repeat(mean.shape[0], 1)
-    if len(mean.shape) < len(std.shape) and len(mean.shape) == 1:
-        mean = mean.unsqueeze(0).repeat(std.shape[0], 1)
+    Utility function to handle broadcasting between mean and std tensors
+    for torch.normal operation.
+    
+    Args:
+        mean: The mean tensor (e.g., torch.zeros_like(x))
+        std: The standard deviation tensor (e.g., self.std)
         
-    return mean, std
+    Returns:
+        Tuple of (mean, std) tensors that have compatible shapes for torch.normal
+    """
+    if mean.shape != std.shape:
+        try:
+            # Try broadcasting std to mean shape
+            broadcasted_std = std.expand_as(mean)
+            return mean, broadcasted_std
+        except RuntimeError:
+            try:
+                # Try broadcasting mean to std shape
+                broadcasted_mean = mean.expand_as(std)
+                return broadcasted_mean, std
+            except RuntimeError:
+                # If neither direct expansion works, use broadcast_tensors
+                broadcasted_mean, broadcasted_std = torch.broadcast_tensors(mean, std)
+                return broadcasted_mean, broadcasted_std
+    else:
+        # Shapes already match
+        return mean, std
     
 def get_autocast_context(device=None, dtype=None, scaler=None):
     """
