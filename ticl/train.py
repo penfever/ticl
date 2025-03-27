@@ -268,16 +268,14 @@ def train_epoch(
 
         with cm:
             
-            # Get appropriate autocast context based on device type
-            # The issue is that scaler can be active but autocast returns nullcontext
-            autocast_context = get_autocast_context(
-                device=device,
-                dtype=None,
-                scaler=scaler,
-            )
+            # Use simple autocast context for mixed precision
+            if train_mixed_precision and is_cuda:
+                autocast_context = torch.cuda.amp.autocast()
+            else:
+                autocast_context = nullcontext()
                 
-            # Additional check to ensure we don't try to use scaler with nullcontext
-            use_scaler = (scaler is not None and autocast_context is not nullcontext())
+            # Only use scaler if we have one
+            use_scaler = (scaler is not None)
             
             # Move data to the appropriate device
             # At this point, we should have a clean data tuple or tensor
@@ -531,19 +529,11 @@ def train_epoch(
 
             # Update weights after accumulating gradients
             if batch % aggregate_k_gradients == aggregate_k_gradients - 1:
-                # Enhanced gradient clipping with more aggressive threshold and backend-specific handling
-                max_norm = 0.2
-
-                if is_cuda:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm, foreach=True)
-                else:
-                    # This matches the more numerically stable approach used on MPS devices
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm, foreach=False)
+                # Gradient clipping with standard threshold
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 
                 # Use mixed precision optimizer step if enabled
-                # Be more explicit about when to use scaler
-                if use_scaler and (is_cuda or is_mps):
-                    # Only use scaler if we used it in backward pass
+                if scaler is not None and (is_cuda or is_mps):
                     scaler.step(optimizer)
                     scaler.update()
                 else:
@@ -551,11 +541,9 @@ def train_epoch(
                     
                 optimizer.zero_grad()                
 
-            # Check for NaN loss and handle it more gracefully
+            # Check for NaN loss (original implementation)
             if torch.isnan(loss):
-                # Initialize with small loss value to avoid completely stopping training
-                total_loss += 1.0
-                nan_steps += 1.0  # Count the full step as NaN
+                raise ValueError("NAN loss encountered")
             else:
                 total_loss += loss.mean().cpu().detach().item()
                 nan_steps += nan_share
@@ -943,15 +931,11 @@ def train(dl, model, criterion, optimizer_state=None, scheduler=None,
             spike_scheduler = ReduceLROnSpike(optimizer, smoothing=10, factor=0.5, min_lr=min_lr, tolerance=spike_tolerance, verbose=True)
     
     # Initialize mixed precision training if applicable
-    # Different backend types have different mixed precision capabilities
-    if train_mixed_precision:
-        if is_cuda or is_mps:
-            scaler = GradScaler()
-        else:
-            # CPU doesn't benefit much from mixed precision, but we'll use it if requested
-            scaler = None
-            if verbose:
-                print("Mixed precision requested but not used for CPU training")
+    # Only CUDA supports mixed precision with GradScaler
+    if train_mixed_precision and is_cuda:
+        scaler = GradScaler()
+        if verbose:
+            print("Using mixed precision training with CUDA")
     else:
         scaler = None
         if verbose:

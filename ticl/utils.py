@@ -1084,7 +1084,7 @@ def validate_model(model, config):
     
 def broadcast_for_normal(mean, std):
     """
-    Utility function to handle broadcasting between mean and std tensors
+    Simplified utility function to handle broadcasting between mean and std tensors
     for torch.normal operation.
     
     Args:
@@ -1094,23 +1094,8 @@ def broadcast_for_normal(mean, std):
     Returns:
         Tuple of (mean, std) tensors that have compatible shapes for torch.normal
     """
-    if mean.shape != std.shape:
-        try:
-            # Try broadcasting std to mean shape
-            broadcasted_std = std.expand_as(mean)
-            return mean, broadcasted_std
-        except RuntimeError:
-            try:
-                # Try broadcasting mean to std shape
-                broadcasted_mean = mean.expand_as(std)
-                return broadcasted_mean, std
-            except RuntimeError:
-                # If neither direct expansion works, use broadcast_tensors
-                broadcasted_mean, broadcasted_std = torch.broadcast_tensors(mean, std)
-                return broadcasted_mean, broadcasted_std
-    else:
-        # Shapes already match
-        return mean, std
+    # Use PyTorch's built-in broadcast_tensors which handles all cases robustly
+    return torch.broadcast_tensors(mean, std)
     
 def get_autocast_context(device=None, dtype=None, scaler=None):
     """
