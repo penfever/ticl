@@ -41,6 +41,19 @@ def eval_criterion(criterion, targets, output, device, n_out, batch_info=None):
     """
     # Check if this is a semantic model with dictionary output
     is_semantic_model = isinstance(output, dict) and 'class_logits' in output and 'semantic_logits' in output
+    
+    # Check if semantic_feature_p is explicitly set to 0, in which case we should never use a semantic model
+    semantic_feature_p = 0.0
+    if batch_info is not None and 'semantic_feature_p' in batch_info:
+        semantic_feature_p = batch_info.get('semantic_feature_p', 0.0)
+    
+    # If semantic_feature_p is 0, force non-semantic behavior regardless of model output format
+    if semantic_feature_p == 0.0 and is_semantic_model:
+        # Just use the class logits and ignore semantic components when semantic features are disabled
+        logging.info("Semantic features explicitly disabled (p=0.0), using only class logits despite semantic model format")
+        output = output['class_logits']
+        is_semantic_model = False
+    
     if is_semantic_model:
         # For semantic models with our custom loss
         from ticl.models.semantic_aware_model import SemanticConsistencyLoss
@@ -142,6 +155,13 @@ def train_epoch(
     nan_steps = torch.tensor(0., device = device)
     ignore_steps = torch.tensor(0., device = device)
     steps_per_epoch = len(dl)
+    
+    # Check for semantic features in the model - to be passed to batch_info
+    semantic_feature_p = 0.0
+    if hasattr(model, 'semantic_feature_p'):
+        semantic_feature_p = model.semantic_feature_p
+    elif hasattr(model, 'module') and hasattr(model.module, 'semantic_feature_p'):
+        semantic_feature_p = model.module.semantic_feature_p
     assert len(dl) % aggregate_k_gradients == 0, 'Please set the number of steps per epoch s.t. `aggregate_k_gradients` divides it.'
     # Detect device type for backend-specific operations
     is_cuda = device.startswith('cuda')
@@ -177,6 +197,12 @@ def train_epoch(
             data, targets, single_eval_pos, batch_info = batch_data
         else:
             raise ValueError(f"Unexpected batch format with {len(batch_data)} elements")
+            
+        # Add model semantic feature probability to batch_info
+        # This is critical for properly disabling semantic features
+        if batch_info is None:
+            batch_info = {}
+        batch_info['semantic_feature_p'] = semantic_feature_p
         
         # For semantic models, the data may be a tuple containing (info, x, y)
         # Let's check and extract the correct components

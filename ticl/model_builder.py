@@ -210,14 +210,17 @@ def get_model(
     config['verbose'] = verbose_prior
 
     # Use semantic loss if semantic features are enabled
-    # This should be determined by model type, not by a config flag that could be inconsistent
+    # We now ensure both semantic_prediction is True AND semantic_feature_p is > 0.0
+    semantic_feature_p = config['prior']['classification'].get('semantic_feature_p', 0.0)
     has_semantic_features = (
-        config.get('semantic_prediction', False) or 
-        config['prior']['classification'].get('semantic_feature_p', 0.0) > 0.0
+        config.get('semantic_prediction', False) and 
+        semantic_feature_p > 0.0
     )
     
     if has_semantic_features:
-        logger.info("Using SemanticConsistencyLoss due to semantic features being enabled")
+        logger.info(f"Using SemanticConsistencyLoss due to semantic features being enabled (p={semantic_feature_p})")
+    else:
+        logger.info(f"Using standard loss (semantic_prediction={config.get('semantic_prediction', False)}, semantic_feature_p={semantic_feature_p})")
     
     criterion = get_criterion(
         config['prior']['classification']['max_num_classes'],
@@ -262,7 +265,10 @@ def get_model(
     semantic_feature_p = config['prior']['classification'].get('semantic_feature_p', 0.0)
     n_features = config['prior']['num_features']
     
-    # Check if we need to include semantic features
+    # Explicitly disable semantic prediction by default
+    config['semantic_prediction'] = False
+    
+    # Check if we need to include semantic features - only if semantic_feature_p is explicitly > 0
     if semantic_feature_p > 0.0:
         # For compatibility with classification_adapter.py which adds 50 features
         print(f"Semantic features enabled (p={semantic_feature_p}).")
@@ -282,6 +288,8 @@ def get_model(
         # Import the function we created earlier for this purpose
         from ticl.models.semantic_aware_model import get_semantic_class_count
         config['num_semantic_classes'] = get_semantic_class_count()  # This will get the actual count
+    else:
+        print(f"Semantic features DISABLED (p={semantic_feature_p}).")
 
     if model_type == "mothernet":
         model = MotherNet(
@@ -360,10 +368,12 @@ def get_model(
         raise ValueError(f"Unknown model type {model_type}.")
         
     # If semantic features are enabled, wrap the model with SemanticAwareClassifier
-    if config.get('semantic_prediction', False):
+    # We now ensure both semantic_prediction is True AND semantic_feature_p is > 0.0
+    semantic_feature_p = config['prior']['classification'].get('semantic_feature_p', 0.0)
+    if config.get('semantic_prediction', False) and semantic_feature_p > 0.0:
         from ticl.models.semantic_aware_model import create_semantic_aware_model
         num_semantic_classes = config.get('num_semantic_classes', 3)
-        print(f"Creating semantic-aware model with {num_semantic_classes} semantic classes")
+        print(f"Creating semantic-aware model with {num_semantic_classes} semantic classes (p={semantic_feature_p})")
         
         # Pass semantic column metadata if available
         semantic_column_metadata = config.get('semantic_column_metadata', None)
@@ -379,6 +389,8 @@ def get_model(
             )
         else:
             model = create_semantic_aware_model(model, num_semantic_classes, freeze_clip=freeze_clip)
+    else:
+        print(f"Not creating semantic-aware model (semantic_prediction={config.get('semantic_prediction', False)}, semantic_feature_p={semantic_feature_p})")
 
     if model_state is not None:
         if not load_model_strict:
