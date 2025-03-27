@@ -20,6 +20,7 @@ from ticl.datasets.semantic_column_generation import (
     TogetherClient, AnthropicClient, ColumnSemanticTokenizer,
     truncate_tensor
 )
+from ticl.datasets.statistical_column_mapping import StatisticalColumnMapper
 
 # Define enhanced prompts for different curation strategies
 PROMPT_TEMPLATES = {
@@ -57,6 +58,42 @@ PROMPT_TEMPLATES = {
                 For each causal relationship, include the relationship type and the related concept.
                 Be sure to consider both forward and reverse causal connections.
                 If {column_name} doesn't mean anything to you or causal relationships don't make sense for it, return more general semantic associations instead.
+                """,
+                
+    'statistical_causal_relationships': """
+                I need to understand the causal relationships between specific values of {column_name} and potential target classes.
+                
+                The column {column_name} has the following value ranges:
+                {value_ranges}
+                
+                For a classification task that might use {column_name} as a feature, please generate a Python dictionary that maps 
+                each value range to potential target classes it could causally influence, along with an explanation of the causal mechanism.
+                
+                For example, if the column is "income" with ranges "low income", "medium income", and "high income", you might return:
+                ```python
+                {
+                    "low income (0-30,000 USD)": [
+                        {"class": "default_risk_high", "causal_explanation": "Low income reduces financial buffer, increasing default risk."},
+                        {"class": "budget_shopper", "causal_explanation": "Lower income necessitates more budget-conscious purchasing."}
+                    ],
+                    "medium income (30,000-70,000 USD)": [
+                        {"class": "default_risk_medium", "causal_explanation": "Medium income provides some financial stability."},
+                        {"class": "value_shopper", "causal_explanation": "Seeks value but can occasionally afford premium products."}
+                    ],
+                    "high income (70,000+ USD)": [
+                        {"class": "default_risk_low", "causal_explanation": "High income creates financial security and lower default risk."},
+                        {"class": "luxury_consumer", "causal_explanation": "Higher income enables luxury purchases and premium services."}
+                    ]
+                }
+                ```
+                
+                Please create meaningful, realistic causal relationships between each value range and 2-4 potential target classes.
+                Focus on relationships that are:
+                1. Plausible based on real-world knowledge
+                2. Specific enough to be useful in a machine learning context
+                3. Diverse, showing different ways the feature might influence outcomes
+                
+                Format your response as a valid Python dictionary with the exact structure shown in the example.
                 """,
                 
     'conceptual_clusters': """
@@ -153,6 +190,15 @@ class EnhancedColumnSemanticTokenizer(ColumnSemanticTokenizer):
         # Path to save conceptual clusters data
         self.clusters_save_path = kwargs.pop('clusters_save_path', None)
         
+        # Initialize the statistical column mapper for numeric features
+        self.column_mapper = StatisticalColumnMapper()
+        
+        # Dictionary to store causal relationships for statistical features
+        self.statistical_causal_relationships = {}
+        
+        # Path to save statistical causal relationship data
+        self.stat_causal_path = kwargs.pop('stat_causal_path', 'statistical_causal_relationships.json')
+        
         # Call the parent constructor with the remaining arguments
         super().__init__(*args, **kwargs)
     
@@ -213,6 +259,54 @@ class EnhancedColumnSemanticTokenizer(ColumnSemanticTokenizer):
             except Exception:
                 # Fall back to a very simple approach if parsing fails
                 return [text[:1000]] if text else []
+        
+        elif self.curation_strategy == 'statistical_causal_relationships':
+            # Try to extract a dictionary with causal relationships
+            try:
+                # Clean the text to prepare for extraction
+                clean_text = text.replace('```python', '').replace('```', '')
+                
+                # Find the dictionary portion of the text
+                start_idx = clean_text.find("{")
+                end_idx = clean_text.rfind("}") + 1
+                
+                if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                    dict_str = clean_text[start_idx:end_idx]
+                    # Parse the JSON-like structure
+                    causal_dict = ast.literal_eval(dict_str)
+                    
+                    # Store the raw causal relationships if column_name is provided
+                    if column_name is not None:
+                        self.statistical_causal_relationships[column_name] = causal_dict
+                        # Save to file
+                        self._save_statistical_causal_data()
+                    
+                    # Extract all causal terms and flatten them for tokenization
+                    all_terms = []
+                    
+                    # Add the column name and value range terms
+                    all_terms.append(column_name)
+                    all_terms.extend(causal_dict.keys())
+                    
+                    # Add class names and causal explanations
+                    for value_range, class_info_list in causal_dict.items():
+                        for class_info in class_info_list:
+                            if isinstance(class_info, dict):
+                                if 'class' in class_info:
+                                    all_terms.append(class_info['class'])
+                                if 'causal_explanation' in class_info:
+                                    # Split explanation into phrases
+                                    explanation = class_info['causal_explanation']
+                                    phrases = re.split(r'(?<=[.!?])\s+|(?<=,)\s+', explanation)
+                                    all_terms.extend(phrases)
+                    
+                    return all_terms
+            except Exception as e:
+                # Fall back to a simpler approach with warning
+                print(f"Error parsing statistical causal relationships: {e}")
+                if column_name:
+                    return [column_name, "causal relationship", "statistical feature", "value range", "target class"]
+                return ["causal relationship", "statistical feature", "value range", "target class"]
             
         elif self.curation_strategy == 'conceptual_clusters':
             # Try to extract a list of dictionaries with clusters
@@ -318,6 +412,116 @@ class EnhancedColumnSemanticTokenizer(ColumnSemanticTokenizer):
                 # We've already saved it to the file and merged with existing data
                 self.structured_data = {}
     
+    def _save_statistical_causal_data(self):
+        """
+        Save the statistical causal relationships to a JSON file.
+        Only saves if stat_causal_path is set.
+        """
+        if self.stat_causal_path and self.statistical_causal_relationships:
+            # Create directory if it doesn't exist
+            os.makedirs(os.path.dirname(os.path.abspath(self.stat_causal_path)), exist_ok=True)
+            
+            # Check if the file already exists
+            existing_data = {}
+            if os.path.exists(self.stat_causal_path):
+                try:
+                    with open(self.stat_causal_path, 'r') as f:
+                        existing_data = json.load(f)
+                except Exception:
+                    # If loading fails, we'll start with an empty dict
+                    pass
+            
+            # Merge existing data with new data (update will overwrite duplicates)
+            existing_data.update(self.statistical_causal_relationships)
+            
+            # Save the merged data to a JSON file
+            with open(self.stat_causal_path, 'w') as f:
+                json.dump(existing_data, f, indent=2)
+                
+            # Only clear if we're in sequential mode
+            if not hasattr(self, 'keep_structured_data') or not self.keep_structured_data:
+                # Clear the dictionary to prevent memory build-up
+                self.statistical_causal_relationships = {}
+    
+    def generate_statistical_causal_relationships(self, column_name: str, feature_stats: Dict[int, Dict[str, Any]] = None) -> Dict:
+        """
+        Generate causal relationships between statistical feature values and target classes
+        using LLM prompting.
+        
+        Parameters:
+        -----------
+        column_name : str
+            The name of the column to generate causal relationships for
+        feature_stats : Dict, optional
+            Statistics for numeric features. If None, will use random stats.
+            
+        Returns:
+        --------
+        Dict
+            Causal relationships between value ranges and target classes
+        """
+        # Get value range descriptions for the column
+        value_range_descriptions = self.column_mapper.get_column_value_descriptions(column_name)
+        
+        # Join the descriptions for the prompt
+        value_ranges_text = "\n".join([f"- {desc}" for desc in value_range_descriptions])
+        
+        # Generate the prompt with the column name and value ranges
+        prompt = self.prompt_template.format(
+            column_name=column_name,
+            value_ranges=value_ranges_text
+        )
+        
+        # Generate causal relationships using the text client
+        try:
+            if self.provider == "local":
+                generated_text = self.text_client.generate(
+                    prompt,
+                    max_length=1024,
+                    temperature=0.7,
+                )
+            elif self.provider == "gemini":
+                # For Gemini, we pass parameters that will be mapped correctly by the client
+                generated_text = self.text_client.generate(
+                    prompt,
+                    temperature=0.7,
+                    max_tokens=1024,  # Will be mapped to max_output_tokens
+                )
+            else:
+                # For other providers (Together, Anthropic)
+                generated_text = self.text_client.generate(
+                    prompt,
+                    max_tokens=1024,
+                    temperature=0.7,
+                )
+            
+            # Parse the generated output
+            causal_relationships = self._parse_generated_list(generated_text, column_name=column_name)
+            
+            # Return the causal relationships if they've been processed
+            if column_name in self.statistical_causal_relationships:
+                return self.statistical_causal_relationships[column_name]
+            else:
+                # If parsing failed, return a default structure
+                default_relationships = {}
+                for i, value_range in enumerate(value_range_descriptions):
+                    default_relationships[value_range] = [
+                        {
+                            "class": f"class_{i}_1", 
+                            "causal_explanation": f"Default causal relationship for {value_range}"
+                        },
+                        {
+                            "class": f"class_{i}_2",
+                            "causal_explanation": f"Secondary causal relationship for {value_range}"
+                        }
+                    ]
+                return default_relationships
+                
+        except Exception as e:
+            print(f"Error generating causal relationships for {column_name}: {e}")
+            # Return empty dict if generation fails
+            return {}
+    
     def _generate_numeric_property_descriptors(self, column_name: str) -> List[str]:
         """
         Generate statistical property descriptors for numeric data.
@@ -398,45 +602,74 @@ class EnhancedColumnSemanticTokenizer(ColumnSemanticTokenizer):
         # Clean the column name
         column_name = column_name.replace("_", " ").replace("-", " ")
         
-        # Generate the appropriate prompt based on the curation strategy
-        prompt = self.prompt_template.format(column_name=column_name)
-        
-        # Generate text using the selected client
-        try:
-            if self.provider == "local":
-                generated_text = self.text_client.generate(
-                    prompt,
-                    max_length=1024,
-                    temperature=0.7,
-                )
-            elif self.provider == "gemini":
-                # For Gemini, we pass parameters that will be mapped correctly by the client
-                generated_text = self.text_client.generate(
-                    prompt,
-                    temperature=0.7,
-                    max_tokens=1024,  # Will be mapped to max_output_tokens
-                )
-            else:
-                # For other providers (Together, Anthropic)
-                generated_text = self.text_client.generate(
-                    prompt,
-                    max_tokens=1024,
-                    temperature=0.7,
-                )
-                
-            # Parse the generated list, passing the column name for structured data storage
-            semantic_values = self._parse_generated_list(generated_text, column_name=column_name)
+        # Handle statistical causal relationships differently
+        if self.curation_strategy == 'statistical_causal_relationships':
+            # Generate causal relationships for this column
+            self.generate_statistical_causal_relationships(column_name)
             
-            # If we're using the numeric_properties strategy and didn't get good results, use the fallback
-            if self.curation_strategy == 'numeric_properties' and (not semantic_values or len(semantic_values) < 20):
-                semantic_values = self._generate_numeric_property_descriptors(column_name)
+            # Get the semantic values from the causal relationships if available
+            if column_name in self.statistical_causal_relationships:
+                causal_data = self.statistical_causal_relationships[column_name]
                 
-        except Exception:
-            # If generation fails, create a fallback based on the column name without printing error
-            if self.curation_strategy == 'numeric_properties':
-                semantic_values = self._generate_numeric_property_descriptors(column_name)
+                # Extract terms from the causal relationships
+                semantic_values = [column_name]
+                
+                # Add value ranges
+                semantic_values.extend(causal_data.keys())
+                
+                # Add class names and causal explanations
+                for value_range, class_info_list in causal_data.items():
+                    for class_info in class_info_list:
+                        if isinstance(class_info, dict):
+                            if 'class' in class_info:
+                                semantic_values.append(class_info['class'])
+                            if 'causal_explanation' in class_info:
+                                # Add explanation as individual terms
+                                explanation = class_info['causal_explanation']
+                                semantic_values.append(explanation)
             else:
-                semantic_values = [column_name, "data", "value", "column", "field"]
+                # Fallback if generation failed
+                semantic_values = [column_name, "causal relationship", "statistical feature", "value range", "target class"]
+        else:
+            # Generate the appropriate prompt based on the curation strategy
+            prompt = self.prompt_template.format(column_name=column_name)
+            
+            # Generate text using the selected client
+            try:
+                if self.provider == "local":
+                    generated_text = self.text_client.generate(
+                        prompt,
+                        max_length=1024,
+                        temperature=0.7,
+                    )
+                elif self.provider == "gemini":
+                    # For Gemini, we pass parameters that will be mapped correctly by the client
+                    generated_text = self.text_client.generate(
+                        prompt,
+                        temperature=0.7,
+                        max_tokens=1024,  # Will be mapped to max_output_tokens
+                    )
+                else:
+                    # For other providers (Together, Anthropic)
+                    generated_text = self.text_client.generate(
+                        prompt,
+                        max_tokens=1024,
+                        temperature=0.7,
+                    )
+                    
+                # Parse the generated list, passing the column name for structured data storage
+                semantic_values = self._parse_generated_list(generated_text, column_name=column_name)
+                
+                # If we're using the numeric_properties strategy and didn't get good results, use the fallback
+                if self.curation_strategy == 'numeric_properties' and (not semantic_values or len(semantic_values) < 20):
+                    semantic_values = self._generate_numeric_property_descriptors(column_name)
+                    
+            except Exception:
+                # If generation fails, create a fallback based on the column name without printing error
+                if self.curation_strategy == 'numeric_properties':
+                    semantic_values = self._generate_numeric_property_descriptors(column_name)
+                else:
+                    semantic_values = [column_name, "data", "value", "column", "field"]
         
         # Continue with tokenization as in the original method
         column_name_tokens = self.clip_tokenizer(
@@ -582,6 +815,13 @@ if __name__ == "__main__":
         help="Path to save structured data (clusters/pairs/metadata descriptions) in JSON format. For conceptual_clusters, contrastive_pairs, and metadata_description strategies."
     )
     
+    parser.add_argument(
+        "--stat-causal-path",
+        type=str,
+        default="statistical_causal_relationships.json",
+        help="Path to save statistical causal relationship data in JSON format. For statistical_causal_relationships strategy."
+    )
+    
     args = parser.parse_args()
     
     # Get some example column names from Schema.org
@@ -606,7 +846,8 @@ if __name__ == "__main__":
         max_tokens=args.max_tokens,
         max_concurrent=args.max_concurrent,
         curation_strategy=args.curation_strategy,
-        clusters_save_path=args.clusters_save_path
+        clusters_save_path=args.clusters_save_path,
+        stat_causal_path=args.stat_causal_path
     )
     
     # Determine the output path
