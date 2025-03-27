@@ -396,16 +396,7 @@ def train_epoch(
                 if batch_info is not None and 'semantic_targets' in batch_info and batch_info['semantic_targets'] is not None:
                     # Store original shape for logging
                     original_shape = batch_info['semantic_targets'].shape
-                    
-                    # Verify that semantic tokens and targets are aligned before slicing
-                    if 'semantic_tokens' in batch_info and batch_info['semantic_tokens'] is not None:
-                        token_shape = batch_info['semantic_tokens'].shape
-                        target_shape = batch_info['semantic_targets'].shape
-                        
-                        # Log warning if shape mismatch before slicing
-                        if len(target_shape) > 0 and len(token_shape) > 0 and target_shape[0] != token_shape[0]:
-                            memory_logger.warning(f"Semantic token/target shape mismatch before slicing: tokens {token_shape}, targets {target_shape}")
-                    
+
                     # Slice semantic targets for evaluation
                     batch_info['semantic_targets'] = batch_info['semantic_targets'][single_eval_pos:]
                     
