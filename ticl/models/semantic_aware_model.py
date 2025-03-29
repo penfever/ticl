@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 import logging
 from ticl.utils import log_gpu_memory, log_tensor_info, memory_logger, track_tensors_memory
+from ticl.models.semantic_model_precision import optimize_clip_model
 
 class SemanticAwareClassifier(nn.Module):
     """
@@ -15,7 +16,7 @@ class SemanticAwareClassifier(nn.Module):
     3. Uses contrastive learning to align semantic features with class distributions
     """
     
-    def __init__(self, base_model, num_semantic_classes):
+    def __init__(self, base_model, num_semantic_classes, enable_mixed_precision=True):
         """
         Initialize a semantic-aware classifier that extends a base model.
         
@@ -25,6 +26,8 @@ class SemanticAwareClassifier(nn.Module):
             The base tabular model (TabPFN, MotherNet, etc.)
         num_semantic_classes : int
             Number of semantic classes to predict
+        enable_mixed_precision : bool
+            Whether to enable mixed precision for CLIP model (default: True)
         """
         super().__init__()
         
@@ -61,6 +64,27 @@ class SemanticAwareClassifier(nn.Module):
         for param in self.clip_text_model.parameters():
             param.requires_grad = False
         
+        # Set up mixed precision processing for CLIP
+        # Determine mixed precision setting from base model
+        self.enable_mixed_precision = enable_mixed_precision
+        
+        # Inherit mixed precision setting from base model if available
+        if hasattr(base_model, 'mixed_precision'):
+            self.enable_mixed_precision = base_model.mixed_precision
+        
+        # Create optimized CLIP processor with mixed precision
+        self.clip_processor = optimize_clip_model(
+            clip_model=self.clip_text_model,
+            enable_mixed_precision=self.enable_mixed_precision,
+            precision='auto'
+        )
+        
+        # Log mixed precision configuration
+        if self.enable_mixed_precision:
+            memory_logger.info(f"CLIP text model using mixed precision with dtype={self.clip_processor.dtype}")
+        else:
+            memory_logger.info("CLIP text model using full precision (mixed precision disabled)")
+        
         # Get transformer dimensions
         self.transformer_dim = self.clip_text_model.config.hidden_size  # Usually 512 for base model
         
@@ -73,7 +97,7 @@ class SemanticAwareClassifier(nn.Module):
     
     def _process_semantic_tokens(self, semantic_tokens):
         """
-        Process semantic tokens using the CLIP text encoder.
+        Process semantic tokens using the CLIP text encoder with mixed precision support.
         
         Parameters:
         -----------
@@ -136,29 +160,8 @@ class SemanticAwareClassifier(nn.Module):
             'attention_mask': attention_mask
         }
         
-        # Process with CLIP text encoder
-        # Check if any parameters require gradients
-        requires_grad = any(p.requires_grad for p in self.clip_text_model.parameters())
-        
-        # Use that to determine whether to track gradients
-        with torch.set_grad_enabled(requires_grad):
-            outputs = self.clip_text_model(**token_dict)
-            
-        # Check for NaN/Inf values in embeddings
-        if torch.isnan(outputs.pooler_output).any() or torch.isinf(outputs.pooler_output).any():
-            memory_logger.warning("NaN or Inf detected in CLIP embeddings")
-            # Attempt to sanitize output for stability (will affect training quality but prevent crashes)
-            pooler_output = torch.nan_to_num(
-                outputs.pooler_output, 
-                nan=0.0, 
-                posinf=1.0, 
-                neginf=-1.0
-            )
-            # Output diagnostic info
-            norm = torch.norm(outputs.pooler_output, dim=1)
-            memory_logger.warning(f"Original embedding norms: min={norm.min().item()}, max={norm.max().item()}")
-        else:
-            pooler_output = outputs.pooler_output
+        # Process with optimized CLIP processor (handles mixed precision automatically)
+        pooler_output = self.clip_processor.process_tokens(token_dict)
         
         # Return pooled embeddings
         return pooler_output

@@ -183,11 +183,22 @@ class EnhancedColumnSemanticTokenizer(ColumnSemanticTokenizer):
         self.curation_strategy = kwargs.pop('curation_strategy', 'standard')
         self.prompt_template = PROMPT_TEMPLATES.get(self.curation_strategy, PROMPT_TEMPLATES['standard'])
         
-        # Dictionary to store raw structured data for special curation strategies
+        # Dictionary to store raw structured data for all curation strategies
         self.structured_data = {}
+        
+        # Dictionary to store tokenized data
+        self.token_data = {}
         
         # Path to save conceptual clusters data
         self.clusters_save_path = kwargs.pop('clusters_save_path', None)
+        
+        # Create a path for token data
+        if self.clusters_save_path:
+            self.tokens_save_path = self.clusters_save_path.replace('.json', '_tokens.json')
+            if self.tokens_save_path == self.clusters_save_path:  # If no .json extension was found
+                self.tokens_save_path = self.clusters_save_path + "_tokens.json"
+        else:
+            self.tokens_save_path = None
         
         # Call the parent constructor with the remaining arguments
         super().__init__(*args, **kwargs)
@@ -325,6 +336,7 @@ class EnhancedColumnSemanticTokenizer(ColumnSemanticTokenizer):
         """
         Save the structured data to a JSON file.
         Only saves if clusters_save_path is set.
+        Also saves tokenized data to a separate JSON file if tokens_save_path is set.
         """
         if self.clusters_save_path and self.structured_data:
             # Create directory if it doesn't exist
@@ -346,13 +358,37 @@ class EnhancedColumnSemanticTokenizer(ColumnSemanticTokenizer):
             # Save the merged data to a JSON file
             with open(self.clusters_save_path, 'w') as f:
                 json.dump(existing_data, f, indent=2)
+            
+            # Also save token data if we have a separate path for it
+            if hasattr(self, 'tokens_save_path') and self.tokens_save_path and hasattr(self, 'token_data'):
+                # Create directory if it doesn't exist
+                os.makedirs(os.path.dirname(os.path.abspath(self.tokens_save_path)), exist_ok=True)
                 
-            # Only clear the dictionary if we're in sequential mode
+                # Check if the tokens file already exists
+                existing_token_data = {}
+                if os.path.exists(self.tokens_save_path):
+                    try:
+                        with open(self.tokens_save_path, 'r') as f:
+                            existing_token_data = json.load(f)
+                    except Exception:
+                        # If loading fails, we'll start with an empty dict
+                        pass
+                
+                # Merge existing token data with new token data
+                existing_token_data.update(self.token_data)
+                
+                # Save the merged token data to a JSON file
+                with open(self.tokens_save_path, 'w') as f:
+                    json.dump(existing_token_data, f, indent=2)
+                
+            # Only clear the dictionaries if we're in sequential mode
             # In parallel mode, we need to keep the data for batch processing
             if not hasattr(self, 'keep_structured_data') or not self.keep_structured_data:
-                # Clear the structured_data dictionary to prevent memory build-up
-                # We've already saved it to the file and merged with existing data
+                # Clear the dictionaries to prevent memory build-up
+                # We've already saved them to files and merged with existing data
                 self.structured_data = {}
+                if hasattr(self, 'token_data'):
+                    self.token_data = {}
     
     def _generate_numeric_property_descriptors(self, column_name: str) -> List[str]:
         """
@@ -593,6 +629,12 @@ class EnhancedColumnSemanticTokenizer(ColumnSemanticTokenizer):
                     temperature=0.7,
                 )
                 
+            # Store the raw LLM response in structured_data for all curation strategies
+            if column_name is not None:
+                self.structured_data[column_name] = generated_text
+                # Save the plaintext data to a file
+                self._save_clusters_data()
+                
             # Parse the generated list, passing the column name for structured data storage
             semantic_values = self._parse_generated_list(generated_text, column_name=column_name)
             
@@ -620,7 +662,13 @@ class EnhancedColumnSemanticTokenizer(ColumnSemanticTokenizer):
         column_name_tokens = truncate_tensor(column_name_tokens)
         
         if not isinstance(semantic_values, list):
-            return torch.cat([column_name_tokens, torch.zeros(self.max_tokens - len(column_name_tokens))])
+            result_tensor = torch.cat([column_name_tokens, torch.zeros(self.max_tokens - len(column_name_tokens))])
+            # Store token data
+            if hasattr(self, 'token_data') and column_name is not None:
+                self.token_data[column_name] = result_tensor.tolist()
+                # Save token data
+                self._save_clusters_data()
+            return result_tensor
         
         # Join the values into a string
         joined_values = ", ".join(
@@ -654,7 +702,15 @@ class EnhancedColumnSemanticTokenizer(ColumnSemanticTokenizer):
                 # Zero out tokens beyond the limit
                 tokens = tokens * keep_mask
         
-        return torch.cat([column_name_tokens, tokens])
+        result_tensor = torch.cat([column_name_tokens, tokens])
+        
+        # Store token data for all curation strategies
+        if hasattr(self, 'token_data') and column_name is not None:
+            self.token_data[column_name] = result_tensor.tolist()
+            # Save token data
+            self._save_clusters_data()
+            
+        return result_tensor
 
 
 # Example usage
@@ -756,11 +812,18 @@ if __name__ == "__main__":
     # Get some example column names from Schema.org
     column_names = SCHEMA_TYPES
     
-    # For strategies that produce structured data, use strategy-specific filename if default is used
-    if args.curation_strategy in ['conceptual_clusters', 'contrastive_pairs', 'metadata_description'] and args.clusters_save_path == "structured_data.json":
+    # Create strategy-specific filenames for all curation strategies
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    
+    # For all strategies, always generate a descriptive filename if using the default
+    if args.clusters_save_path == "structured_data.json":
         # Create a more descriptive filename
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         args.clusters_save_path = os.path.join(os.getcwd(), f"{args.curation_strategy}_data_{timestamp}.json")
+        
+    # Also create a separate file for token data to ensure we don't overwrite plaintext data
+    tokens_save_path = args.clusters_save_path.replace('.json', '_tokens.json')
+    if tokens_save_path == args.clusters_save_path:  # If no .json extension was found
+        tokens_save_path = args.clusters_save_path + "_tokens.json"
     
     # Set the log file based on curation strategy if not provided
     if args.log_file is None:
@@ -777,6 +840,9 @@ if __name__ == "__main__":
         curation_strategy=args.curation_strategy,
         clusters_save_path=args.clusters_save_path
     )
+    
+    # Set the tokens_save_path
+    tokenizer.tokens_save_path = tokens_save_path
     
     # Determine the output path
     if args.output_file:
@@ -893,6 +959,9 @@ if __name__ == "__main__":
                             tokenizer.structured_data[col_name] = {"error": response_text}
                             col_tokens = torch.zeros(max_tensor_size, dtype=torch.long)
                         else:
+                            # Store the raw LLM response in structured_data for all curation strategies
+                            tokenizer.structured_data[col_name] = response_text
+                            
                             # Parse the generated list with the column name for structured data storage
                             semantic_values = tokenizer._parse_generated_list(response_text, column_name=col_name)
                             
@@ -944,6 +1013,10 @@ if __name__ == "__main__":
                             
                             # Save in the completion log
                             completed_columns[col_name] = col_tokens.tolist()
+                            
+                            # Also store in token_data for saving to the tokens JSON file
+                            if hasattr(tokenizer, 'token_data'):
+                                tokenizer.token_data[col_name] = col_tokens.tolist()
                         
                         results[col_name] = col_tokens
                         
